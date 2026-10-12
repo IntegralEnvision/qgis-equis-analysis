@@ -1,0 +1,225 @@
+[general]
+name=EQuIS Chemical Explorer
+qgisMinimumVersion=3.34
+qgisMaximumVersion=4.99
+description=Map analytical chemistry from EQuIS: pick a facility, a report, and a chemical, then click points for time series.
+about=Connect to an EQuIS Enterprise site with an API key and pick a facility; its location points are added to the map. Choose an analytical report (ARII reports are preselected) and a chemical, then map the most recent or maximum result per location. Clicking a point plots that chemical's time series at that location.
+version=3.31.0
+author=Integral Consulting Inc.
+email=jcollord@integral-corp.com
+
+homepage=https://github.com/integralenvision/qgis-equis-analysis
+tracker=https://github.com/integralenvision/qgis-equis-analysis/issues
+repository=https://github.com/integralenvision/qgis-equis-analysis
+
+tags=equis,earthsoft,environmental,rest,api,featureserver,groundwater
+category=Web
+icon=icon.svg
+experimental=False
+deprecated=False
+hasProcessingProvider=no
+
+changelog=3.12.4 - Changing the aggregate no longer greys out the map button.
+    The aggregate combo was wired straight to the routine that decides which
+    buttons are usable, and Qt passes the newly chosen index to it - which
+    that routine read as its 'busy' flag. Picking anything other than the
+    first entry therefore meant 'busy', and the map button went grey.
+    Changing the aggregate now also says the mapped layer is out of date,
+    which is what one would want from it in the first place.
+  3.12.3 - Really, truly: the chemical list survives a fetch.
+    A leftover step ran right after the list was rebuilt and refilled it from
+    the fetched rows, discarding the merge one line later. So the list still
+    collapsed to the chemical just mapped, whatever the code upstream did.
+    That step now only reports the matrices the fetched rows contain, which
+    is the one part of it still true. Map Arsenic and Iron and Zinc stay
+    listed, ready to map as their own layers.
+  3.12.2 - The chemical list really does keep everything now.
+    3.12.1 kept the full list only when it had been read at facility time.
+    That read is skipped whenever there is nothing to do - a facility
+    revisited, an existing report picked, or working offline - and in those
+    cases the list still collapsed to whatever was last fetched, leaving no
+    way to add a second chemical without starting over.
+    The list is now re-read whenever it is missing, and a fetch adds to it
+    rather than replacing it, so within a facility it only ever grows. Map
+    one chemical, then come back and map another matrix or fraction of a
+    different one without refetching anything you already have.
+  3.12.1 - A narrow fetch no longer narrows the chemical list.
+    Fetching one chemical rebuilt the list from the rows that came back, so
+    it collapsed to just that chemical - and since the fetch is filtered by
+    that same list, there was no way to ask for a different one without
+    starting the facility over.
+    The list is what the facility holds, read once from EQuIS when the
+    facility is picked. A fetch now only annotates it with result counts,
+    so everything stays on offer. A report the plugin did not filter - a
+    saved one, or an agent's stored output - still defines the list from its
+    own rows, since those are all there are.
+  3.12.0 - Mapping fetches its own data.
+    Now that choosing chemicals and mapping them live in one step, pressing
+    'Fetch data' first was a chore with no purpose: the map button knows what
+    it needs. Select chemicals and press 'Map chemicals' - it fetches when it
+    has to, and maps as soon as the rows arrive. The rows are still cached,
+    so mapping the same selection again is instant, and changing a filter is
+    correctly treated as a different request rather than a re-read.
+    'Fetch data' remains for fetching without mapping, and the refresh button
+    still re-runs a report against EQuIS.
+  3.11.1 - No empty Matrix dropdown before a report loads.
+    The panel opened showing a Matrix row with nothing in it, which reads as
+    a filter that has been emptied rather than one with nothing to offer
+    yet. It is now hidden until a report says there is more than one matrix.
+    The two states are deliberately different: greyed out means the lists
+    are still loading, hidden means there is no choice to make. Selecting
+    'All matrices' never disables the control - it just applies no filter.
+  3.11.0 - One chemical list, from the report straight to the map.
+    The chemicals a report holds and the chemicals that get mapped are the
+    same list, so there is now one. Step 4 'Data selection' carries the
+    chemical multi-select, the matrix and fraction filters, the aggregate
+    (most recent or maximum), non-detect handling, where the layer is stored
+    and the 'Add N layers to map' button. Select what you want and map it.
+    Step 5 is now 'Symbology' and holds only how those layers are drawn -
+    graduated circles or time-series sparklines, marker sizing, and rolling
+    between chemicals.
+    Entering the loading state also clears whatever was selected before:
+    keeping it would have filtered the next fetch by chemicals belonging to
+    the previous report, which the user could no longer see.
+  3.10.1 - One chemical picker, and it says when it is loading.
+    The chemical list took a few seconds to arrive from EQuIS and gave no
+    sign of it - an empty box reads as a picker with nothing in it, not as
+    one that is still filling. It now says so inside the list itself, where
+    someone waiting is actually looking, and the filter and fraction
+    controls stay disabled until real values land.
+    3.10.0 renamed step 5 but left its chemical multi-select in place, so
+    there were still visibly two. Step 5's picker now hides when it is not
+    offering a choice: fetch one chemical and it names what is being mapped
+    instead of listing it again. The filter box appears only once the list
+    is long enough to be worth searching.
+  3.10.0 - Fraction no longer empties a sediment map, and the steps say what they do.
+    Fraction defaulted to dissolved, but fraction depends on the matrix:
+    surface water carries dissolved and total while sediment carries only N,
+    so choosing sediment returned ZERO rows with no explanation. It now
+    defaults to 'Any'. The mixing that default guarded against is instead
+    detected in the data once fetched - where it can actually be observed -
+    and reported, since the parameter service reports the same seven codes
+    whatever matrix is asked for and cannot be used to narrow the choice.
+    Steps 4 and 5 both offered a chemical multi-select, which read as one
+    control duplicated. They do different jobs: step 4 chooses what to FETCH
+    from EQuIS, step 5 chooses which of the fetched chemicals to MAP. Step 5
+    is now 'Map a chemical' and says so.
+    The headline said 'No report loaded - pick one and press Run report' even
+    with your own report prepared and named above it. It now says what is
+    actually needed, and the button reads 'Fetch data' on that path rather
+    than naming a report you never picked.
+  3.9.2 - The first fetch is filtered too.
+    Picking a facility now prepares your report straight away and fills the
+    chemical, matrix and fraction lists from it - about 8 seconds, and it
+    runs no report. Before this the lists were empty until a fetch had
+    happened, so the first fetch of a facility had to run unfiltered, which
+    on a large one is exactly the request that times out.
+    Only a facility-scoped report can answer those lists: the base reports
+    carry no facility and return nothing at all, so there was nothing to read
+    them from until your own report existed.
+    Measured on a facility whose unfiltered report fails at the 230 s limit:
+    8.5 s to a usable panel, then a first fetch of one chemical returning
+    11,060 rows in 7.3 s, with no row limit needed.
+  3.9.1 - Your own report is the way in, not a list of 879.
+    3.9.0 still opened with a report selector, so the first thing asked was
+    which of the facility's saved reports to use - and only then did the
+    query quietly redirect to your own. Step 3 is now 'Data source' and uses
+    your own report by default, naming it so you can see what will be built.
+    Running one of the facility's existing reports is still available, folded
+    behind 'Use an existing report instead' for a report someone has already
+    tuned or one an agent has stored output for.
+  3.9.0 - Query EQuIS live, filtered before it runs.
+    A large facility's report cannot be generated inside the time EQuIS
+    allows, so the plugin could only read whatever an information agent had
+    already stored. A new 'Data selection' step now narrows the query before
+    it runs: pick chemicals, matrix, fraction, sample types and a date range,
+    and those filters are saved onto your own EQuIS report so the server
+    returns only those rows. Two analytes of one facility came back in 13
+    seconds where the unfiltered report times out entirely.
+    The report is created for you on first use, one per user per facility,
+    and filed under the facility's group. It is reused from then on.
+    Fraction is now a choice and defaults to dissolved. Left mixed, dissolved
+    and total results for the same sample interleave and can differ by more
+    than 20x, so a maximum or an average over both was meaningless. The panel
+    says what the current selection excludes rather than leaving it to be
+    discovered as a missing row count. Equipment blanks and field duplicates
+    are excluded by default for the same reason - they were half the rows in
+    one report, and blanks are near-zero by construction.
+    Stored agent output is still available and unchanged; because it is
+    frozen from when the agent ran, the same filters apply to it after the
+    data arrives rather than before.
+  3.8.0 - Results can be filtered to one sample matrix.
+    A report mixes matrices - groundwater, soil, air - and every aggregate
+    crossed them silently. 'Maximum' for a chemical could report a soil result
+    in mg/kg and map it beside groundwater values in ug/L, and a time series
+    for a well sampled for both plotted them as one implausibly jagged line.
+    A matrix dropdown now scopes the chemical list, the mapped aggregate, the
+    sparklines and the time series plot. It appears only when the report
+    actually holds more than one matrix, and defaults to all of them, so
+    single-matrix reports look and behave exactly as before.
+    Matrix is part of a layer's identity, so groundwater and soil views of one
+    chemical sit on the map together instead of replacing each other, and each
+    gets its own GeoPackage table - unlike symbology, a different matrix is
+    different rows rather than another drawing of the same ones.
+  3.7.0 - Layers stop destroying each other.
+    Adding a layer removed every layer the panel had added, so mapping a
+    second chemical - or the same one with different symbology - silently
+    destroyed the first. It now replaces only the same view: same chemical,
+    aggregation and symbology. The same chemical as circles and as sparklines
+    can sit on the map together, sharing one GeoPackage table rather than
+    storing the rows twice. Layers are collected in a QGIS layer group, and
+    'Remove EQuIS layers' clears them.
+    The sparkline checkbox now chooses how the next layer is drawn rather than
+    restyling what is already mapped, which would have converted one of those
+    views out from under you.
+  3.6.0 - Sparklines are a mode, and markers scale with zoom.
+    'Sparklines on map' was a button that restyled an existing layer, so it
+    was greyed out until one existed - unpressable exactly when you wanted it,
+    while sitting beside 'Add layer to map' as though it were an alternative.
+    It is now a checkbox that applies to layers as they are added and restyles
+    the ones already mapped, in both directions. 'Graduated symbols' is gone,
+    since unchecking the box does that.
+    Markers are about 20% larger, and are now sized on the ground rather than
+    in fixed millimetres, so zooming out shrinks them instead of leaving an
+    unreadable mat of overlapping markers.
+  3.5.1 - Report lookups are indexed.
+    Every aggregate and time series scanned the whole report, so drawing
+    sparklines for 300 locations on a 460,000-row report meant 300 full scans
+    and took about 45 seconds - which made rolling sparklines unusable on a
+    real report. Row positions are now indexed by chemical and by
+    chemical+location on first use: the same work takes 0.007 s.
+  3.5.0 - One layer per selected chemical.
+    Selecting several chemicals and pressing 'Add layer to map' mapped only
+    the last-clicked one and discarded the rest without saying so. It now adds
+    a layer per selected chemical, and the button counts them. The chemical you
+    clicked last is left as the active layer, which the time series tool and
+    the sparkline buttons act on. Past eight layers it asks first.
+    The sparkline and roll controls moved up beside the map button, since all
+    three act on the chemical selection; the time series tool stays separate
+    because it acts on the active layer instead.
+  3.4.1 - Sparkline markers have visibly rounded corners.
+    The frame always carried a corner radius, but it was small enough that it
+    rounded off less than a pixel once QGIS scaled the marker down, so the
+    marker read as a plain rectangle on the map.
+  3.4.0 - Sparkline markers can roll between chemicals.
+    Ctrl-click several chemicals and press 'Roll sparklines' to cycle the map
+    markers through them on a timer. Each marker is captioned with the
+    chemical it is showing, since a trend with no analyte named is worse than
+    no trend at all. Animated SVG is not used - Qt has no SVG animation, and
+    silently renders it frozen - so each chemical gets its own marker column
+    and the renderer is pointed at a different one per tick, which writes no
+    data and never dirties a GeoPackage layer. The plugin warns when there
+    are too many markers to redraw within the interval.
+  3.3.0 - Works offline, and layers now survive a saved project.
+    Facilities, locations and reports are cached on disk under the QGIS
+    profile, so a report that takes minutes to run reloads in under a second
+    and can be reopened with no connection at all. Reports load from the cache
+    by default, with a refresh button to re-run them against EQuIS.
+    A "Work offline" button browses cached data without an API key, and a
+    failed connection now falls back to the cache instead of dead-ending.
+    Cached data is marked in the panel, in layer names, and per report.
+    Result layers are written to a GeoPackage beside the project by default,
+    so reopening a saved project brings the data back; memory layers remain
+    available for throwaway work. Sparkline markers are embedded in the
+    features rather than written to temp files, so they survive reopening too.
+  3.2.0 - Sparkline markers labelled with SYS_LOC_CODE.

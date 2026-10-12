@@ -1,0 +1,14 @@
+# The committed web bundle is a BUILD ARTIFACT whose sha256 is recorded in
+# equis_loader/web/BUILD.json and checked by tools/test_web_bundle.py. Git's
+# CRLF conversion rewrites it on checkout - a fresh clone on Windows produced
+# an app.js of 597,157 bytes where 597,094 were built - so the hashes stopped
+# describing the files and `npm run check` would report drift that is not
+# there. Byte-for-byte, always.
+equis_loader/web/** -text
+
+# The sources it is built from, for the same reason: esbuild's output depends
+# on its input, so a CRLF'd source would rebuild to a different hash on
+# Windows than on CI.
+web/src/** text eol=lf
+web/*.mjs text eol=lf
+web/*.json text eol=lf

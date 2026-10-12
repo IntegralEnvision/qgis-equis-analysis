@@ -1,0 +1,441 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>EQuIS overlay</title>
+<!--
+  Stage 1 of the linked-views proof of concept. Hand-written SVG, no
+  dependencies, no build step - see the MOSAIC note in overlay.py for why
+  this stops short of vgplot.
+
+  PAGE CONTRACT. Everything the host may rely on, kept small on purpose so
+  that a vgplot implementation can satisfy the same contract later:
+
+    in   bridge.dataset(json)    [{id, name, chemical, unit,
+                                   points:[{t, v, detected}]}]
+    in   bridge.positions(json)  [{id, x, y, visible}]  canvas pixels
+    in   window.setInteractive(bool)
+    out  bridge.ready()          once state is built AND signals connected
+    out  bridge.brushed(json)    {from, to, count} or "" when cleared
+    out  bridge.log(string)
+
+  The host emits nothing before ready(). Constructing a QWebChannel costs an
+  async round-trip, so a signal sent on loadFinished arrives before anything
+  has connected to it and is lost.
+-->
+<style>
+  /* Transparent all the way down. Any opaque background here defeats
+     WA_TranslucentBackground on the Qt side and paints over the map. */
+  html, body {
+    margin: 0; padding: 0; width: 100%; height: 100%;
+    background: transparent; overflow: hidden;
+    font: 11px/1.3 system-ui, "Segoe UI", sans-serif;
+    color: #1a1a1a;
+  }
+  /* ONE gate, and it is Qt's. WA_TransparentForMouseEvents on the view's
+     focusProxy decides whether this page sees the mouse at all; if it does
+     see an event, the event was meant for it. An additional CSS gate here
+     was a second authority over the same mouse, and the two desynced: Qt
+     stopped the map from panning while CSS still ignored every click, so
+     the overlay swallowed the mouse and did nothing with it.
+     The class below is now presentation only - cursor and HUD wording. */
+  body { pointer-events: auto; }
+  body.interactive svg.chart { cursor: crosshair; }
+
+  .card {
+    position: absolute;
+    width: 172px;
+    background: rgba(255, 255, 255, 0.84);
+    border: 1px solid rgba(0, 0, 0, 0.18);
+    border-radius: 4px;
+    box-shadow: 0 1px 4px rgba(0, 0, 0, 0.18);
+    padding: 3px 5px 2px;
+    /* Leaves the map legible underneath rather than hiding it. */
+    backdrop-filter: blur(1px);
+    will-change: transform;
+  }
+  .card h1 {
+    margin: 0 0 1px; font-size: 10px; font-weight: 600;
+    white-space: nowrap; overflow: hidden;
+    /* Site codes share a prefix and differ at the tail, so trim the FRONT -
+       the same rule the plugin's sparkline captions use. */
+    direction: rtl; text-align: left;
+  }
+  .card .sub { color: #555; font-size: 9px; margin-bottom: 1px; }
+  .card.brushing { border-color: #1b6ec2; }
+  .anchor {
+    position: absolute; width: 7px; height: 7px; margin: -4px 0 0 -4px;
+    border-radius: 50%; background: #1b6ec2;
+    border: 1.5px solid rgba(255, 255, 255, 0.9);
+  }
+  .leader { position: absolute; stroke: #1b6ec2; stroke-width: 1; opacity: 0.5; }
+  #hud {
+    position: absolute; left: 8px; top: 8px;
+    background: rgba(20, 20, 20, 0.78); color: #fff;
+    padding: 4px 8px; border-radius: 3px; font-size: 11px;
+    pointer-events: none; white-space: pre;
+  }
+</style>
+</head>
+<body>
+<div id="hud">overlay: waiting for data…</div>
+<script src="qrc:///qtwebchannel/qwebchannel.js"></script>
+<script>
+"use strict";
+
+var BLUE = "#1b6ec2";
+var W = 162, H = 46, PAD = 3;          // chart geometry inside a card
+
+// Everything the host may need to ask about input, since a brush that does
+// nothing is indistinguishable from a brush that never received a click.
+var diag = {
+  pointerdowns: 0, pointermoves: 0, captured: null,
+  lastTarget: null, lastError: null, brushes: 0
+};
+
+var state = {
+  series: [],                          // as delivered
+  byId: {},                            // id -> {data, el, svg}
+  positions: {},                       // id -> {x, y, visible}
+  brush: null,                         // {from, to} as epoch ms
+  bridge: null,
+  tMin: 0, tMax: 1
+};
+
+function hud(text) {
+  document.getElementById("hud").textContent = text;
+}
+
+// ---------------------------------------------------------------- drawing
+
+function svgEl(name, attrs) {
+  var node = document.createElementNS("http://www.w3.org/2000/svg", name);
+  for (var key in attrs) node.setAttribute(key, attrs[key]);
+  return node;
+}
+
+function buildCard(item) {
+  var card = document.createElement("div");
+  card.className = "card";
+  card.style.display = "none";
+
+  var title = document.createElement("h1");
+  // direction:rtl trims the front; the code still reads left to right.
+  title.textContent = item.name;
+  card.appendChild(title);
+
+  var sub = document.createElement("div");
+  sub.className = "sub";
+  sub.textContent = item.chemical + (item.unit ? " (" + item.unit + ")" : "");
+  card.appendChild(sub);
+
+  var svg = svgEl("svg", {width: W, height: H});
+  svg.setAttribute("class", "chart");
+  // Without touch-action the browser may claim a drag as a pan gesture and
+  // withhold pointermove. Without a painted background, blank areas of an
+  // SVG are not hit-testable at all - so a drag that starts between two
+  // markers would land on nothing.
+  svg.style.touchAction = "none";
+  svg.appendChild(svgEl("rect", {
+    x: 0, y: 0, width: W, height: H, fill: "#fff", "fill-opacity": 0.001
+  }));
+  card.appendChild(svg);
+
+  var foot = document.createElement("div");
+  foot.className = "sub";
+  card.appendChild(foot);
+
+  document.body.appendChild(card);
+
+  var anchor = document.createElement("div");
+  anchor.className = "anchor";
+  anchor.style.display = "none";
+  document.body.appendChild(anchor);
+
+  return {data: item, el: card, svg: svg, foot: foot, anchor: anchor};
+}
+
+function drawSeries(entry) {
+  var item = entry.data, svg = entry.svg;
+  while (svg.firstChild) svg.removeChild(svg.firstChild);
+  // Re-laid every redraw: this is what makes the whole chart box clickable.
+  svg.appendChild(svgEl("rect", {
+    x: 0, y: 0, width: W, height: H, fill: "#fff", "fill-opacity": 0.001
+  }));
+
+  var pts = item.points;
+  if (!pts.length) return;
+
+  // Zero-based value axis, so a clean location cannot be made to look
+  // contaminated by a floating scale. Shared time axis across every card, so
+  // the small charts are comparable - which is the point of putting them on
+  // a map together.
+  var vMax = 0;
+  for (var i = 0; i < pts.length; i++) vMax = Math.max(vMax, pts[i].v || 0);
+  if (vMax <= 0) vMax = 1;
+
+  var span = (state.tMax - state.tMin) || 1;
+  function sx(t) { return PAD + (t - state.tMin) / span * (W - 2 * PAD); }
+  function sy(v) { return H - PAD - (v / vMax) * (H - 2 * PAD); }
+
+  // Brushed window drawn UNDER the data, so it reads as a backdrop.
+  if (state.brush) {
+    var x0 = sx(Math.max(state.brush.from, state.tMin));
+    var x1 = sx(Math.min(state.brush.to, state.tMax));
+    svg.appendChild(svgEl("rect", {
+      x: Math.min(x0, x1), y: 0, width: Math.abs(x1 - x0), height: H,
+      fill: BLUE, "fill-opacity": 0.12
+    }));
+  }
+
+  var d = "";
+  for (var j = 0; j < pts.length; j++) {
+    d += (j ? "L" : "M") + sx(pts[j].ms).toFixed(1) + " " + sy(pts[j].v).toFixed(1);
+  }
+  svg.appendChild(svgEl("path", {
+    d: d, fill: "none", stroke: BLUE, "stroke-width": 1.1, "stroke-opacity": 0.55
+  }));
+
+  // Dim, do not remove: everything stays drawn so the whole series is always
+  // in view, and only opacity distinguishes what the brush selected.
+  var inCount = 0;
+  for (var k = 0; k < pts.length; k++) {
+    var p = pts[k];
+    var inBrush = !state.brush ||
+      (p.ms >= state.brush.from && p.ms <= state.brush.to);
+    if (inBrush) inCount++;
+    var opacity = state.brush ? (inBrush ? 1 : 0.18) : 1;
+    // Detections solid, non-detects hollow - the same convention as the dock
+    // plot and the map symbology, because a point is a non-detect in all
+    // three or the plugin is contradicting itself on screen.
+    svg.appendChild(svgEl("circle", {
+      cx: sx(p.ms).toFixed(1), cy: sy(p.v).toFixed(1), r: 2.1,
+      fill: p.detected ? BLUE : "none",
+      stroke: BLUE, "stroke-width": 1, opacity: opacity
+    }));
+  }
+
+  entry.foot.textContent = state.brush
+    ? inCount + " of " + pts.length + " in range"
+    : pts.length + " results";
+}
+
+function redrawAll() {
+  for (var id in state.byId) drawSeries(state.byId[id]);
+}
+
+// ------------------------------------------------------------ positioning
+
+function placeAll() {
+  for (var id in state.byId) {
+    var entry = state.byId[id];
+    var pos = state.positions[id];
+    if (!pos || !pos.visible) {
+      entry.el.style.display = "none";
+      entry.anchor.style.display = "none";
+      continue;
+    }
+    entry.el.style.display = "block";
+    entry.anchor.style.display = "block";
+    entry.anchor.style.left = pos.x + "px";
+    entry.anchor.style.top = pos.y + "px";
+    // Offset up and right of the point, so the card never covers the
+    // location it belongs to. transform rather than left/top: it stays on
+    // the compositor and does not force a layout on every pan.
+    entry.el.style.transform =
+      "translate(" + (pos.x + 10) + "px," + (pos.y - H - 34) + "px)";
+  }
+}
+
+// ----------------------------------------------------------------- brush
+
+function installBrush(entry) {
+  var svg = entry.svg;
+  var dragging = false, startX = 0;
+
+  function toTime(clientX) {
+    var box = svg.getBoundingClientRect();
+    var frac = (clientX - box.left - PAD) / (box.width - 2 * PAD);
+    frac = Math.max(0, Math.min(1, frac));
+    return state.tMin + frac * (state.tMax - state.tMin);
+  }
+
+  svg.addEventListener("pointerdown", function (ev) {
+    diag.pointerdowns++;
+    diag.lastTarget = ev.target && ev.target.tagName;
+    dragging = true;
+    startX = ev.clientX;
+    entry.el.classList.add("brushing");
+    // Capture keeps the drag alive once the pointer leaves the small chart,
+    // which it does almost immediately. If it is refused, fall back to
+    // listening on the window rather than losing the drag silently.
+    try {
+      svg.setPointerCapture(ev.pointerId);
+      diag.captured = true;
+    } catch (err) {
+      diag.captured = false;
+      diag.lastError = String(err);
+      window.addEventListener("pointermove", onMove);
+      window.addEventListener("pointerup", onUp);
+    }
+    ev.preventDefault();
+  });
+
+  function onMove(ev) {
+    if (!dragging) return;
+    diag.pointermoves++;
+    var a = toTime(startX), b = toTime(ev.clientX);
+    // Live, on every move - not only on release. A brush you cannot see
+    // responding is a brush you cannot aim.
+    setBrush(Math.min(a, b), Math.max(a, b));
+  }
+
+  function onUp(ev) {
+    if (!dragging) return;
+    dragging = false;
+    entry.el.classList.remove("brushing");
+    window.removeEventListener("pointermove", onMove);
+    window.removeEventListener("pointerup", onUp);
+    // A click with no drag clears, which is how every other brush behaves.
+    if (Math.abs(ev.clientX - startX) < 3) setBrush(null, null);
+    publishBrush();
+  }
+
+  svg.addEventListener("pointermove", onMove);
+  svg.addEventListener("pointerup", onUp);
+  svg.addEventListener("pointercancel", onUp);
+}
+
+function setBrush(from, to) {
+  diag.brushes++;
+  state.brush = (from === null || to === null) ? null : {from: from, to: to};
+  redrawAll();
+  hudSummary();
+}
+
+function countInBrush() {
+  if (!state.brush) return null;
+  var n = 0;
+  for (var i = 0; i < state.series.length; i++) {
+    var pts = state.series[i].points;
+    for (var j = 0; j < pts.length; j++) {
+      if (pts[j].ms >= state.brush.from && pts[j].ms <= state.brush.to) n++;
+    }
+  }
+  return n;
+}
+
+function publishBrush() {
+  if (!state.bridge) return;
+  if (!state.brush) { state.bridge.brushed(""); return; }
+  state.bridge.brushed(JSON.stringify({
+    from: new Date(state.brush.from).toISOString(),
+    to: new Date(state.brush.to).toISOString(),
+    count: countInBrush()
+  }));
+}
+
+function hudSummary() {
+  var mode = document.body.classList.contains("interactive")
+    ? "charts have the mouse" : "map has the mouse";
+  if (!state.brush) {
+    hud(state.series.length + " series · " + mode
+        + "\ndrag across a chart to brush"
+        + "\nclicks seen: " + diag.pointerdowns
+        + "  moves: " + diag.pointermoves);
+    return;
+  }
+  var f = new Date(state.brush.from).toISOString().slice(0, 10);
+  var t = new Date(state.brush.to).toISOString().slice(0, 10);
+  hud(f + " → " + t + "  ·  " + countInBrush() + " results · "
+      + mode + "\nclick a chart to clear");
+}
+
+// ------------------------------------------------------------------ host
+
+window.diagnose = function () {
+  var body = document.body;
+  var firstSvg = document.querySelector("svg.chart");
+  return JSON.stringify({
+    cards: document.querySelectorAll(".card").length,
+    series: state.series.length,
+    interactiveClass: body.classList.contains("interactive"),
+    bodyPointerEvents: getComputedStyle(body).pointerEvents,
+    svgPointerEvents: firstSvg ? getComputedStyle(firstSvg).pointerEvents : null,
+    tMin: state.tMin, tMax: state.tMax,
+    brush: state.brush,
+    bridge: !!state.bridge,
+    input: diag
+  });
+};
+
+// Sets a brush from Python, bypassing the mouse entirely. This splits the
+// remaining unknown in two: if the charts dim from here, the drawing half
+// works and only input is at fault; if they do not, the fault is downstream
+// of input and the mouse was never the problem.
+window.applyBrush = function (fromMs, toMs) {
+  if (fromMs === null || toMs === null) setBrush(null, null);
+  else setBrush(fromMs, toMs);
+  publishBrush();
+  return window.diagnose();
+};
+
+window.setInteractive = function (on) {
+  document.body.classList.toggle("interactive", !!on);
+  hudSummary();
+};
+
+function onDataset(json) {
+  state.series = JSON.parse(json);
+  state.byId = {};
+  // Parse dates once, here, and keep epoch ms on the point. Doing it in the
+  // draw loop turns every repaint into thousands of Date constructions.
+  var lo = Infinity, hi = -Infinity;
+  state.series.forEach(function (item) {
+    item.points.forEach(function (p) {
+      p.ms = Date.parse(p.t);
+      if (p.ms < lo) lo = p.ms;
+      if (p.ms > hi) hi = p.ms;
+    });
+  });
+  state.tMin = isFinite(lo) ? lo : 0;
+  state.tMax = isFinite(hi) ? hi : 1;
+
+  document.querySelectorAll(".card, .anchor").forEach(function (n) {
+    n.remove();
+  });
+  state.series.forEach(function (item) {
+    var entry = buildCard(item);
+    state.byId[item.id] = entry;
+    installBrush(entry);
+  });
+  redrawAll();
+  placeAll();
+  hudSummary();
+  if (state.bridge) state.bridge.log("dataset: " + state.series.length + " series");
+}
+
+function onPositions(json) {
+  var list = JSON.parse(json);
+  state.positions = {};
+  for (var i = 0; i < list.length; i++) state.positions[list[i].id] = list[i];
+  placeAll();
+}
+
+if (typeof QWebChannel === "undefined") {
+  hud("FAIL: qwebchannel.js did not load from qrc:///.\n"
+      + "The page cannot reach Python.");
+} else {
+  new QWebChannel(qt.webChannelTransport, function (channel) {
+    var bridge = channel.objects.bridge;
+    state.bridge = bridge;
+    // Connect BEFORE announcing readiness, or the first dataset is lost.
+    bridge.dataset.connect(onDataset);
+    bridge.positions.connect(onPositions);
+    hud("overlay: connected, waiting for data…");
+    bridge.ready();
+  });
+}
+</script>
+</body>
+</html>
