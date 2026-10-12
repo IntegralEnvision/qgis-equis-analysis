@@ -1,0 +1,16 @@
+{
+  "name": "equis-web",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Build-time only. Bundles vgplot and the page into one ESM file that the plugin serves over equis://. Nothing here is needed to INSTALL or RUN the plugin - the built output is checked in.",
+  "scripts": {
+    "build": "node build.mjs",
+    "check": "node build.mjs --check",
+    "test": "node --test test/histogram.test.mjs test/scatter.test.mjs test/chooser.test.mjs test/ternary.test.mjs"
+  },
+  "devDependencies": {
+    "@uwdata/vgplot": "0.31.0",
+    "esbuild": "0.28.2"
+  }
+}

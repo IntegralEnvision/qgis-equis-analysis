@@ -1,0 +1,45 @@
+# API keys - anywhere in the tree, not just the root, since the
+# permission-check script reads a .env beside itself.
+.env
+**/.env
+dist/
+__pycache__/
+*.pyc
+*.tmp
+.codes.tmp
+
+# Browser network captures. Invaluable for working out what the Enterprise UI
+# sends, but they are tens of megabytes and carry session cookies and bearer
+# tokens in the request headers.
+*.har
+
+# Vendored native dependencies (tools/vendor_deps.py). Roughly 90 MB unpacked
+# per platform and rebuildable from PyPI in seconds, so CI builds them into
+# the release zip rather than git carrying three copies of DuckDB forever.
+equis_loader/embedded_external_libs/
+
+# The JS toolchain is BUILD TIME ONLY. node_modules is 180 MB and the built
+# bundle in equis_loader/web/ is committed instead - that is what lets an
+# install work with no npm anywhere near it.
+web/node_modules/
+web/.check-out/
+
+# Extracted slice output. The PIPELINE manifest (manifest_local.json) IS
+# tracked: it is the only record of which report and agent each slice owns,
+# and cannot be rebuilt from the parquet. The data itself is regenerated
+# nightly and large.
+data/**/*.parquet
+data/**/_staging/
+data/**/_walk_checkpoint.json
+
+# The PUBLISHED manifest is derived - `tools/publish_manifest.py` rewrites it
+# from whatever parquet is actually on disk - so tracking it would mean
+# committing a file that is wrong the moment a partition changes. It is an
+# upload artefact, not a source.
+data/**/manifest.json
+
+# Names used before the two manifests were told apart.
+data/**/published.json
+data/**/manifest_pub.json
+data/**/manifest_to_upload.json
+data/facility_a_backup_*/
