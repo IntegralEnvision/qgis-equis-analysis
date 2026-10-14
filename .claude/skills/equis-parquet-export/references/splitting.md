@@ -46,8 +46,8 @@ samples spreads 1.05x at 4 bins but 2.60x at 32.
 So: **first plan on samples, then re-bin every night on measured rows.**
 The exact walk (`nightly_slices.py --weight walk`) attributes every result
 to its cell in one pass; use it only to seed a facility that must be right
-before its first extraction, and make its filters mirror the template's
-saved parameters (`@cas_rns`, `@sample_types`) or it overstates - an
+before its first extraction, and make its filters mirror the slices'
+saved filters (`@sample_types`; `@cas_rns` is always cleared) or it overstates - an
 unfiltered walk counted 701,780 rows where the report returned 355,440.
 
 ## The probe

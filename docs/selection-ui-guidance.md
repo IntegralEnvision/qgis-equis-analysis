@@ -69,7 +69,7 @@ carries a `locations` list, but no control populates it. The Where row
 belongs at the top of step 4, above chemicals, as a location-group picker
 with individual locations (typed or picked on the map) beneath it.
 
-Verified 2026-09-05: ARII 508 carries `@location_groups` (MultiSelect,
+Verified 2026-09-05: the ARII base report (508 on this tenant) carries `@location_groups` (MultiSelect,
 caption `Location\Group(s):`, depends on `@facility_id`), and groups are
 expanded server-side so the plugin need not know their members. But of the
 16 facilities on this tenant with an ARII-based report, only **3 define any

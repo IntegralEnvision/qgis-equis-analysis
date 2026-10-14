@@ -4167,7 +4167,7 @@ class EquisDialog(QDockWidget):
         so nothing is being crossed.
 
         There is no "convert them" button, deliberately. EQuIS can do the
-        conversion at the source - report 508 takes @reporting_unit - and
+        conversion at the source - the ARII base takes @reporting_unit - and
         doing it here would mean this plugin owning a unit-conversion table
         and being wrong about it silently. Saying which units are present,
         and which filter would separate them, is the honest stop.

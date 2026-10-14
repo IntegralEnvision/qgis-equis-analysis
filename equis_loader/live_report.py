@@ -22,14 +22,42 @@ class EquisTemplateError(Exception):
 
 
 # Analytical Results II. Every filter the data selection sets lives on this
-# base report's parameter list.
-BASE_REPORT_ID = 508
+# base report's parameter list. Found by NAME, never by id: base report ids
+# are allocated per tenant (508 on the one this was built against, which is
+# exactly why no code may assume it).
 BASE_REPORT_CODE = "Analytical Results II"
+SYSTEM_OWNER = ".system"
+
+
+def _base_of(report):
+    """A listing or detail record's base id, whichever spelling it uses."""
+    value = report.get("base_report_id", report.get("baseReportId"))
+    try:
+        return abs(int(value)) if value is not None else None
+    except (TypeError, ValueError):
+        return None
+
+
+def is_base_report(report, code=BASE_REPORT_CODE):
+    """Whether `report` IS the tenant's base report for `code`.
+
+    A base report is owned by .system and is its own base (id equals
+    baseReportId). Identified by those, not by an id number.
+    """
+    return ((report.get("name") or "").strip() == code
+            and (report.get("code") or "").strip() == code
+            and (report.get("owner") or "") == SYSTEM_OWNER
+            and _base_of(report) == abs(int(report.get("id") or 0)))
 
 # What the plugin's own reports are called. The prefix is how they are
 # recognised on a later run, so it must not change casually: a new prefix
 # orphans every report the previous version made.
 NAME_PREFIX = "QGIS plugin"
+
+# EQuIS stores at most this many characters of a report name and silently
+# drops the rest. Measured 2026-10-12: no name of the tenant's 964 reports is
+# longer, and 31 stop at exactly 64, mid-word.
+NAME_LIMIT = 64
 
 REMARK = (
     "Created by the EQuIS Chemical Explorer QGIS plugin. Its filters are "
@@ -91,16 +119,26 @@ class LiveReport(object):
         is checked too where the listing reports one: a name collision with
         another user's report would otherwise have us rewriting their filters.
         """
-        wanted = self.name.lower()
+        # AS STORED: EQuIS cuts report names to NAME_LIMIT characters, so a
+        # full name never matched and a NEW report was created on every
+        # visit - 10 copies for one facility by 2026-08-31, found 2026-10-12.
+        # The cut can take the facility id off the end, so the report's own
+        # facility must match too: two facilities whose names share their
+        # first 64 characters must never trade reports.
+        wanted = self.name[:NAME_LIMIT].strip().lower()
+        found = []
         for report in self.client.list_reports(self.facility_id):
             if (report.get("name") or "").strip().lower() != wanted:
+                continue
+            if report.get("facility_id", report.get("facilityId")) != self.facility_id:
                 continue
             owner = (report.get("owner") or "").strip().lower()
             if owner and self.username and owner != self.username.lower():
                 # Same name, someone else's report. Leave it alone.
                 continue
-            return abs(report.get("id") or 0) or None
-        return None
+            found.append(abs(report.get("id") or 0))
+        # Earlier copies may exist (see above); the newest, deterministically.
+        return max(found) if found and max(found) else None
 
     def ensure(self):
         """Find this user's report or create it. Returns its id.
@@ -115,9 +153,9 @@ class LiveReport(object):
             self.report_id = found
             return found
 
-        template = self._template()
+        template, base_report_id = self._template()
         created = self.client.create_report(
-            base_report_id=BASE_REPORT_ID,
+            base_report_id=base_report_id,
             name=self.name,
             code=BASE_REPORT_CODE,
             facility_id=self.facility_id,
@@ -129,22 +167,41 @@ class LiveReport(object):
         return self.report_id
 
     def _template(self):
-        """The parameter array a new report starts from.
+        """(parameters, base report id) a new report starts from.
 
-        Cloned wholesale from an existing report on the same base. This is not
-        an optimisation: a parameter is a full descriptor - displayType,
-        dbType, caption, visibility, isRequired - and a report POSTed with
-        bare {name, value} parameters is rejected with HTTP 500. There is no
-        way to synthesise a valid array, so a template must be found.
+        The parameters are cloned wholesale from an existing report on the
+        base. This is not an optimisation: a parameter is a full descriptor -
+        displayType, dbType, caption, visibility, isRequired - and a report
+        POSTed with bare {name, value} parameters is rejected with HTTP 500.
+        There is no way to synthesise a valid array, so one is copied.
 
-        Any report on base 508 will do; a previous plugin report is preferred
-        only because its filters are already the shape we overwrite.
+        THE BASE FIRST, BY NAME, AND ONLY REPORTS ON IT. Measured on the
+        tenant 2026-10-12: three .system base reports share the code
+        "Analytical Results II" - the base itself (508 there), "...with
+        Sample Selection" (54 parameters to its 55) and "...- reportable
+        sample" - so the code does not identify a base. User reports are
+        not even listed with that code. The old search matched on code and
+        created on a hard-coded 508; it worked only because 508 is the
+        smallest of the three ids. Now: the base is the .system report
+        NAMED "Analytical Results II" that is its own base; the clone comes
+        from our own reports on it, then anyone's, then the base itself
+        (always there, so a tenant with no reports yet still works); and the
+        new report is created on that base, whatever its id.
         """
-        candidates = []
-        for report in self.client.list_reports(self.facility_id):
-            if (report.get("code") or "") != BASE_REPORT_CODE:
+        listing = self.client.list_reports(self.facility_id)
+        bases = [r for r in listing if is_base_report(r)]
+        if len(bases) != 1:
+            raise EquisTemplateError(
+                "Expected one '%s' base report owned by %s, found %d. EQuIS "
+                "rejects a report created without a base's parameter "
+                "definitions, so the live query path cannot create one."
+                % (BASE_REPORT_CODE, SYSTEM_OWNER, len(bases)))
+        base_id = abs(int(bases[0].get("id") or 0))
+
+        candidates = [(2, base_id)]
+        for report in listing:
+            if _base_of(report) != base_id or is_base_report(report):
                 continue
-            # Our own reports first, then any other report on this base.
             rank = 0 if is_plugin_report(report.get("name")) else 1
             candidates.append((rank, abs(report.get("id") or 0)))
         candidates.sort()
@@ -157,15 +214,15 @@ class LiveReport(object):
             except Exception:  # noqa: BLE001 - try the next candidate
                 continue
             params = detail.get("parameters") or []
-            if params:
-                return self._with_facility(params)
+            # The listing said this report is on the base; its detail must
+            # agree, or its descriptors may be another base's.
+            if params and _base_of(detail) == base_id:
+                return self._with_facility(params), base_id
 
         raise EquisTemplateError(
-            "Could not find an existing '%s' report to copy the parameter "
-            "definitions from. EQuIS rejects a report created without them, "
-            "so the live query path needs at least one such report to be "
-            "visible to this account." % BASE_REPORT_CODE
-        )
+            "Could not read the parameter definitions of the '%s' base report "
+            "or any report on it. EQuIS rejects a report created without them."
+            % BASE_REPORT_CODE)
 
     def _with_facility(self, parameters):
         """A parameter copy pointed at this facility."""

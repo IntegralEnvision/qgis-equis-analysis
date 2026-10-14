@@ -92,8 +92,8 @@ def make_task(client, report, cache=None, prefer_cache=False, use_eia=True):
     )
 
 
-WITH_EIA = {"id": 508, "name": "Analytical Results II", "has_eia": True}
-NO_EIA = {"id": 508, "name": "Analytical Results II", "has_eia": False}
+WITH_EIA = {"id": 4321, "name": "Analytical Results II", "has_eia": True}
+NO_EIA = {"id": 4321, "name": "Analytical Results II", "has_eia": False}
 
 
 class FakeCache(object):

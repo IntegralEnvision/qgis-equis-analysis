@@ -1,32 +1,158 @@
 # EQuIS Chemical Explorer (QGIS plugin)
 
-Maps analytical chemistry from EQuIS Enterprise in QGIS 4.x.
+Maps analytical chemistry from EQuIS Enterprise in QGIS.
 
-Built and tested against QGIS 4.0.2 (PyQt6) and the EQuIS 7.25 REST API.
+Its core is the **classic pattern**: query EQuIS live, through a report that
+is filtered before it runs, and map the analytes it returns - one layer per
+chemical, aggregated per location or one point per result, with the time
+series, sparklines and depth profiles behind each point a click away.
 
-## The workflow
+Developed and tested on QGIS 4.2.1 (Windows, Qt 6 / PyQt6) against EQuIS
+Enterprise 7.25 and 7.26.
+
+Beside it sits **experimental** work: a whole facility exported to parquet
+and read with DuckDB, and an *Analysis* tab of linked charts drawn with
+Mosaic in a web view. See [Experimental: parquet sources and the Analysis
+tab](#experimental-parquet-sources-and-the-analysis-tab).
+
+## Install
+
+Download the plugin ZIP from the
+[Releases page](https://github.com/integralenvision/qgis-equis-analysis/releases).
+In QGIS, go to *Plugins → Manage and Install Plugins → Install from ZIP*,
+choose the file, then enable **EQuIS Chemical Explorer**. The panel and its
+map tool appear on the toolbar and under *Web → EQuIS*. The plugin is not in
+the QGIS plugin repository.
+
+**Building the ZIP yourself:**
+
+```
+python tools\package.py
+```
+
+That writes `dist/equis_loader-<version>.zip`. `package.py` takes
+`--output DIR`, `--name NAME` and `--no-version`. It skips `__pycache__`,
+build artefacts and dotfiles - including any `.env` sitting in the plugin
+folder, so a packaged archive never carries an API key - and refuses to
+build if `metadata.txt`, `__init__.py` or `plugin.py` is missing.
+
+**For local development**, copy straight into the profile instead:
+
+```
+python tools\install.py
+```
+
+which writes to
+`%APPDATA%\QGIS\QGIS4\profiles\default\python\plugins\equis_loader`.
+
+## Connecting
+
+The panel needs a site URL and an EQuIS API key (a JWT). On first run it seeds
+both from a `.env` file next to the plugin or one directory above it:
+
+```
+api_key: eyJhbGciOi...
+equis_site: https://yoursite.equisonline.com
+```
+
+Credentials entered in the panel are saved to QSettings, so `.env` is only a
+convenience for the first launch. Keep `.env` out of version control.
+
+The account needs **Creator on Reports** for the live query path, which
+creates one report of its own per facility (see below). Without it the
+first fetch fails with a message saying so; running an existing report
+still works.
+
+## The classic workflow
 
 The plugin is a **dock panel** (right-hand side by default, draggable to the
-left or floating). Each step is a collapsible section that folds away as it
-completes and opens the next, and a splitter lets you give either the steps or
-the plot more room.
+left or floating). Its **Data** tab holds the steps; each is a collapsible
+section that folds away as it completes and opens the next.
 
-1. **Connect** — enter a site URL and API key.
-2. The plugin lists the facilities the key can see. Nothing is fetched yet: the
-   combo opens on a placeholder so no site is loaded merely for sorting first.
-3. **Pick a facility** — its location points go onto the map.
-4. **Pick a report** — the first whose name contains "ARII" is preselected.
-5. The plugin lists the unique chemicals (name + CAS RN) in that report.
-6. **Pick one or more chemicals, an aggregation** (most recent, maximum, or
-   every result)
-   **and a non-detect convention**, then *Add layer to map*. The location
-   points are joined to each chemical's aggregated value per location.
-   Quantified results are graduated yellow→red by concentration; non-detects
-   are drawn as hollow squares at one fixed size. Ctrl-click several chemicals and the
-   button becomes *Add N layers to map*: one layer per chemical, and the one
-   you clicked last is left active.
-7. **Click any point** with the time series tool active to plot that chemical's
-   history at that location, in the panel itself.
+1. **Connect** - a site URL and API key, or **Work offline** to browse what
+   is cached.
+2. **Facility** - pick one; its location points go onto the map.
+3. **Data source** - by default, your own report on Analytical Results II
+   (created on first use; see [Live queries](#live-queries-through-your-own-report)).
+   **Use an existing report instead** runs one of the facility's saved
+   reports as it is, or reads the output an information agent stored for it.
+4. **Pre-fetch Data - sent to EQuIS** - the chemicals, location group,
+   matrix, dates and QC samples to ask for, and optionally **Only locations
+   selected on the map**. These are saved onto your report before it runs,
+   so EQuIS returns only those rows. **Pre-fetch data** runs it.
+5. **Filter / Aggregate - applied here** - narrow what was fetched by method
+   and fraction, choose how each location is summarised and how non-detects
+   are treated, then **Map chemical** (or *Map N chemicals*).
+6. **Symbology** - graduated circles or time-series sparklines, depth
+   profiles, and rolling sparklines between chemicals.
+
+Then **click any point** with the time series tool to plot that chemical's
+history at that location, in the panel itself.
+
+### Live queries through your own report
+
+EQuIS applies a report's filters only when they are **saved on the report**:
+filter parameters passed with a run are ignored, and a large facility's
+unfiltered report cannot be generated inside the ~230 s EQuIS allows a
+request. So the plugin gives each user one report per facility, named
+`QGIS plugin - <user> - <facility> (<id>)`, and rewrites its filters before
+every fetch. One analyte, one matrix and one fraction came back as 5,000
+rows in 6.6 s from a facility whose unfiltered report fails at 230 s.
+
+- **Created once, then reused.** It is built on the tenant's *Analytical
+  Results II* base report, found by name rather than by id (base ids are
+  allocated per tenant), cloning that base's parameter definitions, and
+  filed under the facility's report group. Report ownership cannot be
+  transferred, which is why each user has their own.
+- **The pickers fill before anything runs.** Picking a facility prepares
+  the report and reads the chemical, matrix and fraction lists from EQuIS's
+  parameter service - roughly a second per list, and no report is run - so
+  the first fetch of a large facility can already be narrow.
+- **Mapping draws what was fetched; it never fetches.** If the chemicals
+  selected have moved past the rows in hand, the panel says so and points
+  at *Pre-fetch data*, rather than quietly starting a server round trip.
+- **Fetched rows are cached on disk** (see [Working offline](#working-offline)),
+  so mapping the same selection again, or reopening the project tomorrow,
+  is instant.
+
+**An existing report** is run as it was saved, and the data selection then
+filters its rows after they arrive. Where an information agent (EIA) has
+already run the report, its stored output is read instead of running the
+report again - far cheaper, and for a report that cannot generate inside
+the time limit the only way to get its data. Stored output is as old as the
+agent's last run, and the panel says so.
+
+The **row limit is off by default**, because truncating a report cuts it
+mid-way: later sample dates vanish and a chemical's time series appears to
+stop early. Turn it on under *Limit rows* if a report is too large for the
+machine; the status line says explicitly when output was truncated.
+
+### Mapping analytes
+
+Step 5 builds the layers:
+
+- **Per location** - *Most recent*, *Maximum*, or *Every result (one point
+  per sample)*; see [Every result](#every-result-unaggregated).
+- **Non-detects** - half the detection limit, the full limit, or excluded;
+  see [Non-detects](#non-detects).
+- **Store as** - a GeoPackage saved beside the project (the default) or a
+  memory layer; see [Layer storage](#layer-storage).
+
+**Map chemical** joins the location points to each chemical's value per
+location. Quantified results are graduated yellow→red by concentration;
+non-detects are drawn as hollow squares at one fixed size. Select several
+chemicals and the button becomes *Map N chemicals*: one layer per chemical,
+and the one you clicked last is left active.
+
+**Interactive: map each chemical as it is picked** turns the chemical list
+single-select: each pick is drawn at once as a temporary layer, and the
+next pick or filter change replaces it. **Keep layer** makes the one on
+screen permanent.
+
+**Export CSV** saves the report rows behind the mapped layers, after the
+matrix, fraction, method and QC filters - one row per result, with every
+column the report returned. It is what to check a mapped value against.
+**Remove EQuIS layers** clears the plugin's layers when the map gets crowded.
 
 ### The time series tool
 
@@ -44,10 +170,7 @@ layer is drawn: unchecked, graduated circles with hollow squares for
 non-detects; checked, a small
 SVG sparkline of each location's history. It deliberately does not restyle what
 is already mapped — add the other view instead and keep both (see **Two views
-of one dataset**). (It used to be a button that restyled an existing
-layer, which meant it was greyed out until one existed — unpressable exactly
-when you wanted it, while sitting beside *Add layer to map* as though it were
-an alternative.)
+of one dataset**).
 
 The **min pts** spinner (default 2) sets how many results a location needs
 before it earns a sparkline — a line through one point is not a trend — and
@@ -82,49 +205,43 @@ no error. Instead each chemical gets its own marker column and a timer changes
 which column the renderer reads. Advancing costs about a millisecond and writes
 no data, so a GeoPackage layer is never dirtied by the roll.
 
-Redrawing is now the cost that matters (preparing the markers was, until the
-report gained a row index): roughly 200 ms for 300 markers and 2.4 s
+Redrawing is the cost that matters: roughly 200 ms for 300 markers and 2.4 s
 for 3,000, so a whole facility can take longer to draw than the interval. The
 plugin measures this and warns when the roll will lag — zooming in fixes it,
 since QGIS only draws what is in the viewport, and raising **min pts** also
 thins the markers. Each embedded marker is about 1.2 KB, so three chemicals
 across 10,000 locations is roughly 37 MB in the layer; a handful of chemicals
-is practical, dozens are not.
+is practical, dozens are not. Rolling needs several chemicals, so it is off in
+interactive mode.
 
 ### One session at a time
 
-One facility and one report are active at a time. The panel keeps that session
-while hidden, so reopening shows what the map is currently showing — the active
-facility, report, and mapped chemical appear in a banner at the top — rather
-than making you re-run a report that takes minutes.
+One facility and one data source are active at a time. The panel keeps that
+session while hidden, so reopening shows what the map is currently showing
+rather than making you fetch again.
 
 Adding a layer replaces only the *same view* — the same chemical, aggregation
 and symbology. Anything else on the map stays, so adding Toluene never destroys
-your Benzene layer. Switching facility still clears the outgoing facility's
-layers, and reconnecting discards the loaded report, so it asks first.
-
-Layers go into a QGIS layer group named for the facility and report, and
-**Remove EQuIS layers** clears the lot when the map gets crowded.
+your Benzene layer. Switching facility clears the outgoing facility's layers,
+and reconnecting discards the loaded data, so it asks first. Layers go into a
+QGIS layer group named for the facility.
 
 When several chemicals are mapped at once, the last one added is the **active
 layer**: the time series tool hit-tests against it, and the sparkline buttons
 restyle it. All the layers share the same location geometry, so a click lands
 in the same place whichever is active; what the plot shows is governed by the
 chemical selected in the list. Selecting more than eight chemicals asks for
-confirmation first, since each one is a separate join over the report and its
-own table in the GeoPackage.
+confirmation first, since each one is a separate join and its own table in the
+GeoPackage.
 
-The report is fetched once and held in memory as `ReportTable.rows`, so
-choosing chemicals, switching aggregation, and clicking points are instant
-after the initial run.
-
-Row lookups go through an index built on first use, grouping row positions by
-chemical and by chemical+location. Without it every aggregate and time series
-scans the whole report, which is affordable once but not per location: drawing
-sparklines for 300 locations on a 460,000-row report meant 300 full scans and
-took about 45 seconds. The index costs a few seconds and ~35 MB once, then
-answers in microseconds — the same 300 lookups take 0.007 s. It is lazy, so a
-report that is loaded and discarded never pays for it.
+Fetched rows are held in memory, so choosing chemicals, switching aggregation,
+and clicking points are instant after the fetch. Row lookups go through an
+index built on first use, grouping row positions by chemical and by
+chemical+location: drawing sparklines for 300 locations on a 460,000-row report
+took about 45 seconds of full scans without it, and 0.007 s with it. Where
+DuckDB is available (it ships with QGIS 4.2 on Windows) the rows are also
+loaded into a DuckDB store in the background, which the experimental views
+read.
 
 ## Working offline
 
@@ -132,11 +249,10 @@ Everything pulled from EQuIS is cached on disk, under the active QGIS profile
 (`…/profiles/default/equis_cache`). A 460,000-row report keeps about 4 MB there
 and reloads in under a second, against the minutes a live run costs.
 
-**Reports load from the cache by default.** *Run report* becomes *Load cached
-report* once a copy exists, and the combo marks which reports are already
-stored (`● cached 14 Aug`). The **↻** button beside it re-runs against EQuIS
-and replaces the stored copy — cached data is never silently refreshed, and
-never silently stale either.
+**Data loads from the cache by default.** The report combo marks which reports
+are already stored (`● cached 14 Aug`), and the **↻** button beside it re-runs
+against EQuIS and replaces the stored copy — cached data is never silently
+refreshed, and never silently stale either.
 
 There are two ways into offline mode:
 
@@ -153,10 +269,13 @@ one outcome worth engineering against:
 
 | Where | What it shows |
 |---|---|
-| The banner | Turns amber, headed `⚠ Offline — showing cached data`, with each item's age |
+| The banner | Appears above the panel, amber, headed `⚠ Offline — showing cached data`, with each item's age |
 | Layer names | Suffixed `[cached]` — the only marker that survives into a saved project |
 | The message bar | A one-time warning with a **Retry connection** button |
 | The report combo | `● cached <date>` per report, before you commit to a run |
+
+The banner is shown only to warn - cached or offline data, or a report a row
+limit cut short - and stays out of the way otherwise.
 
 A report truncated by a row limit stays flagged as partial everywhere it
 appears, and an uncapped request will not be satisfied by a truncated copy —
@@ -186,7 +305,7 @@ never multiplies what is stored.
 
 ## Layer storage
 
-**Store as** in the Chemical section decides where the result layer lives.
+**Store as** in step 5 decides where the result layer lives.
 
 **GeoPackage (default)** writes it to `<project>_equis.gpkg` beside the `.qgz`,
 so the project and its data travel together — zip the folder and it opens
@@ -194,10 +313,10 @@ working on another machine. One layer per mapped chemical shares the file, and
 re-mapping a chemical overwrites its own table rather than piling up copies.
 Writing 10,636 features costs about 0.23 s and 1.4 MB.
 
-**Memory** is the old behaviour: fast, leaves nothing on disk, and discarded
-when QGIS closes. A saved project reopens with the layer *empty* — QGIS stores
-the reference but not the data — so this suits throwaway exploration rather
-than work you intend to keep.
+**Memory** is fast, leaves nothing on disk, and is discarded when QGIS closes.
+A saved project reopens with the layer *empty* — QGIS stores the reference but
+not the data — so this suits throwaway exploration rather than work you intend
+to keep.
 
 Until the project has been saved there is nowhere to put the GeoPackage, so
 layers stay in memory and the panel says so. Save the project, then add the
@@ -219,6 +338,12 @@ plugin falls back to `REPORT_RESULT_VALUE` and then the detection-limit
 columns, and marks the point as a limit value. Reading `RESULT_NUMERIC` alone
 silently loses them — at Facility B that hid 8 of 46 points in one series.
 
+**Detection comes from `DETECT_FLAG`, and from nothing else.** A source
+without that column is refused rather than guessed at: without it every
+result read as a non-detect and was halved under the 1/2-limit convention,
+with no error. A laboratory's qualifier text is its own vocabulary, not a
+substitute.
+
 The **Non-detects** dropdown picks the convention, and applies to both the map
 aggregation and the plot:
 
@@ -232,6 +357,12 @@ Changing it redraws the open plot immediately; rebuild the layer to apply it to
 the map. The plot draws detections as **solid filled circles** and non-detects
 as **open circles**, and the map follows the same convention: detections are
 graduated circles, non-detects **hollow squares**.
+
+**A non-detect is never a location's maximum** while a real detection exists
+there: it carries only the limit it fell below, which is a number about the
+laboratory's sensitivity rather than the site. A location with *only*
+non-detects still reports one, marked as at the limit - "we looked and found
+nothing" is a result.
 
 The layer is drawn with **symbol levels**: markers are painted in ascending
 order of concentration, so where locations overlap the higher result sits on
@@ -261,7 +392,7 @@ detect status within the trend.
 
 ## Every result (unaggregated)
 
-The **Aggregate** picker has a third option, *Every result (one point per
+The **Per location** picker has a third option, *Every result (one point per
 sample)*. The other two collapse a location's whole history into one number;
 this one does not collapse at all — **one map feature is one result row**, so a
 well sampled twelve times becomes twelve features.
@@ -299,7 +430,7 @@ Both are real. Neither is a duplicate, and the schema is right to hold them.
 Before the method reached the plugin they looked like duplicated rows, and a
 depth profile drew two dots at one depth with nothing to explain why.
 
-The **Method** picker (multi-select, beside Matrix) filters on it. Ticking
+The **Method** picker (multi-select, in step 5) filters on it. Ticking
 nothing keeps every method; the row hides itself when a report only has one,
 since there is then nothing to choose. Pick a single method and a profile
 shows exactly one point per depth.
@@ -408,85 +539,10 @@ The check is per chemical and per matrix, not per report — a report can mix
 fractions overall while the chemical you are mapping carries only one, and
 stopping that build would be a false alarm.
 
-The **Fraction** picker now also filters cached and agent data. It previously
-shaped only the live request, so on those paths it was ignored: the rows were
-already in hand and nothing applied the filter to them.
-
-## Install
-
-**From a ZIP** (the usual way to hand it to someone else):
-
-```
-python tools\package.py
-```
-
-That writes `dist/equis_loader-<version>.zip`. In QGIS, go to *Plugins →
-Manage and Install Plugins → Install from ZIP*, choose the file, then enable
-**EQuIS Chemical Explorer**. The panel and its map tool appear on the toolbar
-and under *Web → EQuIS*.
-
-`package.py` takes `--output DIR`, `--name NAME`, and `--no-version`. It skips
-`__pycache__`, build artefacts, and dotfiles — including any `.env` sitting in
-the plugin folder, so a packaged archive never carries an API key. It refuses
-to build if `metadata.txt`, `__init__.py`, or `plugin.py` is missing.
-
-**For local development**, copy straight into the profile instead:
-
-```
-python tools\install.py
-```
-
-which writes to
-`%APPDATA%\QGIS\QGIS4\profiles\default\python\plugins\equis_loader`.
-
-## Connecting
-
-The panel needs a site URL and an EQuIS API key (a JWT). On first run it seeds
-both from a `.env` file next to the plugin or one directory above it:
-
-```
-api_key: eyJhbGciOi...
-equis_site: https://yoursite.equisonline.com
-```
-
-Credentials entered in the panel are saved to QSettings, so `.env` is only a
-convenience for the first launch. Keep `.env` out of version control.
-
-## A whole facility as parquet
-
-A large facility's Analytical Results II cannot be generated inside the time
-EQuIS allows one report request (~230 s), so it cannot be fetched live in one
-piece. Instead it can be exported ahead of time, as Hive-partitioned parquet
-(`matrix=<code>/fraction=<code>/part-*.parquet`) with a `manifest.json`, and
-opened in the panel by choosing **Published parquet** as the source and
-giving the manifest's folder or URL. Every filter in the panel applies to it
-as to a live fetch; the rows are read with DuckDB, which QGIS 4.2 on Windows
-ships.
-
-**Opening one** needs only that path or URL. A source without `DETECT_FLAG`
-is refused: without it every result would read as a non-detect.
-
-**Producing one** is what
-[`.claude/skills/equis-parquet-export/`](.claude/skills/equis-parquet-export/SKILL.md)
-does, against a tenant you hold an API key for:
-
-1. survey the facility (rows per matrix, fraction and location);
-2. split it into slices small enough to generate, each a saved ARII report
-   with its own information agent (EIA) run nightly by EQuIS;
-3. collect each agent's stored output, converting units with EQuIS's own
-   factors so a column never mixes them;
-4. repack by matrix and fraction, and publish the manifest.
-
-It is written as a [Claude Code skill](https://docs.claude.com/en/docs/claude-code/skills)
-(`SKILL.md` is the procedure, `references/` the measured failure modes), and
-its scripts run on their own with Python and pyarrow:
-
-```
-S=.claude/skills/equis-parquet-export/scripts
-python $S/survey_facility.py --help
-python $S/test_slice_pipeline.py     # the pipeline's bookkeeping
-python $S/test_unit_convert.py       # unit conversion by EQuIS's factors
-```
+Matrices are combined only when their units agree: a soil maximum in mg/kg
+beside groundwater in ug/L is refused, while sediment with tailings, both
+solids, is not. Units are not converted here - that belongs to EQuIS, or to
+the parquet export below, which uses EQuIS's own factors.
 
 ## What it loads
 
@@ -505,19 +561,16 @@ CRS.
 
 **Reports** are generated on demand and can take minutes; output of several
 hundred thousand rows is normal. Only reports carrying `SYS_LOC_CODE`,
-`CHEMICAL_NAME`, `RESULT_NUMERIC` and `SAMPLE_DATE` can drive the map —
-anything else is reported as such, naming the missing columns, rather than
-failing obscurely.
+`CHEMICAL_NAME`, `RESULT_NUMERIC`, `SAMPLE_DATE` and `DETECT_FLAG` can drive
+the map — anything else is reported as such, naming the missing columns,
+rather than failing obscurely.
 
-The **row limit is off by default**, because truncating a report cuts it
-mid-way: later sample dates vanish and a chemical's time series appears to stop
-early. A 461,936-row report loads fine — the constraint is memory, not the API.
-The plugin keeps only the 12 columns the workflow reads, discarding the rest as
-the response is parsed, which cut that report from 706 MB (1,450 MB peak) to
-185 MB (332 MB peak). That client-side pruning matters because a cached report
-ignores `outFields` and returns all 31 columns regardless. Turn the limit on if
-a report is too large for the machine; the status line says so explicitly when
-output was truncated.
+The plugin keeps only the columns the workflow reads - 27 of the report's,
+including the sample code, qualifiers, depths and method - discarding the
+rest as the response is parsed. When it kept 12, that cut a 461,936-row
+report from 706 MB (1,450 MB peak) to 185 MB (332 MB peak). The pruning
+matters because a cached report ignores `outFields` and returns every column
+regardless.
 
 **The joined layer** carries the location's own fields plus:
 
@@ -531,12 +584,91 @@ output was truncated.
 | `result_count` | Results for this chemical at this location |
 | `detect_count` | How many of those were detections |
 | `analyte` | Chemical the layer was built for |
-| `spark_svg` | Path to this location's sparkline (only after *Sparklines on map*) |
 
 Locations with no result for the selected chemical stay on the map with a null
 value, so gaps in coverage remain visible. Location codes are matched
 case-insensitively between the report and the feature service, since the two do
 not always agree on case.
+
+## Experimental: parquet sources and the Analysis tab
+
+Everything above is the classic plugin, and the part to rely on. This
+section is newer work: usable, tested against a real facility, but still
+changing, and it needs QGIS 4.2 - which on Windows ships everything it uses
+(DuckDB, pyarrow and QtWebEngine), so the ordinary release ZIP is enough.
+
+### A whole facility as parquet
+
+A large facility's Analytical Results II cannot be generated inside the time
+EQuIS allows one report request (~230 s), so it cannot be fetched live in one
+piece. Instead it can be exported ahead of time, as Hive-partitioned parquet
+(`matrix=<code>/fraction=<code>/part-*.parquet`) with a `manifest.json`, and
+opened in the panel by choosing **Published parquet** as the source and
+giving the manifest's folder or URL. Every filter in the panel applies to it
+as to a live fetch, dates and QC included; the rows are read with DuckDB.
+
+**Opening one** needs only that path or URL. A source without `DETECT_FLAG`
+is refused: without it every result would read as a non-detect.
+
+**Producing one** is what
+[`.claude/skills/equis-parquet-export/`](.claude/skills/equis-parquet-export/SKILL.md)
+does, against a tenant you hold an API key for:
+
+1. survey the facility (rows per matrix, fraction and location);
+2. split it into slices small enough to generate, each a saved ARII report
+   with its own information agent (EIA) run nightly by EQuIS;
+3. collect each agent's stored output, converting units with EQuIS's own
+   factors so a column never mixes them;
+4. repack by matrix and fraction, and publish the manifest.
+
+It is written as a [Claude Code skill](https://docs.claude.com/en/docs/claude-code/skills)
+(`SKILL.md` is the procedure, `references/` the measured failure modes), and
+its scripts run on their own with Python and pyarrow - no language model is
+involved:
+
+```
+S=.claude/skills/equis-parquet-export/scripts
+python $S/survey_facility.py --help
+python $S/test_slice_pipeline.py     # the pipeline's bookkeeping
+python $S/test_unit_convert.py       # unit conversion by EQuIS's factors
+```
+
+### The DuckDB store
+
+Whatever the source - a live fetch, a cached report or a parquet set - the
+rows can be held in a DuckDB store (`store.py`) beside the classic in-memory
+table. The two are held to identical answers by a parity test over thousands
+of filter combinations (`tools/test_store_parity.py`), so the classic map is
+unchanged by which one answered. The store is what makes a whole facility
+(3.45 million rows in the facility tested) workable, and what the Analysis
+tab queries.
+
+### The Analysis tab
+
+The panel's second tab is a web view (QtWebEngine) running
+[Mosaic](https://idl.uw.edu/mosaic/)/vgplot charts that query the DuckDB
+store directly. It is warmed in the background once data loads, so opening
+it is quick. Pick a matrix, then two analytes for a **scatter** or three for
+a **ternary**:
+
+- **One point is one sample.** Analytes are pivoted to one row per sample,
+  so a point is always a combination some sample actually had - never one
+  location's maximum of one analyte beside its maximum of another.
+- **Points per location** can instead be each location's most recent
+  sample, or its sample with the highest value on a chosen axis (a detected
+  value always outranks a non-detect) - still one real sample per location.
+- **Non-detects** are drawn grey, in their own symbols, at their limit.
+- **A map layer follows each chart**: the scatter's coloured with a 3×3
+  bivariate scheme (Jenks classes), the ternary's by composition.
+- **Linked both ways**: drag a rectangle on the chart and those stations
+  highlight on the map; select stations on the map and the chart dims to
+  them. With QGIS's **Temporal Controller** on, samples outside the map's
+  time window are dimmed and the per-location picks are taken within it.
+- **Refusals are explicit**: an analyte reported in mixed units is left out
+  and listed; a ternary whose three analytes do not share a unit is refused.
+
+The design and the measurements behind it are in
+[docs/pivot-design.md](docs/pivot-design.md).
 
 ## API behaviour worth knowing
 
@@ -563,6 +695,18 @@ behave as described, and the failures are silent.
   anyway.
 - **Report output format varies even so**: `application/zip` containing one CSV
   for some reports, `text/plain` CSV for others.
+
+**Reports**
+
+- **Report names are cut to 64 characters** when saved, silently. A name
+  compared in full never matches what was stored, so the plugin matches on
+  the stored form and checks the report's facility as well.
+- **Base report ids are per tenant.** Several base reports can share the code
+  "Analytical Results II" (variants with sample selection, for instance), so
+  the base is found by its exact name and its `.system` ownership, never by
+  code or id.
+- **Filters apply only when saved on the report**; see
+  [Live queries](#live-queries-through-your-own-report).
 
 **Geometry**
 
@@ -604,13 +748,14 @@ behave as described, and the failures are silent.
   `type = 'DOMW'` all returned the same 10,636 features and the same rows. The
   clause is still parsed — an unknown column raises HTTP 500 — it just never
   filters. Location filtering on these layers has to happen client-side.
-- **`where` does work on report runs**, filtering on report output columns.
-  `IN (...)`, `LIKE` and compound `AND` clauses all behave correctly. It is the
-  only server-side row filter available: one report went from 461,936 rows in
-  123 s to 460 rows in 14 s when narrowed to two locations.
+- **`where` does work on report runs**, filtering on report output columns,
+  but it filters the output after the report has been generated - it does
+  not make an over-large report generate inside the time limit. Saved
+  parameters do; see [Live queries](#live-queries-through-your-own-report).
 - **The report's own `@sys_loc_codes` parameter is ignored** when passed as a
   query parameter, as is `filters.sys_loc_code` — both returned all 461,936
-  rows across 5,764 locations. Use `where` instead.
+  rows across 5,764 locations. Saved on the report, it works; its values are
+  pipe-separated, and a comma returns zero rows with HTTP 200.
 - **`outFields` is honoured on both feature queries and report runs**, and is
   one of the few documented parameters that behaves as advertised. Asking for 3
   of a layer's 68 fields cut a 1,000-feature page from 1.4 MB to 0.2 MB and
@@ -636,45 +781,51 @@ behave as described, and the failures are silent.
 
 ```
 equis_loader/
-  __init__.py        plugin entry point
   plugin.py          menu/toolbar wiring, dock registration
-  dialog.py          the dock panel, one collapsible section per step
-  equis_api.py       REST client (no QGIS imports; testable standalone)
+  dialog.py          the dock panel: the Data tab's steps and the Analysis tab
+  selection_panel.py the data selection controls (steps 4 and 5)
+  panel_state.py     the panel's state machine: what is usable when
+  equis_api.py       REST client (no QGIS imports)
+  live_report.py     the per-user report the live path saves filters onto
+  data_selection.py  a selection as report parameters
   report_data.py     analytes, aggregation, time series (no QGIS imports)
-  sparkline.py       small SVG sparklines (no QGIS imports)
-  layer_builder.py   Esri JSON / report rows -> QgsVectorLayer, styling
-  timeseries.py      the embedded matplotlib plot widget
-  maptool.py         click a point -> location code
-  tasks.py           QgsTask wrappers so the UI never blocks; cache read/write
   cache.py           on-disk cache of features and reports (no QGIS imports)
+  tasks.py           QgsTask wrappers so the UI never blocks
+  layer_builder.py   rows -> QgsVectorLayer, styling, sparklines, profiles
+  sparkline.py       small SVG sparklines (no QGIS imports)
+  timeseries.py      the embedded matplotlib plot
+  maptool.py         click a point -> location code
   settings.py        QSettings + .env fallback, cache location
-tools/
-  selftest.py        end-to-end check against the live API
-  test_parsing.py    offline tests: parsing, paging, analysis, cache (no network)
-  test_tasks.py      offline tests: cache decisions in tasks.py (no network)
-  test_offline.py    the offline workflow end to end (needs QGIS, no network)
-  test_storage.py    geopackage persistence and embedded sparklines (needs QGIS)
-  test_roll.py       rolling markers: captions, cycling, teardown (needs QGIS)
-  package.py         build a ZIP for QGIS's "Install from ZIP"
-  install.py         copy the plugin into the QGIS profile
+  -- experimental --
+  store.py           the DuckDB store, parquet sources (no QGIS imports)
+  pivot.py           one row per sample, every analyte (no QGIS imports)
+  analysis.py        the Analysis tab's choices and charts (no QGIS imports)
+  bivariate.py       scatter classes, colours, per-location picks
+  ternary.py         ternary shares and colours
+  linked_views.py    the web view <-> map controller
+  web_view.py, web_bridge.py, bridge_payload.py, web_assets.py
+                     the QtWebEngine view, its channel and its equis:// scheme
+  web/               the built page (bundled from web/src; no npm at install)
+web/src/             the page's sources (Mosaic/vgplot), built with npm
+tools/               tests, probes, package.py, install.py
+docs/                design notes and measurements
 .claude/skills/
   equis-parquet-export/   a whole facility to parquet: survey, slice, collect, publish
   equis-authoring/        EQuIS reports, agents and dashboards through the REST API
 ```
 
-`equis_api.py`, `report_data.py`, `sparkline.py` and `cache.py` deliberately
-import no QGIS modules, so the API handling, the chemistry logic, the SVG
-rendering and the cache are all testable with a plain interpreter. `cache.py`
-takes its root path from the caller for the same reason.
+The modules marked *no QGIS imports* are testable with a plain Python
+interpreter, which is how most of the plugin is verified.
 
 ## Testing
 
-Offline tests — parsing, paging, non-detect handling, aggregation, and the
-cache — need no network and no QGIS:
+Most tests need no network and no QGIS:
 
 ```
-python tools\test_parsing.py
-python tools\test_tasks.py
+python tools\test_parsing.py        # parsing, paging, aggregation, cache
+python tools\test_tasks.py          # cache decisions
+python tools\test_live.py           # the live path's report, filters and naming
+python tools\test_store_parity.py   # the DuckDB store against the classic table
 ```
 
 The offline workflow test drives the panel itself, so it needs the QGIS Python
@@ -682,8 +833,8 @@ but still no network. It seeds a scratch cache and walks the whole path: work
 offline → cached facility → cached report → joined layer → time series.
 
 ```
-"C:\Program Files\QGIS 4.0.2\bin\python-qgis.bat" tools\test_offline.py
-"C:\Program Files\QGIS 4.0.2\bin\python-qgis.bat" tools\test_storage.py
+"C:\Program Files\QGIS 4.2.1\bin\python-qgis.bat" tools\test_offline.py
+"C:\Program Files\QGIS 4.2.1\bin\python-qgis.bat" tools\test_storage.py
 ```
 
 `test_storage.py` saves a project, clears it and reads it back cold, so it
@@ -694,13 +845,14 @@ cannot pass vacuously.
 The end-to-end check runs against the live API and needs the QGIS Python:
 
 ```
-"C:\Program Files\QGIS 4.0.2\bin\python-qgis.bat" tools\selftest.py
-"C:\Program Files\QGIS 4.0.2\bin\python-qgis.bat" tools\selftest.py --report
+"C:\Program Files\QGIS 4.2.1\bin\python-qgis.bat" tools\selftest.py
+"C:\Program Files\QGIS 4.2.1\bin\python-qgis.bat" tools\selftest.py --report
 ```
 
 `--report` additionally executes a real report, which is slow (minutes).
+[CLAUDE.md](CLAUDE.md) lists every test, including the experimental views'.
 
-Last verified against the live site: 26 facilities listed; 10,349 location
-points read in a single request; a 461,936-row report parsed to 12 columns in
+Last verified against the live site (August 2026): 26 facilities listed; 10,349
+location points read in a single request; a 461,936-row report parsed in
 ~40 s; 786 chemicals listed in 0.3 s; PFOA aggregated across 5,312 locations in
 2.2 s; a 126-point time series spanning 2007–2025.

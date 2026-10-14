@@ -9,21 +9,22 @@ the translation between what the user picked and what EQuIS stores.
 No QGIS imports, so this is testable with a plain interpreter.
 """
 
-# Report parameters this maps onto, on Analytical Results II (base 508).
+# Report parameters this maps onto, on Analytical Results II (its base report;
+# 508 on the tenant this was built against - ids are per tenant, never assumed).
 # Names must match exactly - '@cas_rn' and '@analytes' are both 400s.
 PARAM_FACILITY = "@facility_id"
 PARAM_ANALYTES = "@cas_rns"
 PARAM_LOCATIONS = "@sys_loc_codes"
 # Location groups (RT_GROUP with a location member type). Expanded to their
 # member locations by the server, so the plugin never needs the membership.
-# Verified 2026-09-05 on ARII 508: MultiSelect, caption "Location\Group(s):",
+# Verified 2026-09-05 on the ARII base (508 on that tenant): MultiSelect, caption "Location\Group(s):",
 # depends on @facility_id like every other list here. Only 3 of the 16
 # facilities on this tenant with an ARII report define any, so the picker is
 # shown only when the parameter service returns some.
 PARAM_LOCATION_GROUPS = "@location_groups"
 PARAM_MATRICES = "@matrix_codes"
 PARAM_FRACTIONS = "@fractions"
-# Verified 2026-09-02 on report 508: the base report DOES carry a MultiSelect
+# Verified 2026-09-02 on the ARII base report (508 on that tenant): it DOES carry a MultiSelect
 # analytic-method parameter, alongside '@prep_methods'. The plugin used to
 # filter methods client-side only, on the belief that no such parameter
 # existed - so ticking a method narrowed the view but not the query, and did

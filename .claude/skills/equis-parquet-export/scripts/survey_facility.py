@@ -157,7 +157,7 @@ def main():
           % len(cells))
     for matrix, fraction in cells:
         print("   python scripts/create_slice_reports.py --facility %d "
-              "--root data/<name> --template <report id> --cell %s --dry-run"
+              "--root data/<name> --sample-types N --cell %s --dry-run"
               % (args.facility, cell_key(matrix, fraction)))
 
     if args.json:

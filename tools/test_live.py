@@ -78,6 +78,7 @@ class StubClient(object):
             raise RuntimeError("Not permitted (403).")
         new = {"id": -999, "name": name, "code": code,
                "facilityId": facility_id, "owner": "me",
+               "baseReportId": base_report_id,
                "parameters": list(parameters)}
         self._reports.append(new)
         self.created.append(new)
@@ -156,7 +157,7 @@ def test_selection_parameters():
           params["@sample_types"] == "N", params["@sample_types"])
     check("params: unset filters are None, not empty strings",
           params["@sys_loc_codes"] is None and params["@start_date"] is None)
-    # Location groups are the top of "Where": verified on ARII 508 as
+    # Location groups are the top of "Where": verified on the ARII base as
     # @location_groups, a facility-scoped MultiSelect the server expands.
     check("params: location groups unset by default",
           params["@location_groups"] is None)
@@ -186,7 +187,7 @@ def test_selection_parameters():
     # the belief that the report carried no method parameter - so ticking one
     # narrowed the view while the report still generated every method's rows,
     # which is precisely the work the ~230 s ceiling cannot afford.
-    # Verified 2026-09-02 that base 508 carries '@analytic_methods'.
+    # Verified 2026-09-02 that the ARII base carries '@analytic_methods'.
     methods = ds.DataSelection(methods=["SW6010", "ICM14B"]).to_parameters()
     check("params: methods are sent as @analytic_methods",
           methods["@analytic_methods"] == "SW6010|ICM14B",
@@ -367,10 +368,19 @@ def test_report_naming():
           "7" in lr.report_name("jo", "", 7))
 
 
+# The tenant's base report: .system, its own base, named exactly for its
+# code. Every real tenant has one; the live path needs it to know which base
+# to create on. Numbered unlike 508 so no constant can pass for it.
+BASE777 = {"id": 777, "name": "Analytical Results II", "code": "Analytical Results II",
+           "owner": ".system", "baseReportId": 777, "facilityId": None,
+           "parameters": [{"name": "@facility_id", "value": "",
+                           "displayType": "Text", "dbType": 11}]}
+
+
 def test_lifecycle():
     """Find-or-create, then apply filters without disturbing the rest."""
     mine = lr.report_name("me", "Facility A", 42)
-    existing = {"id": -500, "name": mine, "owner": "me",
+    existing = {"id": -500, "name": mine, "owner": "me", "facilityId": 42,
                 "code": lr.BASE_REPORT_CODE,
                 "parameters": [
                     {"name": "@facility_id", "value": "42"},
@@ -396,12 +406,12 @@ def test_lifecycle():
     # Someone else's report on the same base is what a first-time user clones
     # the parameter definitions from - a report cannot be created without them.
     seed = {"id": -700, "name": "Somebody's ARII", "owner": "other",
-            "code": lr.BASE_REPORT_CODE,
+            "code": lr.BASE_REPORT_CODE, "baseReportId": 777,
             "parameters": [{"name": "@facility_id", "value": "1",
                             "displayType": "Text", "dbType": 11},
                            {"name": "@cas_rns", "value": "x",
                             "displayType": "Text", "dbType": 11}]}
-    empty = StubClient(reports=[seed])
+    empty = StubClient(reports=[seed, BASE777])
     fresh = lr.LiveReport(empty, 42, "Facility A", "newbie")
     rid = fresh.ensure()
     check("lifecycle: a missing report is created", fresh.created and rid == 999,
@@ -411,10 +421,77 @@ def test_lifecycle():
           empty.created[0]["name"])
     check("lifecycle: it is built on Analytical Results II",
           empty.created[0]["code"] == lr.BASE_REPORT_CODE)
+    check("lifecycle: on the base its template declares (777), not a constant",
+          empty.created[0]["baseReportId"] == 777, str(empty.created[0].get("baseReportId")))
+
+    # A tenant whose only ARII report is the base itself, numbered unlike
+    # any other tenant: found by what it is, cloned, and created on it.
+    base = {"id": 9001, "name": lr.BASE_REPORT_CODE, "code": lr.BASE_REPORT_CODE,
+            "owner": ".system", "baseReportId": 9001,
+            "parameters": [{"name": "@facility_id", "value": "",
+                            "displayType": "Text", "dbType": 11}]}
+    only_base = StubClient(reports=[base])
+    lone = lr.LiveReport(only_base, 42, "F", "newbie")
+    check("lifecycle: with only the base report visible, a report is still created",
+          lone.ensure() == 999 and only_base.created, str(only_base.created))
+    check("lifecycle: ...on that tenant's base id (9001)",
+          only_base.created and only_base.created[0]["baseReportId"] == 9001,
+          str(only_base.created[0].get("baseReportId") if only_base.created else None))
+    check("lifecycle: is_base_report needs .system ownership AND id == base",
+          lr.is_base_report(base)
+          and not lr.is_base_report(dict(base, owner="someone"))
+          and not lr.is_base_report(dict(base, baseReportId=508))
+          and not lr.is_base_report(seed))
+
+    # A user's ARII report that does not say which base it is on is
+    # skipped for the base report, not trusted with a guessed id.
+    vague = dict(seed, id=-701, name="No base said")
+    vague.pop("baseReportId")
+    picky = StubClient(reports=[vague, base])
+    lr.LiveReport(picky, 42, "F", "newbie").ensure()
+    check("lifecycle: a template with no base id is skipped, not guessed at",
+          picky.created and picky.created[0]["baseReportId"] == 9001,
+          str(picky.created[0].get("baseReportId") if picky.created else None))
+
+    # The tenant measured 2026-10-12 has three .system bases sharing the
+    # code: the base, "...with Sample Selection" (54 parameters) and
+    # "...- reportable sample". A variant with a LOWER id, and a user report
+    # on it, must not be cloned or created on.
+    # Each carries a parameter only that base has, so a clone from the
+    # wrong one shows - the created report's BASE id comes from the true
+    # base whatever is cloned, so checking the id alone missed it.
+    variant = {"id": 100, "name": "Analytical Results II with Sample Selection",
+               "code": lr.BASE_REPORT_CODE, "owner": ".system", "baseReportId": 100,
+               "parameters": [{"name": "@facility_id", "value": "",
+                               "displayType": "Text", "dbType": 11},
+                              {"name": "@sample_selection", "value": ""}]}
+    on_variant = {"id": -101, "name": "Someone's on the variant", "owner": "other",
+                  "code": "", "baseReportId": 100,
+                  "parameters": [{"name": "@facility_id", "value": "1"},
+                                 {"name": "@sample_selection", "value": ""}]}
+    mixed = StubClient(reports=[variant, on_variant, base])
+    lr.LiveReport(mixed, 42, "F", "newbie").ensure()
+    check("lifecycle: a same-code variant base (lower id) is never used",
+          mixed.created and mixed.created[0]["baseReportId"] == 9001,
+          str(mixed.created[0].get("baseReportId") if mixed.created else None))
+    check("lifecycle: ...nor cloned: no variant-only parameter on the new report",
+          mixed.created and not any(p["name"] == "@sample_selection"
+                                    for p in mixed.created[0]["parameters"]),
+          str([p["name"] for p in mixed.created[0]["parameters"]] if mixed.created else None))
+    check("lifecycle: is_base_report is false for the variant",
+          not lr.is_base_report(variant))
+    ambiguous = lr.LiveReport(StubClient(reports=[base, dict(base, id=9002,
+                                                            baseReportId=9002)]),
+                              42, "F", "newbie")
+    try:
+        ambiguous.ensure()
+        check("lifecycle: two true bases are refused, not guessed between", False)
+    except lr.EquisTemplateError:
+        check("lifecycle: two true bases are refused, not guessed between", True)
 
     # Someone else's identically-named report must not be adopted.
     theirs = {"id": -600, "name": lr.report_name("me", "Facility A", 42),
-              "owner": "someone-else", "code": lr.BASE_REPORT_CODE,
+              "owner": "someone-else", "code": lr.BASE_REPORT_CODE, "facilityId": 42,
               "parameters": [{"name": "@facility_id", "value": "42"}]}
     guarded = lr.LiveReport(StubClient(reports=[theirs]), 42, "Facility A", "me")
     check("lifecycle: another owner's report is not adopted",
@@ -431,7 +508,7 @@ def test_lifecycle():
               "parameter definitions" in str(exc), str(exc)[:60])
 
     # Creating without rights is the common real failure.
-    denied = lr.LiveReport(StubClient(reports=[seed], create_fails=True),
+    denied = lr.LiveReport(StubClient(reports=[seed, BASE777], create_fails=True),
                            42, "F", "me")
     try:
         denied.ensure()
@@ -443,8 +520,8 @@ def test_lifecycle():
 def test_filing():
     """Filing into a facility group is best-effort and never blocks."""
     mine = lr.report_name("me", "Facility A", 42)
-    reports = [{"id": -500, "name": mine, "owner": "me",
-                "code": lr.BASE_REPORT_CODE,
+    reports = [{"id": -500, "name": mine, "owner": "me", "facilityId": 42,
+                "code": lr.BASE_REPORT_CODE, "baseReportId": 777,
                 "parameters": [{"name": "@facility_id", "value": "42"}]}]
     groups = [{"id": 7, "code": "003A.Facility A", "name": "Facility A",
                "facility_id": None}]
@@ -474,7 +551,7 @@ def test_filing():
           str(blind.added))
 
     # No matching group is not an error.
-    lonely = StubClient(reports=reports, groups=[], members={})
+    lonely = StubClient(reports=reports + [BASE777], groups=[], members={})
     live4 = lr.LiveReport(lonely, 42, "Nowhere", "me")
     live4.ensure()
     check("filing: no matching group is not an error",
@@ -494,7 +571,7 @@ def test_prepare_before_fetch():
     # A real ARII report carries all 54 parameters; apply_to only rewrites
     # ones that already exist, so the template must carry the filters.
     seed = {"id": -700, "name": "Somebody's ARII", "owner": "other",
-            "code": lr.BASE_REPORT_CODE,
+            "code": lr.BASE_REPORT_CODE, "baseReportId": 777,
             "parameters": [{"name": n, "value": v} for n, v in (
                 ("@facility_id", "1"), ("@cas_rns", ""), ("@matrix_codes", ""),
                 ("@fractions", ""), ("@sample_types", ""))]}
@@ -514,7 +591,7 @@ def test_prepare_before_fetch():
             self.ran.append(a)
             raise AssertionError("the report must not run to fill the pickers")
 
-    client = Params(reports=[seed])
+    client = Params(reports=[seed, BASE777])
     live = lr.LiveReport(client, 9, "Big Site", "me")
     rid = live.ensure()
     check("prepare: the report exists before any fetch", rid == 999, str(rid))
@@ -551,6 +628,85 @@ def test_prepare_before_fetch():
           " ".join(wanted.split()))
 
 
+def test_truncated_names():
+    """EQuIS keeps 64 characters of a name; find() must match what it kept.
+
+    Found 2026-10-12: names were compared whole, so a long one never matched
+    and a new report was created on every visit - 10 for one facility.
+    """
+    me = "someone.long-address@example.com"
+    long_name = "Example River Upper Basin Unit"
+    full = lr.report_name(me, long_name, 4242)
+    stored = full[:lr.NAME_LIMIT]
+    check("names: this one really is cut (the id falls off)",
+          len(full) > lr.NAME_LIMIT and "4242" not in stored, stored)
+    copies = [{"id": -n, "name": stored, "owner": me, "code": "",
+               "facilityId": 4242, "baseReportId": 777,
+               "parameters": [{"name": "@facility_id", "value": "4242"}]}
+              for n in (5001, 5009, 5004)]
+    # Same first 64 characters, another facility: must never be adopted.
+    other = {"id": -6000, "name": stored, "owner": me, "code": "",
+             "facilityId": 999, "baseReportId": 777, "parameters": []}
+
+    class Me(StubClient):
+        username = me
+
+    client = Me(reports=copies + [other, BASE777])
+    live = lr.LiveReport(client, 4242, long_name, me)
+    check("names: the stored (cut) name is found", live.find() is not None,
+          str(live.find()))
+    check("names: of several copies, the newest", live.find() == 5009, str(live.find()))
+    check("names: and it is not recreated", live.ensure() == 5009 and not client.created,
+          str(client.created))
+    elsewhere = lr.LiveReport(Me(reports=[other, BASE777]), 4242, long_name, me)
+    check("names: another facility's report with the same cut name is not adopted",
+          elsewhere.find() is None, str(elsewhere.find()))
+
+
+def test_real_listing():
+    """Through the REAL EquisClient.list_reports, not a stub.
+
+    The stub returns raw records, which carry `owner`; the real listing
+    dropped it, so find()'s guard against adopting another user's
+    same-named report never ran against a tenant - and every test passed,
+    because the tests used the stub (found 2026-10-12).
+    """
+    from equis_loader.equis_api import EquisClient
+
+    mine = lr.report_name("me@x.com", "F", 42)
+    raw = [
+        {"id": -501, "name": mine, "code": lr.BASE_REPORT_CODE,
+         "facilityId": 42, "owner": "someone-else@x.com", "baseReportId": 9001},
+        {"id": 9001, "name": lr.BASE_REPORT_CODE, "code": lr.BASE_REPORT_CODE,
+         "facilityId": None, "owner": ".system", "baseReportId": 9001},
+    ]
+
+    class Canned(EquisClient):
+        def _get_json(self, path, params=None, timeout=None):
+            assert path == "/api/reports", path
+            return [dict(r) for r in raw]
+
+    client = Canned("https://example.invalid", "token")
+    listed = {abs(r["id"]): r for r in client.list_reports(42)}
+    check("listing: the real list_reports keeps owner and base",
+          listed[501]["owner"] == "someone-else@x.com"
+          and listed[501]["base_report_id"] == 9001, str(listed.get(501)))
+    check("listing: the base report is recognisable from the real listing",
+          lr.is_base_report(listed[9001]) and not lr.is_base_report(listed[501]))
+
+    class AsMe(Canned):
+        @property
+        def username(self):
+            return "me@x.com"
+
+    live = lr.LiveReport(AsMe("https://example.invalid", "token"), 42, "F", "me@x.com")
+    check("listing: another user's same-named report is not adopted (real listing)",
+          live.find() is None, str(live.find()))
+    raw[0]["owner"] = "ME@x.com"
+    check("listing: our own is found, owner compared case-insensitively",
+          live.find() == 501, str(live.find()))
+
+
 def main():
     test_encoding()
     test_selection_parameters()
@@ -562,6 +718,8 @@ def main():
     test_lifecycle()
     test_filing()
     test_prepare_before_fetch()
+    test_truncated_names()
+    test_real_listing()
     print("\n%s" % ("ALL LIVE TESTS PASSED" if not FAILURES
                     else "FAILURES: %s" % ", ".join(FAILURES)))
     return 1 if FAILURES else 0
