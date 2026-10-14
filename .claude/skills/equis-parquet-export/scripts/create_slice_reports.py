@@ -1,16 +1,16 @@
 """Create the slice reports and their nightly agents, and seed the manifest.
 
-    # see the plan without writing anything
+    # see the plan: writes only one ZZ_ probe report, run then deleted
     python scripts/create_slice_reports.py --facility <id> --root data/<name> \
-        --template <report id> --cell WS/D --dry-run
+        [--sample-types N] --cell WS/D --dry-run
 
     # create it
     python scripts/create_slice_reports.py --facility <id> --root data/<name> \
-        --template <report id> --cell WS/D
+        [--sample-types N] --cell WS/D
 
     # give reports to the slices nightly_slices.py --rewrite added
     python scripts/create_slice_reports.py --facility <id> --root data/<name> \
-        --template <report id> --pending
+        [--sample-types N] --pending
 
 This is the step `nightly_slices.py` assumes has already run. It divides one
 (matrix, fraction) cell's locations into bins, creates one report per bin with
@@ -30,15 +30,22 @@ Start with ONE cell (--cell WS/D). Twelve cells is 40-odd permanent objects on
 a tenant other people use, and until a slice has actually produced output the
 whole approach is unproven.
 
-WHY A TEMPLATE REPORT IS REQUIRED
----------------------------------
+WHERE THE PARAMETERS COME FROM
+------------------------------
 A report parameter is a full descriptor - displayType, dbType, caption,
 visibility, isRequired, dependencies - and EQuIS rejects a POST whose
 parameters are bare {name, value} pairs with an opaque HTTP 500 that looks
 exactly like a permissions failure. There is no way to synthesise the array, so
-it must be cloned from an existing report on the same base. --template names
-that report; its saved filters (analytes, sample types, matrix, fraction) are
-inherited by every slice, which is what makes the slices comparable.
+it is cloned from an existing report on the same base.
+
+By default that is the ARII base report itself, found by what it IS - named
+"Analytical Results II", owned by .system, its id equal to its own
+baseReportId - never by a remembered id: base ids can differ between tenants.
+Its detail carries all 55 descriptors (read 2026-10-12). Saved filters every
+slice should share are given as flags (--sample-types N). --template still
+names an existing report instead, for one whose saved filters were tuned by
+hand; whichever source, every slice inherits the same filters, which is what
+makes the slices comparable.
 
 WHY 03:00
 ---------
@@ -198,6 +205,38 @@ def location_weights(api, facility_id, matrix):
         path = ("/api/odata/" + nxt.split("/api/odata/", 1)[1]
                 if nxt and "/api/odata/" in nxt else None)
     return weights
+
+
+def find_base_report(api, code="Analytical Results II"):
+    """The tenant's ARII base report id, by what it is - not by a number.
+
+    A base report is owned by .system and is its own base (id ==
+    baseReportId). 508 on every tenant seen so far, but ids are allocated
+    per tenant, so it is looked up.
+    """
+    status, body = api.json("/api/reports")
+    records = body if isinstance(body, list) else (body or {}).get("value") or []
+    found = [abs(int(r.get("id") or 0)) for r in records
+             if (r.get("name") or "").strip() == code
+             and (r.get("code") or "").strip() == code
+             and (r.get("owner") or "") == ".system"
+             and abs(int(r.get("id") or 0)) == abs(int(r.get("baseReportId") or -1))]
+    if len(found) != 1:
+        fail("Expected one .system base report named %r, found %d. Name a "
+             "report on that base with --template." % (code, len(found)))
+    return found[0]
+
+
+def apply_saved(template, saved):
+    """Set saved filter values on the template, so every clone inherits them."""
+    names = {p.get("name") for p in template.get("parameters") or []}
+    missing = [name for name in saved if name not in names]
+    if missing:
+        fail("The template has no parameter %s." % ", ".join(missing))
+    for param in template.get("parameters") or []:
+        if param.get("name") in saved:
+            param["value"] = saved[param["name"]]
+            param["displayValue"] = str(saved[param["name"]])
 
 
 def clone_parameters(template, facility_id, matrix, fraction, locations):
@@ -561,9 +600,15 @@ def main():
     parser.add_argument("--root", required=True,
                         help="directory holding the parquet and manifest; "
                              "one per facility")
-    parser.add_argument("--template", type=int, required=True,
-                        help="an existing report on the same base whose "
-                             "parameters and filters the slices inherit")
+    parser.add_argument("--template", type=int, default=None,
+                        help="an existing report whose parameters and saved "
+                             "filters the slices inherit (default: the "
+                             "tenant's Analytical Results II base report)")
+    parser.add_argument("--sample-types", default=None,
+                        help="saved on every slice as @sample_types, pipe-"
+                             "separated, e.g. N or N|FD (default: whatever "
+                             "the template saves; the base saves none, i.e. "
+                             "every sample type, QC included)")
     parser.add_argument("--cell", default=None,
                         help="which (matrix, fraction) cell, e.g. WS/D")
     parser.add_argument("--pending", action="store_true",
@@ -608,10 +653,15 @@ def main():
     user_id = (user or {}).get("id")
     email = (user or {}).get("emailAddress") or (user or {}).get("email") or ""
 
+    from_base = args.template is None
+    if from_base:
+        args.template = find_base_report(api)
     status, template = api.json("/api/reports/%d" % args.template)
     if status != 200 or not isinstance(template, dict):
         fail("Could not read the template report %d: %s"
              % (args.template, template))
+    if args.sample_types:
+        apply_saved(template, {"@sample_types": args.sample_types})
     if not template.get("baseReportId"):
         fail("Template %d names no baseReportId. Slices are created on the "
              "template's base, and a guessed id differs between tenants."
@@ -625,8 +675,12 @@ def main():
 
     print("site     : %s" % site)
     print("user     : %s (id %s)" % (username, user_id))
-    print("template : %d (%s), base %s"
-          % (args.template, template.get("name"), template.get("baseReportId")))
+    print("template : %d (%s), base %s%s"
+          % (args.template, template.get("name"), template.get("baseReportId"),
+             " - the tenant's base report" if from_base else ""))
+    if "@sample_types" not in saved:
+        print("           no @sample_types saved: EVERY sample type, QC "
+              "included (narrow with --sample-types N)")
     # Only what the slices really inherit: clone_parameters overrides these,
     # and listing the template's @cas_rns here read as if every slice would
     # be scoped to it - the opposite of what happens.

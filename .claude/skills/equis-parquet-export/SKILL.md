@@ -36,10 +36,13 @@ python <skill dir>/scripts/survey_facility.py --facility <id>
 - **Rights**: the key's user needs **Creator on Reports** (not implied by
   Owner or Editor) to create slice reports, and must be able to create
   agents. A read-only key can run the survey and every `--dry-run`.
-- **A template report** on the tenant's Analytical Results II base whose
-  saved filters the slices should inherit - typically just
-  `@sample_types=N`. Any ARII report the user owns will do; its
-  `baseReportId` is used as is, so nothing tenant-specific is assumed.
+- **No template report is needed.** Slices clone their parameters from the
+  tenant's Analytical Results II base report, found by what it is (owned by
+  `.system`, its own base) rather than by id, since ids differ between
+  tenants. Pass `--sample-types N` to keep QC out of the export; without it
+  every sample type is exported (the plugin can still filter QC on read).
+  `--template <rid>` remains for a hand-tuned report whose saved filters
+  every slice should share.
 - **Check it works**: `python scripts/test_slice_pipeline.py` and
   `python scripts/test_unit_convert.py`, offline, in a few seconds.
 
@@ -66,25 +69,21 @@ upload partitions + manifest.json                                       never ma
 1. **Survey.** `python scripts/survey_facility.py --facility <id>`. Prints
    matrices (samples, locations, date span, sample types), fractions, and a
    dry-run command per candidate cell. Read-only.
-2. **Pick a template report** on the ARII base whose saved filters every
-   slice should inherit (usually `@sample_types=N`; leave analytes empty).
-   Slices are created on the template's own `baseReportId` - base ids differ
-   between tenants.
-3. **Dry-run one cell**, then create it:
-   `create_slice_reports.py --facility <id> --root data/<name> --template <rid> --cell WS/D --dry-run`.
+2. **Dry-run one cell**, then create it:
+   `create_slice_reports.py --facility <id> --root data/<name> --sample-types N --cell WS/D --dry-run`.
    It weights locations, runs **one throwaway probe slice** to calibrate
    rows-per-location for that cell, refuses an empty cell, proposes the
    cell's target unit into `data/<name>/units.json`, and prints the bins.
    **Start with one cell.** Each slice is a permanent report plus agent in a
    shared tenant; confirm with the user before the first real create.
-4. **Review `units.json`.** Each cell's proposal is the dominant
+3. **Review `units.json`.** Each cell's proposal is the dominant
    concentration unit in its probe. Water usually wants `ug/L` (trace metals
    in mg/L read as zeros); a dissolved fraction on a solid is a leachate and
    stays `mg/L`. A cell with no entry is not converted.
-5. **After the agents have run**, `nightly_slices.py --facility <id> --root data/<name>`
+4. **After the agents have run**, `nightly_slices.py --facility <id> --root data/<name>`
    collects, re-bins from measured rows, and repacks. Schedule it daily.
-6. If re-binning added slices, `create_slice_reports.py ... --pending`.
-7. `publish_manifest.py --root data/<name>`, then upload the
+5. If re-binning added slices, `create_slice_reports.py ... --pending`.
+6. `publish_manifest.py --root data/<name>`, then upload the
    `matrix=*/fraction=*/part-0000.parquet` tree and `manifest.json`.
 
 ## What "done" means - check every one
@@ -94,7 +93,7 @@ upload partitions + manifest.json                                       never ma
 - `nightly_slices.py` printed no `KEPT ... produced nothing` line, or you
   know why each did. A kept partition is yesterday's, dated by `as_of`.
 - The published row total is plausible against `survey_facility.py`'s
-  result count - lower is expected (template filters, QC excluded), higher
+  result count - lower is expected (saved filters, QC excluded), higher
   is a double count and is never right.
 - `units.json` names a unit for every cell that should convert.
 

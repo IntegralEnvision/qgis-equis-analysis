@@ -779,6 +779,14 @@ class EquisClient:
                     # exceed the service's time limit it is the only way to
                     # get the data at all.
                     "has_eia": bool(item.get("hasEIA")),
+                    # Who owns it, so a report is never adopted on name
+                    # alone: LiveReport.find() checked an owner the listing
+                    # never carried, so its guard did nothing (2026-10-12).
+                    "owner": item.get("owner") or "",
+                    # The base it is built on. A base report is its own
+                    # base and is owned by .system; ids differ between
+                    # tenants, so nothing assumes a number.
+                    "base_report_id": item.get("baseReportId"),
                 }
             )
         reports.sort(key=lambda r: r["name"].lower())
