@@ -6,8 +6,8 @@
 #
 # The tag must match `version=` in equis_loader/metadata.txt, so a release
 # can never carry a zip that reports a different version than its name.
-# Only the QGIS-free test suites run here; tools/test_offline.py needs a
-# QGIS install and stays a local check.
+# Only the suites that need neither QGIS nor DuckDB run here (checked in a
+# bare venv, 2026-10-14); test_offline.py and test_store_parity.py stay local.
 
 name: Release
 
@@ -22,9 +22,11 @@ jobs:
   release:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      # Node 24 releases: the v4/v5 pair runs on Node 20, which GitHub has
+      # deprecated and was already forcing onto 24 (the v3.32.0 run warned).
+      - uses: actions/checkout@v5
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: "3.12"
 
@@ -33,7 +35,8 @@ jobs:
           tag="${GITHUB_REF_NAME#v}"
           version="$(python - <<'PY'
           import configparser
-          p = configparser.ConfigParser(); p.optionxform = str
+          # interpolation=None: the changelog has bare % signs (see package.py).
+          p = configparser.ConfigParser(interpolation=None); p.optionxform = str
           p.read("equis_loader/metadata.txt", encoding="utf-8")
           print(p["general"]["version"].strip())
           PY
@@ -46,9 +49,11 @@ jobs:
 
       - name: Tests that need no QGIS
         run: |
+          python tools/test_parsing.py
           python tools/test_state.py
           python tools/test_live.py
           python tools/test_tasks.py
+          python tools/test_overlay_payload.py
 
       - name: Build zip
         run: python tools/package.py
