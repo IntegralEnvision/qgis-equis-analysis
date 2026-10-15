@@ -38,6 +38,11 @@ data/**/_walk_checkpoint.json
 # upload artefact, not a source.
 data/**/manifest.json
 
+# The ArcGIS output is derived from the partitions by arcgis_export.py.
+# Its settings file, data/<name>/arcgis.json, is NOT ignored: like
+# units.json it is a hand-made decision about the facility.
+data/**/arcgis/
+
 # Names used before the two manifests were told apart.
 data/**/published.json
 data/**/manifest_pub.json

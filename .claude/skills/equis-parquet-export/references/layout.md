@@ -4,11 +4,13 @@
 data/<name>/
   manifest_local.json          pipeline bookkeeping       TRACKED, NEVER UPLOADED
   units.json                   target unit per cell       tracked, hand-edited
+  arcgis.json                  ArcGIS coordinates + CRS   tracked, hand-edited, optional
   manifest.json                reader-facing              derived, uploaded
   matrix=WS/fraction=D/part-0000.parquet                  uploaded
   matrix=WS/fraction=N/part-0000.parquet
   ...
   _staging/                    per-slice files mid-run    deleted by repack
+  arcgis/                      GeoParquet for ArcGIS Pro  derived, uploaded if wanted
 ```
 
 One directory per facility. `create_slice_reports.py` records the
@@ -123,3 +125,45 @@ assert rel.count("*").fetchone()[0] == m["rows"]       # catches a truncated upl
 Measured over a plain SAS URL from the first reader built on this: count
 3.45M rows 0.89 s, one analyte 0.76 s; opening a 41 MiB partition fetched
 0.25 MiB in 5 range requests.
+
+## The ArcGIS output
+
+`arcgis_export.py` rewrites the partitions for ArcGIS Pro 3.6+, which reads
+one file as one layer, ignores Hive paths, and refuses or mangles several
+things the partitions carry (the requirements, with Esri's sources, are in
+the plugin repository's `docs/arcgis-pro-geoparquet-brief.md`):
+
+```
+arcgis/
+  <MATRIX>_<FRACTION>.parquet           one point per result      GeoParquet 1.1, WKB, zstd
+  <MATRIX>_<FRACTION>_unplaced.parquet  rows with no coordinates  a table; only if any
+  locations.parquet                     one point per location    most common coordinate
+  manifest.json                         files, rows, settings, as_of
+  README.txt                            for the Pro user
+```
+
+What changes on the way, and why:
+
+| Partition | ArcGIS file | Because |
+|---|---|---|
+| in-file `matrix`, `fraction` | dropped | dictionary-typed duplicates; `fraction` collides with `FRACTION` once Pro folds case |
+| dates as text | `timestamp[us]` | Pro time-enables only a date field; a column with any value no format reads stays text, and the run says so |
+| `TIME`, null-typed columns | text | not documented as readable; a column null-typed in one cell takes its type from another so every file has ONE schema |
+| X/Y as numbers | one WKB `geometry`, explicit PROJJSON `crs` | Pro does not treat coordinate columns as geometry, and its handling of a missing CRS is undocumented |
+| rows without coordinates | `_unplaced` table | tested 2026-10-14: Pro's persistent cache (>= 500k rows) refuses a file with ANY null or empty (NaN) point, wherever it sits; small files load, so it fails only once a cell grows. Never dropped, never given a stand-in coordinate |
+| `RESULT_NUMERIC` only | plus `IS_DETECT`, `VALUE_OR_LIMIT`, `VALUE_IS_LIMIT`, `VALUE_UNIT` | RESULT_NUMERIC is empty for a non-detect; the four state the facts with the plugin's own rules and halve nothing |
+
+**Coordinates are a setting.** `arcgis.json` (or `--x`, `--y`, `--crs`)
+names the columns and their CRS: `EPSG:<code>`, or a PROJJSON file path
+relative to the root. EPSG:4326 is built in; other codes need pyproj or the
+file. Coordinates that cannot be in the named CRS - metres called degrees,
+or degrees called projected - are refused.
+
+**Pro caches every file it opens**, on disk at 500,000 rows and up, and
+rebuilds when the file's date changes. A cell is rewritten only when its
+partition, the settings, the schema or the exporter's `FORMAT_VERSION`
+changed; `--force` rewrites all. Measured 2026-10-14 on about 3.45M rows:
+22.5 s for all ten cells from scratch, and `tools/test_arcgis_parity.py`
+(plugin repository) found every row's detection, value, limit flag, unit
+and date identical to the plugin's store.
+

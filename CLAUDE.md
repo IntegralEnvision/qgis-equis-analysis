@@ -24,6 +24,8 @@ python tools/analysis_preview.py       # the Analysis tab in a browser, no QGIS 
 S=.claude/skills/equis-parquet-export/scripts
 python $S/test_slice_pipeline.py        # pipeline bookkeeping (pyarrow)
 python $S/test_unit_convert.py          # collect-time unit conversion
+python $S/test_arcgis_export.py         # GeoParquet for ArcGIS Pro: files, CRS, refusals
+python tools/test_arcgis_parity.py      # that export's non-detect columns vs ReportStore (duckdb)
 python $S/nightly_slices.py --facility <facility-id> --root data/<facility>
 
 python tools/vendor_deps.py --target win --python 312   # build a dep bundle
@@ -190,6 +192,13 @@ If you add a rule to one implementation, add the case to the parity fixture.
 One mutation survived the first round purely because no fixture row exercised
 it.
 
+A third copy of the non-detect rules lives in the parquet-export skill's
+`arcgis_export.py`, which cannot import the plugin because the skill is shared
+beyond this repository. `tools/test_arcgis_parity.py` holds it to the store,
+row for row, including on the real facility. A change to the value ladder,
+the detect values, the unit columns or the date formats fails that gate until
+the exporter follows.
+
 ## Documents
 
 | | |
@@ -205,6 +214,7 @@ it.
 | [tools/mosaic_poc/README.md](tools/mosaic_poc/README.md) | Overlay, brush-scale and temporal spikes — measured |
 | [docs/selection-ui-guidance.md](docs/selection-ui-guidance.md) | Why the panel is shaped the way it is |
 | [.claude/skills/equis-parquet-export/](.claude/skills/equis-parquet-export/SKILL.md) | Exporting a facility to parquet: survey, slice, collect, repack, publish |
+| [docs/arcgis-pro-geoparquet-brief.md](docs/arcgis-pro-geoparquet-brief.md) | What ArcGIS Pro needs of a GeoParquet file, sourced; read before touching `arcgis_export.py` |
 
 ## Style
 

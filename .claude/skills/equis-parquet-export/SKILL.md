@@ -64,6 +64,7 @@ nightly_slices.py             collect -> re-bin -> repack              edits @sy
 create_slice_reports.py --pending   reports for slices re-binning added
 publish_manifest.py           manifest.json for readers                local
 upload partitions + manifest.json                                       never manifest_local.json
+arcgis_export.py              optional: GeoParquet for ArcGIS Pro      local
 ```
 
 1. **Survey.** `python scripts/survey_facility.py --facility <id>`. Prints
@@ -85,6 +86,14 @@ upload partitions + manifest.json                                       never ma
 5. If re-binning added slices, `create_slice_reports.py ... --pending`.
 6. `publish_manifest.py --root data/<name>`, then upload the
    `matrix=*/fraction=*/part-0000.parquet` tree and `manifest.json`.
+7. **Optional, for ArcGIS Pro 3.6+ users:** `arcgis_export.py --root data/<name>`
+   writes `data/<name>/arcgis/`, one GeoParquet layer per cell. Pro cannot
+   use the partitions themselves. Coordinates default to LONGITUDE/LATITUDE
+   as WGS84; EQuIS stores whatever datum it was given, so set the real one
+   in `data/<name>/arcgis.json` (`{"x":..., "y":..., "crs": "EPSG:<code>"}`).
+   Run it after each nightly; unchanged cells are left alone so Pro's
+   caches stay valid. Upload the `arcgis/` folder for Pro users (an Azure
+   Blob connection reads it).
 
 ## What "done" means - check every one
 
@@ -123,4 +132,4 @@ upload partitions + manifest.json                                       never ma
 |---|---|
 | `references/splitting.md` | Choosing cells and bins; why weights, probes and re-binning work as they do |
 | `references/failures.md` | Something stored nothing, timed out, double-counted, or converted wrongly |
-| `references/layout.md` | The parquet layout, both manifests, `units.json`, and reading it back |
+| `references/layout.md` | The parquet layout, both manifests, `units.json`, reading it back, and the ArcGIS output |
