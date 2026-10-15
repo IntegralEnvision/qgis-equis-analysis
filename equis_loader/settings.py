@@ -175,6 +175,28 @@ def save_storage(storage):
     settings.endGroup()
 
 
+def load_read_only():
+    """Whether the plugin may write to the tenant. Off unless chosen.
+
+    On, it never creates, saves or deletes a report or files one into a
+    group - only existing reports and stored agent output are read. Kept
+    across sessions because the reason for it (a read-only key, an
+    administrator's rule) does not change between sessions either.
+    """
+    settings = QSettings()
+    settings.beginGroup(GROUP)
+    value = settings.value("read_only", False, type=bool)
+    settings.endGroup()
+    return bool(value)
+
+
+def save_read_only(read_only):
+    settings = QSettings()
+    settings.beginGroup(GROUP)
+    settings.setValue("read_only", bool(read_only))
+    settings.endGroup()
+
+
 def geopackage_for_project(project_path, facility_name=""):
     """Where a project's EQuIS layers should be written.
 

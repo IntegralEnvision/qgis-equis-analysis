@@ -388,12 +388,19 @@ def _clean_base_url(site):
 
 
 class EquisClient:
-    def __init__(self, site, api_key, verify_ssl=True):
+    def __init__(self, site, api_key, verify_ssl=True, read_only=False):
         self.base = _clean_base_url(site)
         self.api_key = (api_key or "").strip()
         if not self.api_key:
             raise EquisError("No EQuIS API key configured.")
         self._ssl_ctx = None if verify_ssl else ssl._create_unverified_context()
+        # Refuse every write, here rather than in the panel: _request is the
+        # one door all five writes (create/save/delete a report, add/remove a
+        # group member) go through, so a caller added later cannot miss it.
+        # For read-only keys and administrators who want nothing created on
+        # their tenant; the panel reads this same flag to stay off the
+        # own-report path instead of keeping an opinion of its own.
+        self.read_only = bool(read_only)
 
     # ------------------------------------------------------------------ http
 
@@ -427,7 +434,12 @@ class EquisClient:
         # Writes are not retried: a POST that succeeded but whose response was
         # lost would be replayed into a second report, which is worse than
         # surfacing the error.
-        if payload is not None or (method and method not in ("GET", "HEAD")):
+        writes = payload is not None or (method and method not in ("GET", "HEAD"))
+        if writes and self.read_only:
+            raise EquisError(
+                "Read-only mode is on, so nothing is written to EQuIS "
+                "(refused %s %s)." % (method or "POST", path))
+        if writes:
             retries = 1
         last = None
         for attempt in range(max(1, retries)):

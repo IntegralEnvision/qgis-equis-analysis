@@ -148,62 +148,19 @@ Chart". It plots logger (sensor) series straight from the Live tables. It has
 **no report, no facility parameter and no 1,000-point ceiling**: one
 widget drew 14 series of 39k–97k points each (~1M points). Verified
 2026-10-07 on EQuIS Online 7.26.1, by reading a working widget, building two
-from scratch, and drawing them in a browser. That working widget was the only
-366 on the tenant, so the model is n=1. `references/live_widget.py` builds
+from scratch, and drawing them in a browser. Only one working widget was
+available to read, so the model is n=1. `references/live_widget.py` builds
 the config.
 
-### The Live API: not in the Swagger, but bearer auth works
+It goes through the documented widget endpoints above. The logger and series
+records it embeds are copied from an existing 366 widget's `userSettings`,
+or from one built in the dashboard editor, rather than looked up.
 
-The Live widgets call relative `api/...` paths that are not in the REST
-Swagger. They are visible in the client bundle,
-`<site>/assets/dist/js/widgets.equis.all.min.js` (fetch it with
-`Accept: */*`; `application/json` gets 406). The same
-`Authorization: Bearer` key works for all of them. Bodies are JSON; ids may
-be sent as a bare number or a JSON string.
-
-**Verified** (200 with data, 2026-10-07):
-
-| Call | Body | Returns |
-|---|---|---|
-| `GET api/loggers` | — | every logger you can see: `logger_id`, `logger_code`, `logger_desc`, `facility_id`, `sys_loc_code`, `utc_offset_hrs`, `live_data_source`, `status_flag` |
-| `POST api/loggers/getLoggersByParameters` | `{"onlyNotNullTransmitPeriod":false, "includeNullFacility":false, "includeNotNullFacility":true, "filterByFacility":true, "filterByFacilityId":<fid>}` | loggers for one facility (pass `FacilityId` 0 with `includeNullFacility:true` for unassigned ones) |
-| `GET api/loggers/{facilityId}/locations` | — | `[{facilityId, sys_loc_code}]`, every location in the facility |
-| `POST api/series/byLoggerId` | the logger id | the logger's series: `logger_series_id`, `series_desc`, `series_unit`, `depth`, `sensor_*`, ... |
-| `POST api/series/getSeriesDetails` | the series id | `series_desc` with `" (unit)"` appended, `series_unit`, `utc_offset_hrs`, `typical_min/max_value` |
-| `GET api/series/SeriesUnit` | — | every unit code available to series |
-| `POST api/datum/historicalChart` | the series object below | `{"list": [[ms, value], ...], "remarks", "qualifierDatum", "utcOffsetHrs", "dataGapDateTimes", "dateFormat"}`; a 9-year, 85k-point series in ~2.5 s |
-| `POST api/datum/liveChart` | `{"logger_series_id", "datum_utc_dt": <ms>, "digits", "id"}` | `{"logger_series_id", "data": [[ms, value], ...], "utcOffsetHrs"}` since `datum_utc_dt` |
-| `POST api/datum/mostRecent` | `{"logger_series_id", "amount": 1, "digits", "startDate": <ms>}` | latest point: `{LoggerDesc, SeriesDesc, DatumUtcDtMS, Value, SeriesMin, SeriesMax}` |
-| `POST api/datum/getExtremes` | `{"logger_series_id", "startDate": <ms>, "endDate": <ms>}` | `{"min", "max"}` over the window |
-| `POST api/datum/liveTable` | `{"loggerSeriesIds": [...], "digits", "hideMax", "hideMin", "hideNull", "hideReg"}` | one latest-value row per series, as `mostRecent` |
-| `POST api/datum/initHeatMap` | `{"seriesId", "startDate", "endDate", "frequency": "hour", "frequencyNumber": 1, "calculation": "avg"}` | binned `list`, plus `dataGapDateTimes` |
-
-**Does not work:** `GET api/loggers/{id}/series` returns 500 although the
-bundle references it (use `byLoggerId`); `GET api/loggers/Symbol` returns 404.
-`POST api/series/getSeriesDescriptions` `{"loggerId", "locCode"}` returned an
-empty list when given a placeholder `locCode`, so it filters on the location.
-
-**In the bundle, untested** (several WRITE; do not probe them casually):
-`api/datum/windRose` (GET, query params `loggerId`, `directionSeriesId`,
-`speedSeriesId`, `startDateJs`, `endDateJs`, ...), `api/series/windrose`,
-`api/series/getSeriesLocation`, `api/series/LocationParam`,
-`api/series/GetLoggerQualifier`, `api/series/SeriesConfigDetails`,
-`api/datum/getQualifiers`, `api/datum/remarks[/{id}]` (also PUT/DELETE),
-`api/datum/remarkOrQualifierSearch`, `api/datum/qualifyData` and
-`api/datum/addQualifierToDatabase` (both write), `api/loggers/checkSchemas`.
-Feed integrations: `api/adcon/{login,gettreeitem,adddevice,removedevice}`,
-`api/weatherunderground/{gettreeitem,stationactivate,stationdeactivate}`,
-`api/fileprocessor`.
-
-Timestamps in `list`/`data` are already shifted by the logger's
-`utc_offset_hrs`: local wall-clock time encoded as epoch ms, not true UTC.
-
-### Other Live widgets in the bundle
+### Other Live widgets
 
 `Live/LiveTable/`, `Live/FileProcessor/`, and a DeviceBrowser (widgetTypeId
-363) were seen. The gauge, live chart, heat map and wind rose widgets are the
-callers of `mostRecent`/`getExtremes`, `liveChart`, `initHeatMap` and
-`windRose`. Only the historical chart (366) has been built and verified.
+363) were seen, along with gauge, live chart, heat map and wind rose widgets.
+Only the historical chart (366) has been built and verified.
 
 ### Config: three structures that must agree
 
@@ -216,7 +173,7 @@ Everything is in `userSettings` (a JSON string). Each series has one key,
 - `legendObjs`: key → `{facility, logger, series, frequency, calculation,
   type, lineType, axis, seriesColor, startDate, days, series_unit, tooltip,
   ...}`. **The chart is drawn from these two**. `logger` is the whole
-  record from `api/loggers`, and `series` is `{logger_series_id, series_desc}`.
+  logger record, as an existing widget holds it, and `series` is `{logger_series_id, series_desc}`.
 - `legendItems`: a flat row per series for the editor's grid (`Series`,
   `LoggerSeriesId`, `Logger`, `StartDate` as `MM/DD/YYYY`, `Id` = the key).
   The editor rebuilds `legendItemIds` from it on reorder, so it must hold the
@@ -237,33 +194,17 @@ window.
 
 **A rolling window can be legitimately empty.** A "live" feed may have
 stopped: on the tenant tested, no series had data in the four months before
-the test, and two had stopped years earlier. Before choosing a window, check
-each series' last point with `historicalChart` and `startDate: 0`. An empty
-chart is not a broken config.
-
-### The request body
-
-What the browser POSTs to `api/datum/historicalChart` (captured 2026-10-07;
-ids and names are placeholders):
-
-```json
-{"id": "1001.none.none.line", "name": "SW-01 Turbidity (NTU)",
- "logger_series_id": 1001, "frequency": "none", "calculation": "none",
- "type": "line", "seriesId": "1001.none.none.line",
- "startDate": 1501545600000, "showRemarks": false, "qualifiers": null,
- "digits": 2, "max": null, "maxHide": false, "min": null, "minHide": false,
- "logger_name": "Station SW-01", "days": 0, "yAxis": 0,
- "showPlotband": false, "color": "#7cb5ec", "dashStyle": "Solid",
- "connectNulls": false}
-```
+the test, and two had stopped years earlier. Before choosing a window, draw
+it with `days: 0` from an early `startDate` to see where each series ends. An
+empty chart is not a broken config.
 
 ### Opening the dashboard as its owner writes to it
 
 When someone who can edit the dashboard opens it, the widget refreshes
 logger and series details and then **`PUT`s its own `userSettings` back**,
 without the viewer doing anything. It overwrites each series' `series_desc`
-with `getSeriesDetails`'s value minus `" (unit)"` (which can leave a trailing
-space), and the `logger` objects with fresh `api/loggers` records. It is
+with the server's description minus `" (unit)"` (which can leave a trailing
+space), and the `logger` objects with fresh records. It is
 idempotent: a working dashboard was byte-identical after a view. A config you
 wrote will read back slightly different after anyone with edit rights views
 it, so compare the keys and ids, not the whole JSON.
@@ -283,18 +224,6 @@ also loads `js.arcgis.com`, so attaching the header to every request would
 send the key to Esri. The SPA then loads as the key's user. Open
 `<site>/Default.aspx?d=<id>`, wait for network idle plus ~15 s, then count
 `.highcharts-container` legends.
-
-## Other undocumented endpoints the web client uses
-
-Besides Live, the client bundles (`widgets.equis.all.min.js`, `app.min.js`,
-`components.all.min.js`) call these paths that are absent from the Swagger,
-seen on 7.26.1. Untested here: `api/collect`, `api/collect/reports`,
-`api/collect/users/groups`, `api/config/user`, `api/download/dashboard`,
-`api/download/file`,
-`api/reports/{id}/geojson...`, `api/spm/{analytics,landaccess,resourcegroups,tasks}`,
-`api/users/{id}/totp`, `api/widgets/encrypt`. Grepping the bundles for
-`'api/` is the quickest way to find how the UI does something the Swagger
-does not describe; the call site shows the body it sends.
 
 ## Rendering limits
 

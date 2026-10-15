@@ -707,6 +707,74 @@ def test_real_listing():
           live.find() == 501, str(live.find()))
 
 
+def test_read_only():
+    """Read-only refuses every write before it leaves the machine.
+
+    Through the REAL EquisClient with urlopen stubbed, so the gate tested is
+    the one in _request that every write passes through, not a stub's
+    imitation of it. Reads must still work, or the mode would be useless.
+    """
+    import urllib.request
+    from equis_loader.equis_api import EquisClient, EquisError
+
+    sent = []
+
+    class _Resp(object):
+        headers = {"Content-Type": "application/json"}
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_a):
+            return False
+
+        def read(self):
+            return b"[]"
+
+    def fake_urlopen(req, **_kw):
+        sent.append((req.get_method(), req.full_url))
+        return _Resp()
+
+    real = urllib.request.urlopen
+    urllib.request.urlopen = fake_urlopen
+    try:
+        client = EquisClient("https://example.invalid", "token",
+                             read_only=True)
+        writes = [
+            ("create_report", lambda: client.create_report(
+                1, "n", "c", 42, [], remark="r")),
+            ("save_report", lambda: client.save_report({"id": -5})),
+            ("delete_report", lambda: client.delete_report(-5)),
+        ]
+        for label, call in writes:
+            try:
+                call()
+                refused = False
+            except EquisError as exc:
+                refused = "Read-only" in str(exc)
+            check("read-only: %s is refused" % label, refused)
+        # These two swallow errors by design (filing is tidiness), so the
+        # proof is that nothing was sent and neither claims success.
+        check("read-only: filing into a group does not succeed",
+              client.add_group_member(7, -5) is False)
+        check("read-only: removing a membership does not succeed",
+              client.remove_group_member(7, -5) is False)
+        check("read-only: no write reached the network", not sent, str(sent))
+
+        client.list_groups()
+        check("read-only: reads still go through",
+              sent == [("GET", "https://example.invalid/api/groups")],
+              str(sent))
+
+        del sent[:]
+        client.read_only = False
+        client.delete_report(-5)
+        check("read-only: released mid-session, writes are sent again",
+              [m for m, _ in sent] == ["DELETE"], str(sent))
+    finally:
+        urllib.request.urlopen = real
+
+
 def main():
     test_encoding()
     test_selection_parameters()
@@ -720,6 +788,7 @@ def main():
     test_prepare_before_fetch()
     test_truncated_names()
     test_real_listing()
+    test_read_only()
     print("\n%s" % ("ALL LIVE TESTS PASSED" if not FAILURES
                     else "FAILURES: %s" % ", ".join(FAILURES)))
     return 1 if FAILURES else 0

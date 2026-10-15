@@ -1,4 +1,4 @@
-"""Build an EQuIS Live AdvancedTimeSeries (widgetTypeId 366) config from API lookups.
+"""Build an EQuIS Live AdvancedTimeSeries (widgetTypeId 366) config.
 
 The widget renders from userSettings.legendItemIds + legendObjs (control.js);
 the editor grid shows legendItems and rebuilds legendItemIds from it on reorder.
@@ -9,11 +9,16 @@ series from its own startDate; N = rolling, last N days). The per-series
 "days" field does not move the window. See dashboards.md, "EQuIS Live
 historical chart". Verified 2026-10-07 on EQuIS Online 7.26.1 by rendering in headless Chromium.
 
-    e = Equis(base, key)                       # survey-snippets.py
+The logger, series and unit come from an existing 366 widget's
+userSettings (GET /api/dashboards/{id}/widgets), whose legendObjs carry
+them, or from a widget first built in the dashboard editor:
+
+    old = json.loads(existing_widget["userSettings"])["legendObjs"]
     entries = []
-    for i, sid in enumerate([1001, 1002]):          # logger_series_id values
-        lg, s, det = lookup(e, sid)
-        entries.append(series_entry(lg, s, det, "My Facility", PALETTE[i]))
+    for i, o in enumerate(old.values()):
+        entries.append(series_entry(o["logger"], o["series"],
+                                    {"series_unit": o["series_unit"]},
+                                    "My Facility", PALETTE[i]))
     us = user_settings(entries, days=0)
     check(us)
     widget["userSettings"] = json.dumps(us)    # then PUT/POST the widget
@@ -49,19 +54,6 @@ GLOBAL_DEFAULTS = {
         "hideSmallerParam", "hideLargerParam")},
     "qualifierOptions": [],
 }
-
-
-def lookup(e, logger_series_id):
-    """(facility, logger, series) for one series id, from the Live API alone."""
-    st, b = e.call("/api/series/getSeriesDetails", "POST", logger_series_id)
-    det = json.loads(b)
-    loggers = json.loads(e.call("/api/loggers")[1])
-    for lg in loggers:
-        st, b = e.call("/api/series/byLoggerId", "POST", str(lg["logger_id"]))
-        for s in json.loads(b) or []:
-            if s["logger_series_id"] == logger_series_id:
-                return lg, s, det
-    raise LookupError("series %s not under any visible logger" % logger_series_id)
 
 
 def series_entry(logger, series, details, facility_name, color,
@@ -123,34 +115,3 @@ def check(us):
         assert sid.split(".")[0] == str(o["series"]["logger_series_id"])
         assert o["logger"]["logger_id"], "logger missing"
     return True
-
-
-def series_request(us, sid):
-    """The body control.js POSTs to api/datum/historicalChart for one series.
-
-    Mirrors control.js getStartDate(legendObj.startDate, vm.days): the
-    widget-level days wins over the series' fixed startDate.
-    """
-    import datetime
-    o = us["legendObjs"][sid]
-    days = us.get("days") or 0
-    if days:
-        start = int((datetime.datetime.now(datetime.timezone.utc)
-                     - datetime.timedelta(days=abs(days))).timestamp() * 1000)
-    else:
-        start = int(datetime.datetime.fromisoformat(
-            o["startDate"].replace("Z", "+00:00")).timestamp() * 1000)
-    name = o["series"]["series_desc"]
-    if us.get("appendUnit"):
-        name += " (%s)" % o["series_unit"]
-    return {"id": sid, "name": name,
-            "logger_series_id": o["series"]["logger_series_id"],
-            "frequency": o["frequency"]["value"], "calculation": o["calculation"]["value"],
-            "type": o["type"]["value"], "seriesId": sid, "startDate": start,
-            "showRemarks": o["showRemarks"], "qualifiers": o["selectedQualifiers"] or None,
-            "digits": us.get("digits", 2), "max": o["max"], "maxHide": o["hideLarger"],
-            "min": o["min"], "minHide": o["hideSmaller"],
-            "logger_name": (o["logger"].get("logger_desc") or "").strip() or o["logger"]["logger_code"],
-            "days": o["days"], "yAxis": 0, "showPlotband": o["showPlotband"],
-            "color": o["seriesColor"], "dashStyle": o["lineType"]["value"],
-            "connectNulls": False}

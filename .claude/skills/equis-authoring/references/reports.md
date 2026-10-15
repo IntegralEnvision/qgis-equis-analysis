@@ -48,8 +48,8 @@ The comma form is the dangerous one: it looks like it worked.
 
 **Find the base id; do not assume it.** List `/api/reports`, find the
 `.system`-owned report whose name is "Analytical Results II" (its `id`
-equals its `baseReportId`), and use that. It was 508 on every tenant tested,
-but nothing guarantees it.
+equals its `baseReportId`), and use that. It has been the same small id on
+every tenant tested, but nothing guarantees it.
 
 ### Useful parameters on Analytical Results II
 

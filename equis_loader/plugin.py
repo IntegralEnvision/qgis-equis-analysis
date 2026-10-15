@@ -8,7 +8,9 @@ from qgis.PyQt.QtWidgets import QAction
 
 from .dialog import EquisDialog
 
-MENU = "&EQuIS"
+# Named for what it does, not for EQuIS: the plugin is not an EarthSoft
+# product, and a menu called EQuIS reads as though it were.
+MENU = "&Chemistry Explorer"
 
 
 class EquisLoaderPlugin:
@@ -21,7 +23,7 @@ class EquisLoaderPlugin:
     def initGui(self):
         here = os.path.dirname(__file__)
         icon = self._icon(os.path.join(here, "icon.svg"))
-        self.action = QAction(icon, "EQuIS Chemical Explorer...",
+        self.action = QAction(icon, "QGIS Chemistry Explorer...",
                               self.iface.mainWindow())
         self.action.setObjectName("equisLoaderAction")
         self.action.triggered.connect(self.run)
@@ -30,13 +32,13 @@ class EquisLoaderPlugin:
         # arm, click again (or pick another tool) to release the cursor.
         self.pick_action = QAction(
             self._icon(os.path.join(here, "icon_timeseries.svg")),
-            "EQuIS Time Series", self.iface.mainWindow()
+            "Chemistry Time Series", self.iface.mainWindow()
         )
         self.pick_action.setObjectName("equisTimeSeriesAction")
         self.pick_action.setCheckable(True)
         self.pick_action.setToolTip(
-            "EQuIS Time Series\n"
-            "Click a location on the EQuIS result layer to plot the selected\n"
+            "Chemistry Time Series\n"
+            "Click a location on a result layer to plot the selected\n"
             "chemical's history there."
         )
         self.pick_action.setEnabled(False)

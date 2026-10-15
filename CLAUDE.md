@@ -60,6 +60,16 @@ without a GUI. Anything needing a path takes it from the caller, as
 `cache.py` does. Do not import `qgis.*` into these modules to save a few
 lines elsewhere.
 
+## Writing to the tenant
+
+The plugin writes to an EQuIS site in exactly five ways - create, save and
+delete its own report, add and remove a group membership - and the README's
+"What it writes to your EQuIS site" section lists them for administrators.
+Every write goes through `EquisClient._request`, which refuses all of them
+when `read_only` is set; the panel reads that same flag rather than keeping
+its own. A new write must go through `_request` and be added to that README
+section, and the plugin calls only the REST API's documented endpoints.
+
 ## Domain rules that must not be broken
 
 These are not style preferences. Each one exists because getting it wrong

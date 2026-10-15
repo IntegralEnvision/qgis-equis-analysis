@@ -211,8 +211,8 @@ def find_base_report(api, code="Analytical Results II"):
     """The tenant's ARII base report id, by what it is - not by a number.
 
     A base report is owned by .system and is its own base (id ==
-    baseReportId). 508 on every tenant seen so far, but ids are allocated
-    per tenant, so it is looked up.
+    baseReportId). The same id on every tenant seen so far, but ids are
+    allocated per tenant, so it is looked up.
     """
     status, body = api.json("/api/reports")
     records = body if isinstance(body, list) else (body or {}).get("value") or []

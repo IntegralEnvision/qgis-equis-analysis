@@ -293,10 +293,12 @@ class EquisDialog(QDockWidget):
     def __init__(self, iface, parent=None, pick_action=None):
         super().__init__(parent)
         self.iface = iface
-        # The toolbar's checkable "EQuIS Time Series" action, when the plugin
+        # The toolbar's checkable "Chemistry Time Series" action, when the plugin
         # created one. Kept in step with the in-dialog button.
         self.pick_action = pick_action
-        self.setWindowTitle("EQuIS Chemical Explorer")
+        self.setWindowTitle("QGIS Chemistry Explorer")
+        # The old object name, kept: QGIS restores a dock's position by it,
+        # so renaming it would put every user's panel back at the default.
         self.setObjectName("EquisChemicalExplorerPanel")
         self.setMinimumWidth(380)
         self.setAllowedAreas(
@@ -545,6 +547,15 @@ class EquisDialog(QDockWidget):
         conn_row = QHBoxLayout()
         self.verify_ssl_check = QCheckBox("Verify SSL")
         self.verify_ssl_check.setChecked(True)
+        self.read_only_check = QCheckBox("Read-only")
+        self.read_only_check.setToolTip(
+            "Never create, change or delete anything on the EQuIS site.\n"
+            "The plugin's own filtered report is then unavailable: only the\n"
+            "facility's existing reports, or an agent's stored output, can\n"
+            "be read. For read-only API keys, or sites whose administrators\n"
+            "want nothing created."
+        )
+        self.read_only_check.toggled.connect(self._on_read_only_toggled)
         self.offline_btn = QPushButton("Work offline")
         self.offline_btn.setToolTip(
             "Browse previously loaded facilities and reports from this\n"
@@ -554,6 +565,7 @@ class EquisDialog(QDockWidget):
         self.connect_btn = QPushButton("Connect")
         self.connect_btn.clicked.connect(self._on_connect)
         conn_row.addWidget(self.verify_ssl_check)
+        conn_row.addWidget(self.read_only_check)
         conn_row.addStretch(1)
         conn_row.addWidget(self.offline_btn)
         conn_row.addWidget(self.connect_btn)
@@ -611,13 +623,14 @@ class EquisDialog(QDockWidget):
         rpt_layout.addWidget(self.own_report_label)
 
         self.pick_report_check = QCheckBox("Use an existing report instead")
-        self.pick_report_check.setToolTip(
+        self._pick_report_tip = (
             "By default the plugin queries through its own report, filtered\n"
             "by the data selection below.\n"
             "Tick this to run one of the facility's saved reports as it is -\n"
             "useful for a report someone has already tuned, or one whose\n"
             "output an information agent has stored."
         )
+        self.pick_report_check.setToolTip(self._pick_report_tip)
         self.pick_report_check.toggled.connect(self._on_pick_report_toggled)
         rpt_layout.addWidget(self.pick_report_check)
 
@@ -1113,6 +1126,8 @@ class EquisDialog(QDockWidget):
         # Offline browsing is a cache of API responses; a parquet set is
         # already local-or-remote on its own terms and has no such cache.
         self.offline_btn.setVisible(not parquet)
+        # A parquet set is read from files, so there is nothing to write to.
+        self.read_only_check.setVisible(not parquet)
         self.connect_btn.setText("Open" if parquet else "Connect")
 
         # Step 3 chooses which report EQuIS should run. A parquet set has no
@@ -1159,6 +1174,7 @@ class EquisDialog(QDockWidget):
         self.site_edit.setText(cfg["site"])
         self.key_edit.setText(cfg["api_key"])
         self.verify_ssl_check.setChecked(cfg["verify_ssl"])
+        self.read_only_check.setChecked(settings_store.load_read_only())
         self.parquet_edit.setText(cfg.get("parquet_url", ""))
         index = self.source_combo.findData(cfg.get("source",
                                                    settings_store.SOURCE_LIVE))
@@ -1907,6 +1923,7 @@ class EquisDialog(QDockWidget):
                 self.site_edit.text(),
                 self.key_edit.text(),
                 verify_ssl=self.verify_ssl_check.isChecked(),
+                read_only=self.read_only_check.isChecked(),
             )
         except EquisError as exc:
             self._set_status(str(exc), Qgis.MessageLevel.Critical)
@@ -2990,6 +3007,12 @@ class EquisDialog(QDockWidget):
         """
         if self._offline or self._client is None:
             return False
+        # The client's flag, not the checkbox: it is what actually refuses
+        # the writes this path needs, so it is the one that can say no.
+        # getattr because the panel tests hand in duck-typed clients; that
+        # cannot let a write through, since _request is where it is refused.
+        if getattr(self._client, "read_only", False):
+            return False
         return not self.pick_report_check.isChecked()
 
     def _current_report(self):
@@ -3014,6 +3037,26 @@ class EquisDialog(QDockWidget):
             }
         index = self.report_combo.currentIndex()
         return self.report_combo.itemData(index) if index >= 0 else None
+
+    def _on_read_only_toggled(self, read_only):
+        """Hold the tenant read-only, or release it.
+
+        The client is told directly so the change holds mid-session; the
+        report step is then pinned to existing reports, since the plugin's
+        own report cannot be created or re-filtered without writing.
+        """
+        settings_store.save_read_only(read_only)
+        if self._client is not None:
+            self._client.read_only = read_only
+        if read_only:
+            self.pick_report_check.setChecked(True)
+        self.pick_report_check.setEnabled(not read_only)
+        self.pick_report_check.setToolTip(
+            "Read-only mode is on (step 1), so the plugin's own report,\n"
+            "which it creates and re-filters on the site, is unavailable."
+            if read_only else self._pick_report_tip)
+        self._update_own_report_label()
+        self._update_report_actions()
 
     def _on_pick_report_toggled(self, picking):
         """Show the report list only when the user asks for one."""

@@ -1,6 +1,12 @@
-# EQuIS Chemical Explorer (QGIS plugin)
+# QGIS Chemistry Explorer
 
-Maps analytical chemistry from EQuIS Enterprise in QGIS.
+A QGIS plugin that maps analytical chemistry from EQuIS Enterprise.
+
+> EQuIS is a trademark of EarthSoft, Inc. This project is not affiliated
+> with or endorsed by EarthSoft. It is an independent client of the EQuIS
+> REST API, and calls only its facility (`/api/facilities`, including the
+> feature service), report (`/api/reports`) and group (`/api/groups`)
+> endpoints.
 
 Its core is the **classic pattern**: query EQuIS live, through a report that
 is filtered before it runs, and map the analytes it returns - one layer per
@@ -8,20 +14,53 @@ chemical, aggregated per location or one point per result, with the time
 series, sparklines and depth profiles behind each point a click away.
 
 Developed and tested on QGIS 4.2.1 (Windows, Qt 6 / PyQt6) against EQuIS
-Enterprise 7.25 and 7.26.
+Enterprise 7.25 and 7.26. QGIS will install it from 3.34 up, and the classic
+workflow runs there; the experimental views below need 4.2, and new work
+targets 4.2 only, so the minimum will rise to 4.2 when they stop being
+experimental.
 
 Beside it sits **experimental** work: a whole facility exported to parquet
 and read with DuckDB, and an *Analysis* tab of linked charts drawn with
 Mosaic in a web view. See [Experimental: parquet sources and the Analysis
 tab](#experimental-parquet-sources-and-the-analysis-tab).
 
+## What it writes to your EQuIS site
+
+Most of what the plugin does is reading. By default it also keeps **one
+report per user per facility** on the site, because EQuIS applies a
+report's filters only when they are saved on the report (see [Live
+queries](#live-queries-through-your-own-report)). Specifically, it:
+
+- **creates** that report the first time a user picks a facility
+  (`POST /api/reports`), built on the site's *Analytical Results II* base
+  report and named `QGIS plugin - <user> - <facility> (<id>)`. Its remark
+  says which plugin made it and that it is safe to delete;
+- **rewrites its filters** before each fetch (`PUT /api/reports/{id}`);
+- **files it** into an *existing* report group whose name matches the
+  facility (`POST /api/groups/{id}/members`), if there is one. It never
+  creates groups, and a failure to file is not an error.
+
+That needs **Creator on Reports**. Nothing else on the site is changed:
+other reports, agents, dashboards and data are only read.
+
+**To clean up**, delete the reports whose names begin with `QGIS plugin - `.
+The plugin makes a new one the next time it is used.
+
+**Read-only mode.** Tick **Read-only** beside *Connect* and the plugin
+writes nothing at all: every create, save, delete or group change is
+refused before it leaves the machine. The plugin's own filtered report is
+then unavailable, so step 3 runs the facility's existing reports, or reads
+the output an information agent has already stored. The setting is
+remembered. Use it with a read-only API key, or wherever an administrator
+wants nothing created.
+
 ## Install
 
 Download the plugin ZIP from the
 [Releases page](https://github.com/integralenvision/qgis-equis-analysis/releases).
 In QGIS, go to *Plugins → Manage and Install Plugins → Install from ZIP*,
-choose the file, then enable **EQuIS Chemical Explorer**. The panel and its
-map tool appear on the toolbar and under *Web → EQuIS*. The plugin is not in
+choose the file, then enable **QGIS Chemistry Explorer**. The panel and its
+map tool appear on the toolbar and under *Web → Chemistry Explorer*. The plugin is not in
 the QGIS plugin repository.
 
 **Building the ZIP yourself:**
@@ -59,9 +98,10 @@ Credentials entered in the panel are saved to QSettings, so `.env` is only a
 convenience for the first launch. Keep `.env` out of version control.
 
 The account needs **Creator on Reports** for the live query path, which
-creates one report of its own per facility (see below). Without it the
-first fetch fails with a message saying so; running an existing report
-still works.
+creates one report of its own per facility (see [What it writes to your
+EQuIS site](#what-it-writes-to-your-equis-site)). Without it the first fetch
+fails with a message saying so; running an existing report still works, and
+**Read-only** makes that the only path.
 
 ## The classic workflow
 
@@ -70,7 +110,8 @@ left or floating). Its **Data** tab holds the steps; each is a collapsible
 section that folds away as it completes and opens the next.
 
 1. **Connect** - a site URL and API key, or **Work offline** to browse what
-   is cached.
+   is cached. **Read-only** keeps the plugin from writing anything to the
+   site.
 2. **Facility** - pick one; its location points go onto the map.
 3. **Data source** - by default, your own report on Analytical Results II
    (created on first use; see [Live queries](#live-queries-through-your-own-report)).
@@ -237,8 +278,8 @@ GeoPackage.
 Fetched rows are held in memory, so choosing chemicals, switching aggregation,
 and clicking points are instant after the fetch. Row lookups go through an
 index built on first use, grouping row positions by chemical and by
-chemical+location: drawing sparklines for 300 locations on a 460,000-row report
-took about 45 seconds of full scans without it, and 0.007 s with it. Where
+chemical+location: drawing sparklines for 300 locations on a report of about
+half a million rows took about 45 seconds of full scans without it, and 0.007 s with it. Where
 DuckDB is available (it ships with QGIS 4.2 on Windows) the rows are also
 loaded into a DuckDB store in the background, which the experimental views
 read.
@@ -246,7 +287,7 @@ read.
 ## Working offline
 
 Everything pulled from EQuIS is cached on disk, under the active QGIS profile
-(`…/profiles/default/equis_cache`). A 460,000-row report keeps about 4 MB there
+(`…/profiles/default/equis_cache`). A report of about half a million rows keeps about 4 MB there
 and reloads in under a second, against the minutes a live run costs.
 
 **Data loads from the cache by default.** The report combo marks which reports
@@ -856,7 +897,13 @@ The end-to-end check runs against the live API and needs the QGIS Python:
 `--report` additionally executes a real report, which is slow (minutes).
 [CLAUDE.md](CLAUDE.md) lists every test, including the experimental views'.
 
-Last verified against the live site (August 2026): 26 facilities listed; 10,349
-location points read in a single request; a 461,936-row report parsed in
-~40 s; 786 chemicals listed in 0.3 s; PFOA aggregated across 5,312 locations in
-2.2 s; a 126-point time series spanning 2007–2025.
+## Contributing and support
+
+Issues and pull requests are welcome; see [CONTRIBUTING.md](CONTRIBUTING.md).
+Report a security problem privately, as [SECURITY.md](SECURITY.md) describes,
+rather than in a public issue.
+
+Last verified against a live site (August 2026): about 10,000 location points
+read in a single request; a report of nearly half a million rows parsed in
+~40 s; several hundred chemicals listed in 0.3 s; one chemical aggregated
+across about 5,000 locations in 2.2 s; a time series spanning 18 years.
