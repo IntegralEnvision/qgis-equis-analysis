@@ -619,7 +619,11 @@ does, against a tenant you hold an API key for:
    with its own information agent (EIA) run nightly by EQuIS;
 3. collect each agent's stored output, converting units with EQuIS's own
    factors so a column never mixes them;
-4. repack by matrix and fraction, and publish the manifest.
+4. repack by matrix and fraction, and publish the manifest;
+5. optionally, write the same rows as GeoParquet for ArcGIS Pro 3.6+
+   (`arcgis_export.py`): one layer per matrix and fraction, with the
+   non-detect columns a Pro user needs, since `RESULT_NUMERIC` is empty
+   for a non-detect.
 
 It is written as a [Claude Code skill](https://docs.claude.com/en/docs/claude-code/skills)
 (`SKILL.md` is the procedure, `references/` the measured failure modes), and
