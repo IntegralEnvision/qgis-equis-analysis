@@ -23,8 +23,8 @@ class EquisTemplateError(Exception):
 
 # Analytical Results II. Every filter the data selection sets lives on this
 # base report's parameter list. Found by NAME, never by id: base report ids
-# are allocated per tenant (508 on the one this was built against, which is
-# exactly why no code may assume it).
+# are allocated per tenant (and differ between the three base reports
+# that share its code, below), which is exactly why no code may assume one).
 BASE_REPORT_CODE = "Analytical Results II"
 SYSTEM_OWNER = ".system"
 
@@ -55,12 +55,14 @@ def is_base_report(report, code=BASE_REPORT_CODE):
 NAME_PREFIX = "QGIS plugin"
 
 # EQuIS stores at most this many characters of a report name and silently
-# drops the rest. Measured 2026-10-12: no name of the tenant's 964 reports is
-# longer, and 31 stop at exactly 64, mid-word.
+# drops the rest. Measured 2026-10-12 on a tenant with about a thousand
+# reports: none has a longer name, and a few dozen stop at exactly 64,
+# mid-word.
 NAME_LIMIT = 64
 
 REMARK = (
-    "Created by the EQuIS Chemical Explorer QGIS plugin. Its filters are "
+    "Created by the QGIS Chemistry Explorer plugin "
+    "(github.com/integralenvision/qgis-equis-analysis). Its filters are "
     "rewritten on each fetch, so edits here do not persist. Safe to delete "
     "when no longer needed - the plugin recreates it."
 )
@@ -177,12 +179,12 @@ class LiveReport(object):
 
         THE BASE FIRST, BY NAME, AND ONLY REPORTS ON IT. Measured on the
         tenant 2026-10-12: three .system base reports share the code
-        "Analytical Results II" - the base itself (508 there), "...with
+        "Analytical Results II" - the base itself, "...with
         Sample Selection" (54 parameters to its 55) and "...- reportable
         sample" - so the code does not identify a base. User reports are
         not even listed with that code. The old search matched on code and
-        created on a hard-coded 508; it worked only because 508 is the
-        smallest of the three ids. Now: the base is the .system report
+        created on a hard-coded id; it worked only because that id was the
+        smallest of the three. Now: the base is the .system report
         NAMED "Analytical Results II" that is its own base; the clone comes
         from our own reports on it, then anyone's, then the base itself
         (always there, so a tenant with no reports yet still works); and the

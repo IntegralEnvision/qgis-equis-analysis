@@ -205,7 +205,7 @@ class TimeSeriesDock(QDockWidget):
     """
 
     def __init__(self, parent=None):
-        super().__init__("EQuIS Time Series", parent)
+        super().__init__("Chemistry Time Series", parent)
         # Stable, because QGIS stores dock geometry against it: without one
         # the plot would forget its size and position every session.
         self.setObjectName("EquisTimeSeriesPanel")

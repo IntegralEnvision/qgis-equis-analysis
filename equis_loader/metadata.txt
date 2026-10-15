@@ -1,10 +1,10 @@
 [general]
-name=EQuIS Chemical Explorer
+name=QGIS Chemistry Explorer
 qgisMinimumVersion=3.34
 qgisMaximumVersion=4.99
-description=Map analytical chemistry from EQuIS: pick a facility, a report, and a chemical, then click points for time series.
-about=Connect to an EQuIS Enterprise site with an API key and pick a facility; its location points are added to the map. Choose an analytical report (ARII reports are preselected) and a chemical, then map the most recent or maximum result per location. Clicking a point plots that chemical's time series at that location.
-version=3.31.0
+description=Map analytical chemistry from an EQuIS Enterprise site: pick a facility and chemicals, map them per location, and click points for time series.
+about=Connect to an EQuIS Enterprise site with an API key and pick a facility; its location points are added to the map. Choose chemicals and filters, then map the most recent or maximum result per location, or every result. Clicking a point plots that chemical's time series at that location. By default the plugin keeps one filtered report per user per facility on the site (it needs Creator on Reports); tick Read-only to have it write nothing and use existing reports instead. EQuIS is a trademark of EarthSoft, Inc. This project is not affiliated with or endorsed by EarthSoft.
+version=3.32.0
 author=Integral Consulting Inc.
 email=jcollord@integral-corp.com
 
@@ -12,14 +12,25 @@ homepage=https://github.com/integralenvision/qgis-equis-analysis
 tracker=https://github.com/integralenvision/qgis-equis-analysis/issues
 repository=https://github.com/integralenvision/qgis-equis-analysis
 
-tags=equis,earthsoft,environmental,rest,api,featureserver,groundwater
+tags=equis,environmental,rest,api,featureserver,groundwater
 category=Web
 icon=icon.svg
 experimental=False
 deprecated=False
 hasProcessingProvider=no
 
-changelog=3.12.4 - Changing the aggregate no longer greys out the map button.
+changelog=3.32.0 - Renamed QGIS Chemistry Explorer, and a Read-only mode.
+    The plugin was called EQuIS Chemical Explorer, which read as an EarthSoft
+    product. It is not one, and now says so. The menu is Web > Chemistry
+    Explorer and the map tool is Chemistry Time Series. The panel keeps its
+    place on screen; nothing else about it changes.
+    A Read-only checkbox beside Connect stops the plugin writing anything to
+    the EQuIS site: creating, re-filtering or deleting its own report and
+    filing it into a group are all refused before they are sent. Step 3 then
+    runs the facility's existing reports, or reads an agent's stored output.
+    It is remembered between sessions, for read-only keys and for sites
+    whose administrators want nothing created.
+  3.12.4 - Changing the aggregate no longer greys out the map button.
     The aggregate combo was wired straight to the routine that decides which
     buttons are usable, and Qt passes the newly chosen index to it - which
     that routine read as its 'busy' flag. Picking anything other than the
@@ -120,7 +131,7 @@ changelog=3.12.4 - Changing the aggregate no longer greys out the map button.
     Measured on a facility whose unfiltered report fails at the 230 s limit:
     8.5 s to a usable panel, then a first fetch of one chemical returning
     11,060 rows in 7.3 s, with no row limit needed.
-  3.9.1 - Your own report is the way in, not a list of 879.
+  3.9.1 - Your own report is the way in, not a list of hundreds.
     3.9.0 still opened with a report selector, so the first thing asked was
     which of the facility's saved reports to use - and only then did the
     query quietly redirect to your own. Step 3 is now 'Data source' and uses
@@ -184,7 +195,7 @@ changelog=3.12.4 - Changing the aggregate no longer greys out the map button.
     unreadable mat of overlapping markers.
   3.5.1 - Report lookups are indexed.
     Every aggregate and time series scanned the whole report, so drawing
-    sparklines for 300 locations on a 460,000-row report meant 300 full scans
+    sparklines for 300 locations on a half-million-row report meant 300 scans
     and took about 45 seconds - which made rolling sparklines unusable on a
     real report. Row positions are now indexed by chemical and by
     chemical+location on first use: the same work takes 0.007 s.

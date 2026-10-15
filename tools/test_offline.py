@@ -143,7 +143,10 @@ def main():
         row = {"SYS_LOC_CODE": "MW-1", "SAMPLE_DATE": "01/01/2020",
                "CHEMICAL_NAME": "Benzene", "CAS_RN": "71-43-2",
                "RESULT_NUMERIC": "5.0", "RESULT_UNIT": "ug/L",
-               "DETECT_FLAG": "Y", "MATRIX_CODE": "WG"}
+               "DETECT_FLAG": "Y", "MATRIX_CODE": "WG",
+               # Set, not left blank: QC samples are excluded by default,
+               # and a blank type is not "N", so this row would vanish.
+               "SAMPLE_TYPE_CODE": "N"}
         rows = [[row.get(h, "") for h in headers]]
         params = {"max_rows": None, "where": None, "keep_columns": headers}
         cache.put_report(SITE, 42, 77, headers, rows, truncated=False,
@@ -368,6 +371,11 @@ def main():
             lambda t=None: (calls.append(1), original(t))[1])
         try:
             panel._report_table = loop_table
+            # Scoped as _on_report_ready scopes any table that arrives.
+            # Unscoped, the first change signal re-scoped it, which re-counted
+            # the chemicals - a third call here, and Cobalt leaking into the
+            # facility's offer for the 'chem:' checks below to trip over.
+            panel._apply_row_scope()
             panel._last_analyte = "something else"
             panel._sync_analysis_filters(loop_table)
             check("recursion: rebuilding the offers settles, not loops",
