@@ -856,7 +856,6 @@ tools/               tests, probes, package.py, install.py
 docs/                design notes and measurements
 .claude/skills/
   equis-parquet-export/   a whole facility to parquet: survey, slice, collect, publish
-  equis-authoring/        EQuIS reports, agents and dashboards through the REST API
 ```
 
 The modules marked *no QGIS imports* are testable with a plain Python
