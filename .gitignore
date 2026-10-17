@@ -48,3 +48,12 @@ data/**/published.json
 data/**/manifest_pub.json
 data/**/manifest_to_upload.json
 data/facility_a_backup_*/
+
+# Claude Code's own folder: skills and settings are per person, and nothing
+# in the plugin or the pipeline reads them. The export pipeline lives in
+# pipeline/, where it runs without any of it.
+.claude/
+
+# run_nightly.py's per-night logs and its overlap lock.
+data/**/_logs/
+data/**/_nightly.lock

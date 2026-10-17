@@ -1,6 +1,6 @@
 r"""Unit conversion: the factors are EQuIS's, the arithmetic is ours.
 
-    python scripts/test_unit_convert.py
+    python pipeline/test_unit_convert.py
 
 No network and no GUI: the factor table is passed in, which is the whole
 point - this file must not know any chemistry of its own.

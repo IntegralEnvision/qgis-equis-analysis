@@ -36,9 +36,11 @@ produces a plausible number rather than an error. In short:
   python tools/test_overlay_payload.py
   ```
 
-  The same five run on every release tag. If you change the DuckDB store,
-  run `tools/test_store_parity.py` too (it needs `duckdb`). If you change
-  the panel, run `tools/test_offline.py` under QGIS's own Python.
+  The same five run on every release tag, with the export pipeline's own
+  tests (`pipeline/test_*.py`, which need `pyarrow` and `numpy`). If you
+  change the DuckDB store, run `tools/test_store_parity.py` too (it needs
+  `duckdb`). If you change the panel, run `tools/test_offline.py` under
+  QGIS's own Python.
 - Keep `equis_api.py`, `report_data.py`, `sparkline.py`, `cache.py` and
   `store.py` free of QGIS imports. That is what lets the tests above run
   without QGIS.

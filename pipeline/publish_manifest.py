@@ -1,6 +1,6 @@
 """Write the reader-facing manifest that a client points at.
 
-    python scripts/publish_manifest.py --root data/<name>
+    python pipeline/publish_manifest.py --root data/<name>
 
 TWO MANIFESTS, ON PURPOSE. The nightly pipeline's manifest.json holds
 report ids, agent event ids, per-slice location lists and run history -

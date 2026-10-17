@@ -106,7 +106,7 @@ check("an empty URL is refused rather than opened",
 PUBLISHED = os.path.join("data", "facility_a", "manifest.json")
 LOCAL = os.path.join("data", "facility_a", "manifest_local.json")
 if not os.path.isfile(PUBLISHED):
-    print("\n(no published manifest at %s - run .claude/skills/equis-parquet-export/scripts/publish_manifest.py; "
+    print("\n(no published manifest at %s - run pipeline/publish_manifest.py; "
           "skipping the end-to-end half)" % PUBLISHED)
 else:
     panel.parquet_edit.setText("data/facility_a")

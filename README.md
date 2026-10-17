@@ -651,9 +651,8 @@ as to a live fetch, dates and QC included; the rows are read with DuckDB.
 **Opening one** needs only that path or URL. A source without `DETECT_FLAG`
 is refused: without it every result would read as a non-detect.
 
-**Producing one** is what
-[`.claude/skills/equis-parquet-export/`](.claude/skills/equis-parquet-export/SKILL.md)
-does, against a tenant you hold an API key for:
+**Producing one** is what [`pipeline/`](pipeline/README.md) does, against a
+tenant you hold an API key for:
 
 1. survey the facility (rows per matrix, fraction and location);
 2. split it into slices small enough to generate, each a saved ARII report
@@ -666,16 +665,16 @@ does, against a tenant you hold an API key for:
    non-detect columns a Pro user needs, since `RESULT_NUMERIC` is empty
    for a non-detect.
 
-It is written as a [Claude Code skill](https://docs.claude.com/en/docs/claude-code/skills)
-(`SKILL.md` is the procedure, `references/` the measured failure modes), and
-its scripts run on their own with Python and pyarrow - no language model is
-involved:
+It is plain Python with pyarrow - no language model is involved. Setting a
+facility up takes judgement (which cells, which units; see
+[pipeline/README.md](pipeline/README.md)); after that, one command runs the
+whole night unattended - collect, re-bin, provision new slices, publish and
+upload - and exits non-zero when something needs a look:
 
 ```
-S=.claude/skills/equis-parquet-export/scripts
-python $S/survey_facility.py --help
-python $S/test_slice_pipeline.py     # the pipeline's bookkeeping
-python $S/test_unit_convert.py       # unit conversion by EQuIS's factors
+python pipeline/run_nightly.py --root data/<facility>
+python pipeline/test_slice_pipeline.py     # the pipeline's bookkeeping
+python pipeline/test_run_nightly.py        # the night's order and failures
 ```
 
 ### The DuckDB store
@@ -854,8 +853,7 @@ equis_loader/
 web/src/             the page's sources (Mosaic/vgplot), built with npm
 tools/               tests, probes, package.py, install.py
 docs/                design notes and measurements
-.claude/skills/
-  equis-parquet-export/   a whole facility to parquet: survey, slice, collect, publish
+pipeline/            a whole facility to parquet: survey, slice, collect, publish
 ```
 
 The modules marked *no QGIS imports* are testable with a plain Python

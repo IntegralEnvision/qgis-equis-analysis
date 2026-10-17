@@ -3,8 +3,8 @@
     python tools/test_arcgis_parity.py            # fixture, plus data/facility_a if present
     python tools/test_arcgis_parity.py --fixture-only
 
-arcgis_export.py lives in the parquet-export skill, which is shared beyond
-this repository and so imports nothing from the plugin. Its non-detect
+arcgis_export.py lives in pipeline/, which runs on its own - Python and
+pyarrow, no plugin - and so imports nothing from it. Its non-detect
 columns are therefore a SECOND COPY of the rules in
 ReportStore._create_views - the divergence CLAUDE.md warns about. This is
 the gate that makes the copy safe:
@@ -29,8 +29,7 @@ import tempfile
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
 sys.path.insert(0, ROOT)
-sys.path.insert(0, os.path.join(ROOT, ".claude", "skills", "equis-parquet-export",
-                                "scripts"))
+sys.path.insert(0, os.path.join(ROOT, "pipeline"))
 
 import pyarrow as pa                                 # noqa: E402
 import pyarrow.parquet as pq                         # noqa: E402

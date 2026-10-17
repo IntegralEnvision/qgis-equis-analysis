@@ -20,13 +20,13 @@ python tools/test_analysis.py          # the Analysis tab's chooser: catalogue, 
 python tools/test_ternary.py           # ternary shares/colours, one-unit rule, page SQL held to ternary.py
 python tools/analysis_preview.py       # the Analysis tab in a browser, no QGIS (--shots DIR: screenshots)
 
-# The parquet export pipeline lives in its skill, shared beyond this repo:
-S=.claude/skills/equis-parquet-export/scripts
-python $S/test_slice_pipeline.py        # pipeline bookkeeping (pyarrow)
-python $S/test_unit_convert.py          # collect-time unit conversion
-python $S/test_arcgis_export.py         # GeoParquet for ArcGIS Pro: files, CRS, refusals
+# The parquet export pipeline: plain Python + pyarrow, imports no plugin code
+python pipeline/test_slice_pipeline.py  # pipeline bookkeeping (pyarrow)
+python pipeline/test_unit_convert.py    # collect-time unit conversion
+python pipeline/test_arcgis_export.py   # GeoParquet for ArcGIS Pro: files, CRS, refusals
+python pipeline/test_run_nightly.py     # the unattended night: order, stops, upload
 python tools/test_arcgis_parity.py      # that export's non-detect columns vs ReportStore (duckdb)
-python $S/nightly_slices.py --facility <facility-id> --root data/<facility>
+python pipeline/run_nightly.py --root data/<facility>   # one facility's whole night
 
 python tools/vendor_deps.py --target win --python 312   # build a dep bundle
 python tools/package.py                                 # plain plugin zip
@@ -202,9 +202,9 @@ If you add a rule to one implementation, add the case to the parity fixture.
 One mutation survived the first round purely because no fixture row exercised
 it.
 
-A third copy of the non-detect rules lives in the parquet-export skill's
-`arcgis_export.py`, which cannot import the plugin because the skill is shared
-beyond this repository. `tools/test_arcgis_parity.py` holds it to the store,
+A third copy of the non-detect rules lives in `pipeline/arcgis_export.py`,
+which does not import the plugin: the pipeline runs on its own, with Python
+and pyarrow, wherever a facility's data lives. `tools/test_arcgis_parity.py` holds it to the store,
 row for row, including on the real facility. A change to the value ladder,
 the detect values, the unit columns or the date formats fails that gate until
 the exporter follows.
@@ -223,7 +223,7 @@ the exporter follows.
 | [docs/webengine-support.md](docs/webengine-support.md) | Which QGIS builds can run a web view — measured |
 | [tools/mosaic_poc/README.md](tools/mosaic_poc/README.md) | Overlay, brush-scale and temporal spikes — measured |
 | [docs/selection-ui-guidance.md](docs/selection-ui-guidance.md) | Why the panel is shaped the way it is |
-| [.claude/skills/equis-parquet-export/](.claude/skills/equis-parquet-export/SKILL.md) | Exporting a facility to parquet: survey, slice, collect, repack, publish |
+| [pipeline/README.md](pipeline/README.md) | Exporting a facility to parquet: survey, slice, collect, repack, publish, and the unattended night |
 | [docs/arcgis-pro-geoparquet-brief.md](docs/arcgis-pro-geoparquet-brief.md) | What ArcGIS Pro needs of a GeoParquet file, sourced; read before touching `arcgis_export.py` |
 
 ## Style

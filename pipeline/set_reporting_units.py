@@ -1,7 +1,7 @@
 r"""Make each slice report return ONE unit, by setting @reporting_unit.
 
-    python scripts/set_reporting_units.py --root data/<facility> --dry-run
-    python scripts/set_reporting_units.py --root data/<facility>
+    python pipeline/set_reporting_units.py --root data/<facility> --dry-run
+    python pipeline/set_reporting_units.py --root data/<facility>
 
 WHY. A result's unit is whatever the lab reported, so one analyte in one
 matrix arrives in several. Measured on the first facility 2026-09-24: Arsenic in WS is

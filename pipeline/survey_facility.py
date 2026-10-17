@@ -1,7 +1,7 @@
 """Survey a facility before slicing it: which (matrix, fraction) cells exist.
 
-    python scripts/survey_facility.py --facility <id>
-    python scripts/survey_facility.py --facility <id> --json survey.json
+    python pipeline/survey_facility.py --facility <id>
+    python pipeline/survey_facility.py --facility <id> --json survey.json
 
 The first step of extracting a facility to parquet. It writes nothing to
 EQuIS: it reads DT_SAMPLE and counts DT_TEST over OData, then prints each
@@ -156,7 +156,7 @@ def main():
     print("\n%d candidate cell(s). Dry-run each; the probe refuses empty ones:"
           % len(cells))
     for matrix, fraction in cells:
-        print("   python scripts/create_slice_reports.py --facility %d "
+        print("   python pipeline/create_slice_reports.py --facility %d "
               "--root data/<name> --sample-types N --cell %s --dry-run"
               % (args.facility, cell_key(matrix, fraction)))
 

@@ -1,15 +1,15 @@
 """Create the slice reports and their nightly agents, and seed the manifest.
 
     # see the plan: writes only one ZZ_ probe report, run then deleted
-    python scripts/create_slice_reports.py --facility <id> --root data/<name> \
+    python pipeline/create_slice_reports.py --facility <id> --root data/<name> \
         [--sample-types N] --cell WS/D --dry-run
 
     # create it
-    python scripts/create_slice_reports.py --facility <id> --root data/<name> \
+    python pipeline/create_slice_reports.py --facility <id> --root data/<name> \
         [--sample-types N] --cell WS/D
 
     # give reports to the slices nightly_slices.py --rewrite added
-    python scripts/create_slice_reports.py --facility <id> --root data/<name> \
+    python pipeline/create_slice_reports.py --facility <id> --root data/<name> \
         [--sample-types N] --pending
 
 This is the step `nightly_slices.py` assumes has already run. It divides one
@@ -71,7 +71,8 @@ sys.path.insert(0, HERE)
 from slice_store import (  # noqa: E402
     read_env,
     DEFAULT_TARGET_ROWS, MANIFEST_NAME, UNITS_NAME, Manifest, bin_count,
-    cell_key, default_prefix, pack_bins, propose_unit, slice_name, utc_now,
+    cell_key, default_prefix, merge_extra_fields, pack_bins, propose_unit,
+    slice_name, utc_now,
 )
 import unit_convert  # noqa: E402
 
@@ -268,6 +269,9 @@ def clone_parameters(template, facility_id, matrix, fraction, locations):
         value = param.get("value")
         if isinstance(value, str) and value.strip() == "None":
             param["value"], param["displayValue"] = None, ""
+        if name == "@extra_fields":
+            merged = merge_extra_fields(param.get("value"))
+            param["value"], param["displayValue"] = merged, merged or ""
         if name in wanted:
             if wanted[name] is None:
                 param["value"], param["displayValue"] = None, ""
@@ -368,7 +372,7 @@ def create_report(api, template, facility_id, name, matrix, fraction,
         "facilityId": facility_id,
         "statusFlag": "A",
         "remark": "Parquet slice: %s/%s, %d locations. Managed by "
-                  "scripts/nightly_slices.py." % (matrix, fraction,
+                  "pipeline/nightly_slices.py." % (matrix, fraction,
                                                 len(locations)),
         "parameters": clone_parameters(template, facility_id, matrix,
                                        fraction, locations),
@@ -783,7 +787,7 @@ def main():
 
     print("\ncreated %d slice(s); manifest: %s" % (created, manifest.path))
     print("They run daily at %02d:%02d UTC. Tomorrow:\n"
-          "   python scripts/nightly_slices.py --facility %d --root %s"
+          "   python pipeline/nightly_slices.py --facility %d --root %s"
           % (args.at // 60, args.at % 60, args.facility, args.root))
     return 0
 

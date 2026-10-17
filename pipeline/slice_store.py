@@ -144,6 +144,37 @@ MANIFEST_NAME = "manifest_local.json"
 LEGACY_MANIFEST_NAME = "manifest.json"
 
 
+# Columns every slice asks for beyond ARII's default output, through its
+# @extra_fields parameter: a pipe-separated MultiSelect of TABLE.COLUMN names.
+# DT_TEST.IDENTIFIER comes back as plain IDENTIFIER (read 2026-10-17 from a
+# slice run asking for it), where DT_SAMPLE.CUSTOM_FIELD_1 comes back
+# table-prefixed; why they differ is not known, so a reader matches the name
+# as measured. Offered by the base on the first tenant, among 956 fields.
+#
+# DT_TEST.LAB_SDG is deliberately NOT here: the default output already
+# carries LAB_SDG, and asking again appends a duplicate beside it - which is
+# what the plugin found asking for depth.
+EXTRA_FIELDS = ("DT_TEST.IDENTIFIER",)
+
+
+def merge_extra_fields(current, wanted=EXTRA_FIELDS):
+    """`current` with `wanted` appended, pipe-separated, nothing removed.
+
+    Added to, never replaced: a template report carries columns of its own,
+    and every slice must inherit them as it inherits the other filters.
+    EQuIS stores an empty parameter as the literal string "None".
+    """
+    text = "" if current is None else str(current).strip()
+    have = [] if text in ("", "None") else [
+        item.strip() for item in text.split("|") if item.strip()]
+    seen = {item.upper() for item in have}
+    for column in wanted:
+        if column.upper() not in seen:
+            have.append(column)
+            seen.add(column.upper())
+    return "|".join(have) if have else None
+
+
 def pack_bins(weights, parts, max_locations=TARGET_LOCATIONS_PER_SLICE):
     """Greedy largest-first packing. Returns [[code, ...], ...].
 
@@ -414,10 +445,10 @@ def count_results_by_location(api, facility_id, progress=None,
 def find_env_file(start=None):
     """The nearest `.env` at or above `start` (default: the working directory).
 
-    The WORKING directory, not this file's: these scripts live in a skill
-    folder shared between projects, and the credentials belong to whichever
-    project they are run for. Looking beside the script would pick up one
-    project's key while working on another.
+    The WORKING directory, not this file's: the pipeline is run from the
+    directory holding a facility's data, and the credentials belong to
+    whichever tenant that data comes from. Looking beside the script would
+    pick up one tenant's key while working on another.
     """
     directory = os.path.abspath(start or os.getcwd())
     while True:

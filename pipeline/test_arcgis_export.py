@@ -1,6 +1,6 @@
 """arcgis_export.py, without EQuIS, a network, or ArcGIS Pro.
 
-    python scripts/test_arcgis_export.py
+    python pipeline/test_arcgis_export.py
 
 What can be checked without Pro: that every file meets the written
 requirements (docs/arcgis-pro-geoparquet-brief.md in the plugin repository),

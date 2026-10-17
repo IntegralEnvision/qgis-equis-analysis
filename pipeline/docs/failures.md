@@ -29,11 +29,11 @@ glob, name the levels: `matrix=*/fraction=*/*.parquet`.
   201, `scheduleId` null. `create_agent` reads back and asserts it.
 - A daily schedule needs `timeStart == timeEnd`, minutes from midnight
   **UTC**, and `effective` at midnight `Z`.
-- **Notices: the two skills disagree, so check.** `create_agent` sets
+- **Notices: the evidence disagrees, so check.** `create_agent` sets
   `supressAllNotices: true` to avoid emailing a large attachment nightly,
-  and the first facility's slices stored output that way. The
-  equis-authoring skill warns that suppressing notices is how an agent ends
-  up storing nothing, because the stored output is the notice attachment.
+  and the first facility's slices stored output that way. Other EIA work
+  found that suppressing notices is how an agent ends up storing nothing,
+  because the stored output is the notice attachment.
   Which holds may depend on the tenant or build: after a new facility's
   first night, confirm every slice's `rows` is a number before trusting it.
 - A slice whose stored output is empty records `rows: null`, distinct from

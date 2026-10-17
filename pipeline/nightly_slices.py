@@ -1,6 +1,6 @@
 """The nightly loop: collect EIA output, write parquet, re-plan tomorrow.
 
-    python scripts/nightly_slices.py --facility <id> --root data/<facility>
+    python pipeline/nightly_slices.py --facility <id> --root data/<facility>
 
 Three phases, each usable alone so a failure in one does not force the others
 to be re-run:

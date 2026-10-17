@@ -1,6 +1,6 @@
 """The parquet pipeline's bookkeeping, without EQuIS or a network.
 
-    python scripts/test_slice_pipeline.py
+    python pipeline/test_slice_pipeline.py
 
 Each check here is a way the pipeline can lose data while reporting
 success. The two that were real bugs until 2026-10-05:
@@ -184,6 +184,30 @@ try:
           and walked.get("SO/N", {}).get("SB-1") == 1, str(walked))
     check("a location with samples but no results still gets a bin",
           walked.get("WS/D", {}).get("MW-9") == 0, str(walked))
+
+    # ---------------------------------------- extra columns on every slice
+    merged = ss.merge_extra_fields("RT_MATRIX.MATRIX_DESC")
+    check("extra fields: the template's own survive, ours are appended",
+          merged == "RT_MATRIX.MATRIX_DESC|DT_TEST.IDENTIFIER", merged)
+    check("extra fields: merging twice changes nothing",
+          ss.merge_extra_fields(merged) == merged)
+    check("extra fields: EQuIS's literal 'None' is an empty parameter",
+          ss.merge_extra_fields("None") == "DT_TEST.IDENTIFIER",
+          str(ss.merge_extra_fields("None")))
+    check("extra fields: LAB_SDG is not asked for twice",
+          "LAB_SDG" not in merged.upper(), merged)
+    import create_slice_reports
+    cloned = create_slice_reports.clone_parameters(
+        {"parameters": [{"name": "@extra_fields", "value": "None"},
+                        {"name": "@sys_loc_codes", "value": "X"}]},
+        7, "WS", "D", ["MW-1", "MW-2"])
+    by_name = {p["name"]: p for p in cloned}
+    check("extra fields: a new slice asks for the identifier",
+          by_name["@extra_fields"]["value"] == "DT_TEST.IDENTIFIER"
+          and by_name["@extra_fields"]["displayValue"] == "DT_TEST.IDENTIFIER",
+          str(by_name["@extra_fields"]))
+    check("extra fields: the slice's own filters are still applied",
+          by_name["@sys_loc_codes"]["value"] == "MW-1|MW-2")
 
     # ---------------------------------------- the published manifest
     try:
