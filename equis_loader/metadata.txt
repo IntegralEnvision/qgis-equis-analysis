@@ -4,7 +4,7 @@ qgisMinimumVersion=3.34
 qgisMaximumVersion=4.99
 description=Map analytical chemistry from an EQuIS Enterprise site: pick a facility and chemicals, map them per location, and click points for time series.
 about=Connect to an EQuIS Enterprise site with an API key and pick a facility; its location points are added to the map. Choose chemicals and filters, then map the most recent or maximum result per location, or every result. Clicking a point plots that chemical's time series at that location. By default the plugin keeps one filtered report per user per facility on the site (it needs Creator on Reports); tick Read-only to have it write nothing and use existing reports instead. EQuIS is a trademark of EarthSoft, Inc. This project is not affiliated with or endorsed by EarthSoft.
-version=3.32.0
+version=3.33.0
 author=Integral Consulting Inc.
 email=jcollord@integral-corp.com
 
@@ -19,7 +19,12 @@ experimental=False
 deprecated=False
 hasProcessingProvider=no
 
-changelog=3.32.0 - Renamed QGIS Chemistry Explorer, and a Read-only mode.
+changelog=3.33.0 - Results carry their lab SDG and test identifier.
+    LAB_SDG was always in the report's output but was dropped on the way
+    in; it is now kept. DT_TEST.IDENTIFIER is asked for through the
+    report's extra fields and arrives as IDENTIFIER. Reports cached before
+    this are fetched again once, since what is kept from them changed.
+  3.32.0 - Renamed QGIS Chemistry Explorer, and a Read-only mode.
     The plugin was called EQuIS Chemical Explorer, which read as an EarthSoft
     product. It is not one, and now says so. The menu is Web > Chemistry
     Explorer and the map tool is Chemistry Time Series. The panel keeps its
