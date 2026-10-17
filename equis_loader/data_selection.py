@@ -39,7 +39,11 @@ PARAM_END = "@end_date"
 # 2026-09-01 that Analytical Results II already returns them, and asking
 # again through @extra_fields only appends a lowercased, table-prefixed
 # duplicate (dt_sample_start_depth) alongside the real column.
-EXTRA_FIELDS = ("DT_SAMPLE.CUSTOM_FIELD_1",)
+# DT_TEST.IDENTIFIER is not in the default output; it is among the 956
+# fields the ARII base offers here (read 2026-10-17). DT_TEST.LAB_SDG is
+# deliberately NOT asked for: the default output already carries LAB_SDG,
+# and asking again would only append a duplicate, as depth did.
+EXTRA_FIELDS = ("DT_SAMPLE.CUSTOM_FIELD_1", "DT_TEST.IDENTIFIER")
 
 # Multi-value parameters are PIPE-separated. A comma-separated list is
 # accepted with HTTP 200 and returns ZERO ROWS, which is the dangerous

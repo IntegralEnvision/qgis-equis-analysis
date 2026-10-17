@@ -1417,8 +1417,14 @@ def test_extra_fields_merge():
     check("extra: merging twice changes nothing",
           ds.merge_extra_fields(merged) == merged)
     check("extra: an empty parameter still gets ours",
-          ds.merge_extra_fields(None) == "DT_SAMPLE.CUSTOM_FIELD_1",
+          ds.merge_extra_fields(None)
+          == "DT_SAMPLE.CUSTOM_FIELD_1|DT_TEST.IDENTIFIER",
           str(ds.merge_extra_fields(None)))
+    check("extra: the test identifier is asked for",
+          "DT_TEST.IDENTIFIER" in merged, merged)
+    # LAB_SDG is already in the default output; asking again duplicates it.
+    check("extra: LAB_SDG is not asked for twice",
+          "LAB_SDG" not in merged.upper(), merged)
     check("extra: it is pipe-separated, not comma",
           "," not in merged, merged)
 

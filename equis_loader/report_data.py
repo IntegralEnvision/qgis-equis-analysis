@@ -131,6 +131,13 @@ ANALYSIS_COLUMNS = (
     "INTERPRETED_QUALIFIERS",
     "LAB_QUALIFIERS",
     "LAB_NAME_CODE",
+    # Tie a result back to its lab delivery and its test. LAB_SDG is in the
+    # default output (filled on ~1% of rows at the first facility exported).
+    # DT_TEST.IDENTIFIER arrives through @extra_fields as plain IDENTIFIER -
+    # NOT table-prefixed, unlike CUSTOM_FIELD_1 (read 2026-10-17 from a run
+    # of a slice report asking for it).
+    "LAB_SDG",
+    "IDENTIFIER",
 )
 
 # The matrix filter's "no filter" state. A report mixes matrices - water,
