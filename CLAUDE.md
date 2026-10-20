@@ -18,6 +18,7 @@ python tools/test_scatter_sql.py       # the scatter's real SQL against real piv
 python tools/test_bivariate.py         # Jenks breaks, classes and colours for the scatter's map
 python tools/test_analysis.py          # the Analysis tab's chooser: catalogue, pairs, choices
 python tools/test_ternary.py           # ternary shares/colours, one-unit rule, page SQL held to ternary.py
+python tools/test_censored.py          # box plots' Kaplan-Meier quartiles vs an independent KM (node, duckdb)
 python tools/analysis_preview.py       # the Analysis tab in a browser, no QGIS (--shots DIR: screenshots)
 
 # The parquet export pipeline: plain Python + pyarrow, imports no plugin code
