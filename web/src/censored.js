@@ -85,14 +85,37 @@ export function kmBoxSql({ pivot, prefix, detectTrue, group = "none",
   if (!Array.isArray(detectTrue) || !detectTrue.length) {
     throw new Error("kmBoxSql needs the host's detect-true values");
   }
-  const g = GROUPS[group];
-  if (!g) throw new Error(`no such grouping: ${group}`);
-  const t = table(pivot);
   const value = column(prefix, "value");
   const detect = column(prefix, "detect");
   const truth = `(${detectTrue.map((v) => quote(String(v).toUpperCase())).join(", ")})`;
-  const filters = [`${value} IS NOT NULL`, `${detect} IS NOT NULL`,
-                   ...where.filter(Boolean).map((w) => `(${w})`)];
+  return boxSql(table(pivot), value, `upper(${detect}) IN ${truth}`,
+                [`${value} IS NOT NULL`, `${detect} IS NOT NULL`, ...where],
+                group, log);
+}
+
+/**
+ * The same, over a linked view's table (linked.js): `value` a column and
+ * `detected` a BOOLEAN column already decided from DETECT_FLAG - NULL
+ * where the flag was blank, which is unknown and left out, never a
+ * non-detect.
+ */
+export function kmBoxSqlOver({ source, value, detected, group = "none",
+                               where = [], log = true }) {
+  for (const name of [value, detected]) {
+    if (!/^[a-z][a-z0-9_]*$/.test(name)) throw new Error(`not a column: ${name}`);
+  }
+  if (!/^lk_[0-9]+(_shown)?$/.test(source)) {
+    throw new Error(`not a linked table: ${source}`);
+  }
+  return boxSql(source, value, detected,
+                [`${value} IS NOT NULL`, `${detected} IS NOT NULL`, ...where],
+                group, log);
+}
+
+function boxSql(t, value, detected, where, group, log) {
+  const g = GROUPS[group];
+  if (!g) throw new Error(`no such grouping: ${group}`);
+  const filters = where.filter(Boolean).map((w) => `(${w})`);
   const quartiles = QUARTILES.map(([name, p]) => `
       CASE WHEN F0 >= ${p} - ${EPS} THEN NULL
            ELSE arg_min(CASE WHEN abs(F - ${p}) < ${EPS} AND nxt IS NOT NULL
@@ -101,8 +124,7 @@ export function kmBoxSql({ pivot, prefix, detectTrue, group = "none",
       F0 >= ${p} - ${EPS} AS ${name}_below`).join(",");
   return `
 WITH src AS (
-  SELECT ${g.sql} AS g, ${value}::DOUBLE AS v,
-         upper(${detect}) IN ${truth} AS d
+  SELECT ${g.sql} AS g, ${value}::DOUBLE AS v, ${detected} AS d
   FROM ${t}
   WHERE ${filters.join(" AND ")}
 ),

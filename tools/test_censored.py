@@ -47,9 +47,12 @@ def check(label, condition, detail=""):
 
 
 GENERATOR = """
-import { kmBoxSql } from "./src/censored.js";
+import { kmBoxSql, kmBoxSqlOver } from "./src/censored.js";
+import { brushedSql, linkedTableSql } from "./src/linked.js";
 const asks = JSON.parse(process.argv[2]);
-console.log(JSON.stringify(asks.map((a) => kmBoxSql(a))));
+console.log(JSON.stringify(asks.map((a) => a.linked ? linkedTableSql(a.linked)
+  : a.brushed ? brushedSql(a.brushed.table, a.brushed.where)
+  : a.over ? kmBoxSqlOver(a.over) : kmBoxSql(a))));
 """
 
 
@@ -246,6 +249,55 @@ def compare(con, table, prefix, groups, label, group="location", log=True):
           "undetermined)" % (label, len(groups), undetermined), not bad, bad[:4])
 
 
+def linked_table(con):
+    """The linked views' table: one row per chart sample, detection decided
+    from the flag with a BLANK flag kept unknown (NULL), never a non-detect,
+    and `solid` marking the samples the chart draws solid."""
+    print("\n-- the linked table (linked.js)")
+    con.execute("CREATE OR REPLACE TABLE pp_9 (sample VARCHAR, location VARCHAR, "
+                "sample_date TIMESTAMP, a_value DOUBLE, a_detect VARCHAR, "
+                "b_value DOUBLE, b_detect VARCHAR)")
+    con.executemany("INSERT INTO pp_9 VALUES (?, ?, TIMESTAMP '2020-01-01', ?, ?, ?, ?)", [
+        ("s1", "L1", 5.0, "Y", 1.0, "Y"),
+        ("s2", "L1", 2.0, "N", 3.0, "Y"),
+        ("s3", "L2", 7.0, None, 4.0, "Y"),     # blank flag: unknown
+        ("s4", "L2", 9.0, "Y", None, None),    # no b at all: not in the chart
+        ("s5", "l3", 1.0, "y", 2.0, "N"),      # lower-case flag still detected
+    ])
+    con.execute("CREATE OR REPLACE VIEW sv_9_all AS SELECT sample, location, "
+                "sample_date, a_value AS x, b_value AS y FROM pp_9 "
+                "WHERE a_value IS NOT NULL AND b_value IS NOT NULL")
+    con.execute("CREATE OR REPLACE VIEW sv_9_shown AS SELECT * FROM sv_9_all "
+                "WHERE location <> 'L2'")
+    sql = page_sql([
+        {"linked": {"name": "lk_9", "all": "sv_9_all", "shown": "sv_9_shown",
+                    "pivot": "pp_9", "detectTrue": TRUE,
+                    "columns": [{"prefix": "a"}, {"prefix": "b"}]}},
+        {"brushed": {"table": "lk_9", "where": ["x >= 2"]}},
+        {"over": {"source": "lk_9", "value": "v0", "detected": "d0",
+                  "group": "none", "log": False}},
+    ])
+    if sql is None:
+        return
+    con.execute(sql[0])
+    got = {r[0]: r[1:] for r in con.execute(
+        "SELECT sample, d0, k0, d1, solid FROM lk_9 ORDER BY sample").fetchall()}
+    check("one row per chart sample (s4 lacks b, so is not one)",
+          sorted(got) == ["s1", "s2", "s3", "s5"], sorted(got))
+    check("a blank flag is unknown (NULL), not a non-detect",
+          got["s3"][0] is None and got["s3"][1] == "unknown", got["s3"])
+    check("detected and not, from the flag, case-insensitively",
+          got["s1"][0] is True and got["s2"][0] is False and got["s5"][0] is True,
+          [got[k][0] for k in ("s1", "s2", "s5")])
+    check("solid marks the chart's shown samples only",
+          [k for k, v in got.items() if v[3]] == ["s1", "s2", "s5"], got)
+    hit = con.execute(sql[1]).fetchone()
+    check("the map gets the solid samples every brush leaves: s1, s2 at L1",
+          hit[0] == 2 and hit[1] == 1 and list(hit[2]) == ["L1"], hit)
+    box = con.execute(sql[2]).fetchone()
+    check("the box leaves the unknown out: n 3, 2 detects", box[1] == 3 and box[2] == 2, box)
+
+
 def real(root, matrix):
     print("\n-- real parquet: %s, matrix %s" % (root, matrix))
     if not os.path.isdir(root):
@@ -288,6 +340,7 @@ def main():
     if hand_cases(con):
         uncensored_matches_type2(con)
         random_censored(con)
+        linked_table(con)
         real(args.root, args.matrix)
     print("\n%s" % ("ALL PASS" if not FAILED else "FAILED: %s" % FAILED))
     sys.exit(1 if FAILED else 0)

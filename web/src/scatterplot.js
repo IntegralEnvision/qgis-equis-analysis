@@ -37,13 +37,21 @@ export class Scatter {
    *  - vg, coordinator  from createAPIContext / the page
    *  - element          where to draw
    *  - onBrush          ({locations, label}) or (null) when cleared
+   *  - cross            the linked views' crossfilter (linked.js), or null.
+   *                     Given, the brush publishes there, linked.js owns
+   *                     the brush line and the map, and the solid marks
+   *                     follow every brush - their own included, through
+   *                     an intersect that includes `cross`.
    */
-  constructor({ vg, coordinator, element, onBrush = null }) {
+  constructor({ vg, coordinator, element, onBrush = null, cross = null }) {
     this.vg = vg;
     this.coordinator = coordinator;
     this.element = element;
     this.onBrush = onBrush;
-    this.selection = vg.Selection.intersect();
+    this.cross = cross;
+    this.selection = cross ? vg.Selection.intersect({ include: [cross] })
+      : vg.Selection.intersect();
+    this.brushTarget = cross || this.selection;
     this.state = null;
     this._timer = null;
     this._lastSent = undefined;
@@ -86,6 +94,7 @@ export class Scatter {
     const set = `sv_${serial}_set`;
     const solid = options.solid || null;
     this._view = shown;
+    this.views = { all, shown };
 
     const base = { pivot: options.pivot, x: options.x.prefix,
                    y: options.y.prefix, detectTrue: options.detectTrue,
@@ -181,7 +190,7 @@ export class Scatter {
       // attached to THIS mark, so its fields are the scatter's x and y.
       vg.dot(vg.from(all), { x: "x", y: "y", r: 2, fill: "#b8b8b8",
                              fillOpacity: 0.35, stroke: "none" }),
-      vg.intervalXY({ as: this.selection }),
+      vg.intervalXY({ as: this.brushTarget }),
     ];
     for (const cls of CLASSES) {
       // BOTH DETECTED takes its bivariate colour per point, from the
@@ -229,11 +238,13 @@ export class Scatter {
       node.textContent = line;
       this.element.append(node);
     }
-    this._brushNode = document.createElement("div");
-    this._brushNode.className = "brush";
-    this._brushNode.textContent = scatterBrushLabel({ total: drawn });
-    this.element.append(this._brushNode);
-    this.selection.addEventListener("value", () => this._brushed());
+    if (!this.cross) {
+      this._brushNode = document.createElement("div");
+      this._brushNode.className = "brush";
+      this._brushNode.textContent = scatterBrushLabel({ total: drawn });
+      this.element.append(this._brushNode);
+      this.selection.addEventListener("value", () => this._brushed());
+    }
     lap("plot built");
     // vgplot fills the plot asynchronously, once its mark queries settle,
     // so "drawn" is when an SVG mark first appears, polled briefly.

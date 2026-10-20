@@ -18,6 +18,7 @@ import { Histogram } from "./chart.js";
 import { Scatter } from "./scatterplot.js";
 import { Ternary } from "./ternaryplot.js";
 import { Chooser } from "./chooser.js";
+import { Linked } from "./linked.js";
 import { connectBridge, qtConnector } from "./connector.js";
 
 const status = (message) => {
@@ -49,6 +50,7 @@ async function start() {
 
   let histogram = null;
   let scatter = null;
+  let linked = null;
   let drawCount = 0;
   const coordinator = new Coordinator();
   const connector = qtConnector(bridge);
@@ -107,6 +109,7 @@ async function start() {
       // Histogram.destroy for what an unretired chart did on resize. A
       // scatter shares the element, so it is retired too.
       if (histogram) histogram.destroy();
+      if (linked) { linked.destroy(); linked = null; }
       if (scatter) { scatter.destroy(); scatter = null; }
       histogram = new Histogram({
         vg, coordinator, element: target,
@@ -143,20 +146,28 @@ async function start() {
         + `pivot=${options.pivot || "?"} `
         + `locations=${(options.locations || []).length || "all"}`);
       if (histogram) { histogram.destroy(); histogram = null; }
+      if (linked) { linked.destroy(); linked = null; }
       if (scatter) scatter.destroy();
+      const toHost = (brush) => {
+        try {
+          bridge.brushed(brush ? JSON.stringify(brush) : "");
+        } catch (error) {
+          report("error", `brush could not reach the host: ${error}`);
+        }
+      };
+      // The chart on top, its linked views under it (linked.js): one
+      // crossfilter per draw, shared by every view of these samples.
+      const main = document.createElement("div");
+      main.className = "card main";
+      const below = document.createElement("div");
+      below.className = "linked";
+      target.replaceChildren(main, below);
+      const cross = vg.Selection.crossfilter();
       // A ternary is a chart of samples too (ternaryplot.js extends
       // Scatter): same brush, same route to the map, its own marks.
-      const Chart = options.kind === "ternary" ? Ternary : Scatter;
-      scatter = new Chart({
-        vg, coordinator, element: target,
-        onBrush: (brush) => {
-          try {
-            bridge.brushed(brush ? JSON.stringify(brush) : "");
-          } catch (error) {
-            report("error", `brush could not reach the host: ${error}`);
-          }
-        },
-      });
+      const ternary = options.kind === "ternary";
+      const Chart = ternary ? Ternary : Scatter;
+      scatter = new Chart({ vg, coordinator, element: main, onBrush: toHost, cross });
       chooser.showing((options.x || {}).prefix, (options.y || {}).prefix,
                       (options.points || {}).mode || null,
                       (options.z || {}).prefix || null,
@@ -167,6 +178,22 @@ async function start() {
       const state = await drawn.show(options);
       report("info", `scatter #${request} drew: n=${state ? state.total : "?"}`
         + `${drawn !== scatter ? " (superseded)" : ""}`);
+      if (drawn === scatter && state && state.total && drawn.views) {
+        const axes = state.axes || {};
+        const columns = ternary
+          ? [["x", "a"], ["y", "b"], ["z", "c"]].map(([k, field]) => ({ ...options[k], field }))
+          : [{ ...options.x, field: "x", axis: axes.x }, { ...options.y, field: "y", axis: axes.y }];
+        linked = new Linked({ vg, coordinator, element: below, cross, onBrush: toHost });
+        try {
+          const began = performance.now();
+          await linked.show({ views: drawn.views, pivot: options.pivot, columns,
+                              detectTrue: options.detectTrue, total: state.total });
+          report("info", `linked views #${request} drew in ${Math.round(performance.now() - began)} ms`);
+        } catch (error) {
+          report("error", `linked views failed: ${error && error.message || error}`);
+          below.textContent = `Linked views failed: ${error && error.message || error}`;
+        }
+      }
       return state;
     },
 
@@ -217,6 +244,9 @@ async function start() {
 
     /** The live chart, for diagnostics. */
     get chart() { return scatter || histogram; },
+
+    /** The linked views under a scatter or ternary, for diagnostics. */
+    get linked() { return linked; },
   };
 
   status("connected");

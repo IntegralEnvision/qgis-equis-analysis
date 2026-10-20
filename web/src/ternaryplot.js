@@ -45,6 +45,7 @@ export class Ternary extends Scatter {
     const set = view("set");
     const shown = view("shown");
     this._view = shown;
+    this.views = { all, shown };
     const solid = options.solid || null;
     const t = options.ternary || {};
     const base = { pivot: options.pivot, x: options.x.prefix, y: options.y.prefix,
@@ -61,8 +62,11 @@ export class Ternary extends Scatter {
     await exec(`CREATE OR REPLACE TEMP VIEW ${shown} AS ${ternarySql({
       ...base, solid,
       locations: Array.isArray(options.locations) ? options.locations : null })}`);
+    // "cls_": the detected class is called "all", and view("all") is
+    // already the faint context - the same name replaced it, so the
+    // context was only the detected samples in the mode.
     for (const cls of ["all", "nd"]) {
-      await exec(`CREATE OR REPLACE TEMP VIEW ${view(cls)} AS
+      await exec(`CREATE OR REPLACE TEMP VIEW ${view(`cls_${cls}`)} AS
                   SELECT * FROM ${shown} WHERE class = '${cls}'`);
     }
     const grid = ternaryGrid(0.2);
@@ -119,13 +123,13 @@ export class Ternary extends Scatter {
       // rides on it.
       vg.dot(vg.from(all), { x: "x", y: "y", r: 1.8, fill: "#c4c4c4",
                              fillOpacity: 0.35, stroke: "none" }),
-      vg.intervalXY({ as: this.selection }),
-      vg.dot(vg.from(view("all"), { filterBy: this.selection }),
+      vg.intervalXY({ as: this.brushTarget }),
+      vg.dot(vg.from(view("cls_all"), { filterBy: this.selection }),
              { x: "x", y: "y", r: 2.8, fill: "colour", stroke: "#4d4d4d",
                strokeWidth: 0.35 }),
     ];
     if (!hideNonDetects) {
-      marks.push(vg.dot(vg.from(view("nd"), { filterBy: this.selection }),
+      marks.push(vg.dot(vg.from(view("cls_nd"), { filterBy: this.selection }),
                         { x: "x", y: "y", r: 3, fill: "none", stroke: grey,
                           strokeWidth: 1 }));
     }
@@ -175,11 +179,13 @@ export class Ternary extends Scatter {
       node.textContent = line;
       this.element.append(node);
     }
-    this._brushNode = document.createElement("div");
-    this._brushNode.className = "brush";
-    this._brushNode.textContent = scatterBrushLabel({ total: drawn });
-    this.element.append(this._brushNode);
-    if (!this._listening) {
+    if (!this.cross) {
+      this._brushNode = document.createElement("div");
+      this._brushNode.className = "brush";
+      this._brushNode.textContent = scatterBrushLabel({ total: drawn });
+      this.element.append(this._brushNode);
+    }
+    if (!this._listening && !this.cross) {
       this._listening = true;
       this.selection.addEventListener("value", () => this._brushed());
     }
