@@ -23,7 +23,7 @@ try:
     from qgis.gui import QgsRangeSlider
 except ImportError:  # QGIS built without the range slider
     QgsRangeSlider = None
-from qgis.PyQt.QtCore import Qt, QTimer, pyqtSignal
+from qgis.PyQt.QtCore import QSettings, Qt, QTimer, pyqtSignal
 from qgis.PyQt.QtWidgets import (
     QAbstractItemView,
     QCheckBox,
@@ -1226,6 +1226,10 @@ class EquisDialog(QDockWidget):
         }
         self.status_label.setStyleSheet("color: %s;" % colors.get(level, "#333333"))
         self.status_label.setText(message)
+        self._status_level = {Qgis.MessageLevel.Warning: "warning",
+                              Qgis.MessageLevel.Critical: "critical",
+                              Qgis.MessageLevel.Success: "success"}.get(level, "info")
+        self._push_overlay_status()
 
     def _connected(self):
         """True when there is something to drive the workflow with.
@@ -2577,6 +2581,9 @@ class EquisDialog(QDockWidget):
         the panel finish its own updates first.
         """
         if self._linked is not None and self._linked.views is not None:
+            if self._linked.overlay is not None:
+                # Over the map there is no tab to click to be offered one.
+                self._linked.offer()
             return
         if getattr(self, "_warmup_pending", False):
             return
@@ -2610,7 +2617,7 @@ class EquisDialog(QDockWidget):
         # or its row scope changed since. Free when nothing did.
         self._linked.offer()
 
-    def open_linked_views(self, show=True):
+    def open_linked_views(self, show=True, need_store=True):
         """Open the analysis view in the Analysis tab. Returns it, or None.
 
         `show=False` builds it without switching tabs - the background
@@ -2650,7 +2657,7 @@ class EquisDialog(QDockWidget):
                 "one of them is missing. Everything else still works.",
                 Qgis.MessageLevel.Warning)
             return None
-        if self._report_store is None:
+        if self._report_store is None and need_store:
             self._set_status(
                 "The histogram reads the report's DuckDB store, which is "
                 "still building (or unavailable). Try again in a moment.",
@@ -2678,16 +2685,26 @@ class EquisDialog(QDockWidget):
         linked = self._linked
         if on:
             if linked is None or linked.views is None:
-                if self.open_linked_views(show=False) is None:
+                # Over the map the Data panel stands in for this tab, so the
+                # view opens before anything is loaded (overlay shell, step 1).
+                if self.open_linked_views(show=False, need_store=False) is None:
                     self.overlay_check.setChecked(False)
                     return
                 linked = self._linked
             if not linked.float_over(
                     self.iface.mapCanvas(),
-                    on_dock=lambda: self.overlay_check.setChecked(False)):
+                    on_asked=self._on_overlay_asked,
+                    on_remember=self._remember_overlay,
+                    layout=self._saved_overlay_layout(),
+                    on_ready=self._push_overlay_status,
+                    # QGIS's message bar lies over the top of the canvas;
+                    # the panels keep clear of it.
+                    covers=[self.iface.messageBar()]):
                 self.overlay_check.setChecked(False)
                 return
             self.overlay_note.setVisible(True)
+            if self._report_store is not None:
+                linked.offer()
             return
         if linked is None:
             return
@@ -2698,6 +2715,84 @@ class EquisDialog(QDockWidget):
                 layout.addWidget(view, 1)
             view.show()
         self.overlay_note.setVisible(False)
+
+    # ----------------------------------------------------- the overlay shell
+
+    OVERLAY_LAYOUT_KEY = "equis_loader/overlay_layout"
+
+    def toggle_overlay(self):
+        """The toolbar button, when the overlay is the interface.
+
+        First press: the analysis view goes over the map as panels and this
+        dock stays out of the way - the Data panel there stands in for it,
+        and asks for it (_on_overlay_asked) when the user wants to change
+        what is loaded. Later presses hide and show the panels.
+        """
+        linked = self._linked
+        if linked is not None and linked.overlay is not None:
+            linked.set_overlay_visible(not linked.overlay_visible)
+            return True
+        self.overlay_check.setChecked(True)
+        if self._linked is None or self._linked.overlay is None:
+            return False
+        self.hide()
+        return True
+
+    def _on_overlay_asked(self, what):
+        """A Data panel button. The page asks; Qt moves the widgets."""
+        if what == "dock":
+            self.overlay_check.setChecked(False)
+            self.show()
+            self.raise_()
+            self.tabs.setCurrentIndex(self.analysis_index)
+        elif what == "data":
+            self.show()
+            self.raise_()
+            self.tabs.setCurrentIndex(0)
+        elif what == "hide" and self._linked is not None:
+            self._linked.set_overlay_visible(False)
+
+    def _saved_overlay_layout(self):
+        import json
+        raw = QSettings().value(self.OVERLAY_LAYOUT_KEY, "")
+        try:
+            return json.loads(raw) if raw else None
+        except (TypeError, ValueError):
+            return None
+
+    def _remember_overlay(self, key, value):
+        if key == "overlay_layout":
+            QSettings().setValue(self.OVERLAY_LAYOUT_KEY, value)
+
+    def _push_overlay_status(self):
+        """Tell the Data panel what is loaded and what the banner warns of.
+
+        It shows this panel's decisions and makes none: the banner
+        (_update_active_label) stays the one authority for what is cached,
+        offline or cut short, and the overlay repeats it - CLAUDE.md, cached
+        data is marked everywhere it appears.
+        """
+        linked = getattr(self, "_linked", None)
+        if linked is None or linked.overlay is None or linked.views is None:
+            return
+        from qgis.PyQt.QtGui import QTextDocument
+        facility = self._current_facility()
+        name = facility["name"] if facility else ""
+        parquet = self._data_source() == settings_store.SOURCE_PARQUET
+        if not name and parquet and self._analysis is not None:
+            name = self._parquet_facility_name() or ""
+        doc = QTextDocument()
+        doc.setHtml(self.active_label.text())
+        linked.views.call("dataStatus", {
+            "loaded": self._analysis is not None,
+            "facility": name,
+            "source": ("published parquet" if parquet
+                       else "EQuIS, offline cache" if self._offline else "EQuIS"),
+            "warn": not self.active_label.isHidden(),
+            "banner": doc.toPlainText(),
+            "status": self.status_label.text(),
+            "level": getattr(self, "_status_level", "info"),
+        })
 
     def _follow_time_window(self):
         """Let the scatter follow the map's Temporal Controller. Once.
@@ -6541,6 +6636,11 @@ class EquisDialog(QDockWidget):
             return False
 
     def _update_active_label(self):
+        """Refresh the banner, and the overlay's Data panel that repeats it."""
+        self._update_active_banner()
+        self._push_overlay_status()
+
+    def _update_active_banner(self):
         """Refresh the banner describing the one active facility/report."""
         facility = self._current_facility()
         cached_session = self._offline or self._report_source in (

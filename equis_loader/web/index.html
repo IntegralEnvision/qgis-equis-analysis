@@ -101,41 +101,73 @@
   svg.boxes .box-lt { fill: #3b6ea8; font-weight: 600; }
   svg.boxes .box-lt.faint { fill: #b5bcc4; }
   svg.boxes .box-row:hover rect:first-of-type { fill: rgba(59, 110, 168, 0.07); }
-  /* OVER THE MAP (map_overlay.py). The page is transparent; only cards are
-     painted, and only cards get the mouse - the host gates it by the
-     rectangles app.js reports, so these positions ARE the hit areas.
-     Translucent, so the map reads through; chrome cut to the essentials. */
-  #overlay-bar { display: none; }
+  /* THE PANELS (shell.js). In the tab they are one scrolling column with
+     no headers - the tab as it was. Over the map (map_overlay.py) each is
+     a translucent card that clings to an edge; only cards are painted and
+     only cards get the mouse - the host gates it by the rectangles app.js
+     reports, so these boxes ARE the hit areas. */
+  #shell { flex: 1 1 auto; min-height: 0; overflow: auto; }
+  #shell #views { overflow: visible; }
+  .panel-head { display: none; }
+  #p-data { display: none; }
+  .panel:has(> .panel-body:empty), #p-choose:has(#controls[hidden]) { display: none !important; }
   body.overlay { display: block; overflow: hidden; }
-  body.overlay #overlay-bar { display: flex; position: absolute; left: 8px; top: 8px;
-                              gap: 8px; align-items: center; font-size: 11px;
-                              color: #444; padding: 2px 6px; }
-  body.overlay #overlay-bar button { font: inherit; font-size: 11px; padding: 0 6px;
-                                     height: 20px; cursor: pointer; }
-  body.overlay #controls { position: absolute; left: 8px; top: 38px;
-                           width: min(430px, 46vw); padding: 4px 6px 0; }
-  body.overlay #views { position: absolute; inset: 0; overflow: visible; padding: 0; }
-  body.overlay #views > .main { position: absolute; left: 8px; bottom: 8px;
-                                width: min(430px, 46vw); max-height: calc(100vh - 200px);
-                                overflow: auto; padding: 4px 6px; box-sizing: border-box; }
-  body.overlay #views > .linked { position: absolute; right: 8px; top: 8px; margin: 0;
-                                  width: min(390px, 40vw); max-height: calc(100vh - 16px);
-                                  overflow: auto; padding: 4px 6px; box-sizing: border-box; }
-  body.overlay #views > .busy, body.overlay #views > .idle,
-  body.overlay #views > .note { position: absolute; left: 8px; bottom: 8px; }
-  body.overlay #overlay-bar, body.overlay #controls:not([hidden]), body.overlay #views > * {
-    background: rgba(255, 255, 255, 0.74); border-radius: 6px;
-    box-shadow: 0 1px 6px rgba(0, 0, 0, 0.28); }
+  body.overlay #shell { overflow: visible; }
+  body.overlay .panel {
+    position: absolute; box-sizing: border-box; display: flex; flex-direction: column;
+    max-height: calc(100vh - 16px - var(--inset-v, 0px)); background: rgba(255, 255, 255, 0.76);
+    border-radius: 6px; box-shadow: 0 1px 6px rgba(0, 0, 0, 0.28); }
+  body.overlay .panel.snapping { transition: left 0.16s ease-out, top 0.16s ease-out; }
+  body.overlay .panel.dragging { opacity: 0.85; box-shadow: 0 4px 16px rgba(0, 0, 0, 0.35); }
+  body.overlay .panel-body { overflow: auto; min-height: 0; padding: 2px 6px 6px; }
+  body.overlay .panel-head {
+    display: flex; align-items: center; gap: 6px; flex: none; cursor: grab;
+    padding: 2px 4px 2px 8px; font-size: 11px; color: #555; user-select: none;
+    touch-action: none; border-bottom: 1px solid rgba(0, 0, 0, 0.07); }
+  body.overlay .panel.dragging .panel-head { cursor: grabbing; }
+  .panel-title { flex: 1; font-weight: 600; letter-spacing: 0.02em; }
+  .panel-min { font: inherit; border: none; background: none; cursor: pointer;
+               color: #777; padding: 0 4px; line-height: 1; font-size: 14px; }
+  body.overlay #p-data { display: flex; width: 300px; }
+  body.overlay #p-choose { width: min(430px, 46vw); }
+  body.overlay #p-chart { width: min(430px, 46vw); }
+  body.overlay #p-hists { width: min(390px, 40vw); }
+  body.overlay #p-box { width: min(390px, 40vw); }
+  /* Minimised: the header alone, as a tab against the edge - upright on
+     the top and bottom, turned on the left and right. */
+  body.overlay .panel.minimized { width: auto !important; }
+  body.overlay .panel.minimized > .panel-body { display: none; }
+  body.overlay .panel.minimized .panel-min { display: none; }
+  body.overlay .panel.minimized .panel-head { cursor: pointer; border: none; padding: 4px 8px; }
+  body.overlay .panel.minimized.edge-left .panel-head,
+  body.overlay .panel.minimized.edge-right .panel-head { writing-mode: vertical-rl; padding: 8px 3px; }
+  body.overlay .panel.minimized.edge-left .panel-head { transform: rotate(180deg); }
   body.overlay .card.main .caption ~ .caption,
   body.overlay .bikey-note { display: none; }
   body.overlay .box-area { max-height: 40vh; }
+  /* The Data panel: what is loaded, and the warnings the panel's banner
+     carries (cached, offline, cut short) - CLAUDE.md: marked everywhere. */
+  .data-what { font-size: 12px; margin: 2px 0; }
+  .data-source { color: #777; font-size: 11px; }
+  .data-banner { font-size: 11px; margin: 4px 0; padding: 4px 6px; border-radius: 3px;
+                 background: #fdf6e3; border: 1px solid #d9c48a; color: #6b5a2e;
+                 white-space: pre-line; }
+  .data-status { font-size: 11px; margin: 3px 0; }
+  .data-status.warning { color: #b36b00; } .data-status.critical { color: #b00020; }
+  .data-status.success { color: #1b7f33; }
+  .data-actions { display: flex; gap: 6px; margin-top: 4px; flex-wrap: wrap; }
+  .data-actions button { font: inherit; font-size: 11px; height: 22px; padding: 0 8px; cursor: pointer; }
+  .data-hint { font-size: 10px; color: #888; margin-top: 4px; }
 </style>
 </head>
 <body>
-  <div id="overlay-bar"><button type="button" title="Put the charts back in the panel">⇲ Panel</button>
-    <span>Hold <b>Ctrl</b> to reach the map through a chart</span></div>
-  <div id="controls" hidden></div>
-  <div id="views"><div class="busy">Starting the chart engine…</div></div>
+  <div id="shell">
+    <section class="panel" id="p-data" data-title="Data"><div class="panel-body" id="data-body"></div></section>
+    <section class="panel" id="p-choose" data-title="Choose"><div class="panel-body"><div id="controls" hidden></div></div></section>
+    <section class="panel" id="p-chart" data-title="Chart"><div class="panel-body"><div id="views"><div class="busy">Starting the chart engine…</div></div></div></section>
+    <section class="panel" id="p-hists" data-title="Histograms"><div class="panel-body" id="linked-hists"></div></section>
+    <section class="panel" id="p-box" data-title="Box plot"><div class="panel-body" id="linked-box"></div></section>
+  </div>
   <div id="status">starting…</div>
   <script type="module" src="app.js"></script>
 </body>

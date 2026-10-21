@@ -2,11 +2,14 @@
 
 import os
 
-from qgis.PyQt.QtCore import Qt
+from qgis.PyQt.QtCore import QSettings, Qt
 from qgis.PyQt.QtGui import QIcon
 from qgis.PyQt.QtWidgets import QAction
 
 from .dialog import EquisDialog
+
+UI_KEY = "equis_loader/ui"
+UI_OVERLAY = "overlay"
 
 # Named for what it does, not for EQuIS: the plugin is not an EarthSoft
 # product, and a menu called EQuIS reads as though it were.
@@ -103,6 +106,16 @@ class EquisLoaderPlugin:
             from . import url_actions
             url_actions.register(self.dialog)
         self.dialog.reopen()
+        # THE OVERLAY IS THE INTERFACE (branch overlay-shell, asked
+        # 2026-10-20: "no plugin chrome at all - you launch the plugin from
+        # its button which triggers the appearance of the overlay"). The
+        # dock still exists - its Data tab is step 2's to replace - and
+        # comes up when the overlay's Data panel asks for it. "panel" in
+        # the setting brings back the dock as the interface: the fallback
+        # for a QGIS whose web view does not work.
+        if (QSettings().value(UI_KEY, UI_OVERLAY) == UI_OVERLAY
+                and self.dialog.toggle_overlay()):
+            return
         self.dialog.show()
         self.dialog.raise_()
 

@@ -6,12 +6,12 @@
  },
  "files": {
   "app.js": {
-   "bytes": 658261,
-   "sha256": "bac69a97cbdbb015"
+   "bytes": 664620,
+   "sha256": "1806f4fd8451e30a"
   },
   "index.html": {
-   "bytes": 8079,
-   "sha256": "beda3a15800881b2"
+   "bytes": 10223,
+   "sha256": "96ec94c9256b24f2"
   }
  }
 }

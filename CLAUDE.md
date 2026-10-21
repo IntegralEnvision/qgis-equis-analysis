@@ -45,7 +45,7 @@ tools/test_tickable_combos.py   tools/test_bivariate_layer.py
 tools/test_analysis_task.py   (the Analysis chooser's worker, in the task manager)
 tools/try_scatter.py   tools/try_analysis_tab.py   (console probes: US-24, the Analysis tab)
 tools/try_overlay.py   (NOT a console probe: run by `qgis --code` in a throwaway
-                        profile; drives the overlay, checks the mouse gate, quits)
+                        profile; drives the overlay shell end to end, 13 checks, quits)
 tools/mosaic_poc/overlay.py   brush_scale.py   temporal_scale.py
 ```
 
@@ -217,6 +217,7 @@ the exporter follows.
 | | |
 |---|---|
 | [docs/implementation-plan.md](docs/implementation-plan.md) | **What to do next**, in order, with acceptance criteria |
+| [docs/overlay-shell.md](docs/overlay-shell.md) | Branch `overlay-shell`: the plugin as panels on the map - plan, rules, status |
 | [docs/phase3-next-steps.md](docs/phase3-next-steps.md) | The linked views' current sequence: what has been seen working, and what is next |
 | [docs/pivot-design.md](docs/pivot-design.md) | One row per sample for multivariate views: the rules every cell needs, measured |
 | [docs/vision-linked-views.md](docs/vision-linked-views.md) | The user stories (US-1…US-24) and recommendations (R1…R10) |

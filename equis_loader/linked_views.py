@@ -95,8 +95,11 @@ class LinkedViewsController(object):
         self._brush_layer_for = None
         self._by_code = {}
         self._index_for = None
-        # The view laid over the map canvas (map_overlay.py), or None.
+        # The view laid over the map canvas (map_overlay.py), or None, and
+        # what the page is told when it (re)loads while over the map.
         self.overlay = None
+        self._overlay_layout = None
+        self._overlay_ready = None
 
     # ------------------------------------------------------------- lifecycle
 
@@ -147,6 +150,8 @@ class LinkedViewsController(object):
     def _page_ready(self):
         if self.session is not None:
             self.session.page_reloaded()
+        # Over the map before the page had loaded: it was told nothing then.
+        self._tell_overlay()
         if self._offer_wanted:
             # The chooser was asked for while the page was starting. Its
             # answer redraws any chosen pair, so nothing else is owed.
@@ -440,11 +445,15 @@ class LinkedViewsController(object):
 
     # --------------------------------------------------------------- overlay
 
-    def float_over(self, canvas, on_dock=None):
-        """Move the view onto `canvas`, as translucent cards. True if done.
+    def float_over(self, canvas, on_asked=None, on_remember=None, layout=None,
+                   on_ready=None, covers=()):
+        """Move the view onto `canvas`, as panels against its edges. True if done.
 
-        `on_dock` is called when the page asks to go back to the panel; the
-        panel owns where the view lives, so it does the moving (sink()).
+        `on_asked(what)` receives the page's requests - "dock", "data",
+        "hide" - because the panel owns where the view lives and what is
+        shown. `layout` is where the panels were last put (the panel keeps
+        it in QSettings through `on_remember`); `on_ready` runs whenever the
+        page (re)loads over the map, so it is never left without its data.
         """
         views = self.views
         if views is None or canvas is None:
@@ -452,13 +461,34 @@ class LinkedViewsController(object):
         if self.overlay is not None:
             return True
         from .map_overlay import MapOverlay
-        self.overlay = MapOverlay(views.view, canvas)
+        self.overlay = MapOverlay(
+            views.view, canvas, covers=covers,
+            on_keep_out=lambda rects: self.views is not None
+            and self.views.call("keepOut", rects))
+        self._overlay_layout = layout
+        self._overlay_ready = on_ready
         views.bridge.on_cards = self.overlay.set_cards
-        views.bridge.on_asked = (lambda what: on_dock()
-                                 if what == "dock" and on_dock else None)
+        views.bridge.on_asked = on_asked
+        views.bridge.on_remember = on_remember
         self.overlay.attach()
-        views.call("overlay", True)
+        self._tell_overlay()
         return True
+
+    def _tell_overlay(self):
+        if self.overlay is None or self.views is None:
+            return
+        self.views.call("overlay", {"on": True, "layout": self._overlay_layout})
+        self.overlay.report_keep_out()
+        if self._overlay_ready is not None:
+            self._overlay_ready()
+
+    def set_overlay_visible(self, visible):
+        if self.overlay is not None:
+            self.overlay.set_visible(visible)
+
+    @property
+    def overlay_visible(self):
+        return self.overlay is not None and self.overlay.visible
 
     def sink(self):
         """Take the view off the map. Returns it for the panel to re-seat."""
@@ -470,6 +500,9 @@ class LinkedViewsController(object):
             return None
         views.bridge.on_cards = None
         views.bridge.on_asked = None
+        views.bridge.on_remember = None
+        self._overlay_ready = None
+        views.view.setVisible(True)
         views.call("overlay", False)
         return views.view
 

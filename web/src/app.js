@@ -19,6 +19,8 @@ import { Scatter } from "./scatterplot.js";
 import { Ternary } from "./ternaryplot.js";
 import { Chooser } from "./chooser.js";
 import { Linked } from "./linked.js";
+import { DataPanel } from "./datapanel.js";
+import { Shell } from "./shell.js";
 import { connectBridge, qtConnector } from "./connector.js";
 
 const status = (message) => {
@@ -56,13 +58,12 @@ async function start() {
   let lastDraw = null;
 
   // OVER THE MAP (map_overlay.py). The host decides who gets the mouse, by
-  // these rectangles: over a card the page does, everywhere else the map.
+  // these rectangles: over a panel the page does, everywhere else the map.
   // The page reports them whenever its layout moves; it keeps no gate of
   // its own, because two gates on one mouse desynced in the overlay spike.
   let overlayOn = false;
   let cardsFrame = 0;
-  const CARDS = "#overlay-bar, #controls:not([hidden]), #views > *, "
-    + ".chooser-warn-panel:not([hidden])";
+  const CARDS = ".panel, .chooser-warn-panel:not([hidden])";
   const sendCards = () => {
     cardsFrame = 0;
     if (!overlayOn) return;
@@ -82,17 +83,21 @@ async function start() {
   };
   new MutationObserver(cardsMoved).observe(document.body,
     { childList: true, subtree: true, attributes: true, attributeFilter: ["hidden", "class"] });
-  const resized = new ResizeObserver(cardsMoved);
-  for (const id of ["controls", "views", "overlay-bar"]) {
-    const node = document.getElementById(id);
-    if (node) resized.observe(node);
-  }
   window.addEventListener("resize", cardsMoved);
   document.addEventListener("scroll", cardsMoved, true);
-  const back = document.querySelector("#overlay-bar button");
-  if (back) back.addEventListener("click", () => {
-    try { bridge.asked("dock"); } catch (_) { /* older host */ }
+  const ask = (what) => {
+    try { bridge.asked(what); } catch (_) { /* an older host */ }
+  };
+  // The panels (shell.js). Their layout is the host's to keep (QSettings),
+  // so it survives a restart; the page only reports it.
+  const shell = new Shell({
+    root: document.getElementById("shell"),
+    onChange: cardsMoved,
+    onLayout: (layout) => {
+      try { bridge.remember("overlay_layout", JSON.stringify(layout)); } catch (_) { /* older host */ }
+    },
   });
+  const dataPanel = new DataPanel(document.getElementById("data-body"), ask);
   let drawCount = 0;
   const coordinator = new Coordinator();
   const connector = qtConnector(bridge);
@@ -153,6 +158,8 @@ async function start() {
       lastDraw = () => window.equis.histogram(options);
       if (histogram) histogram.destroy();
       if (linked) { linked.destroy(); linked = null; }
+      document.getElementById("linked-hists").replaceChildren();
+      document.getElementById("linked-box").replaceChildren();
       if (scatter) { scatter.destroy(); scatter = null; }
       histogram = new Histogram({
         vg, coordinator, element: target,
@@ -203,9 +210,12 @@ async function start() {
       // crossfilter per draw, shared by every view of these samples.
       const main = document.createElement("div");
       main.className = "card main";
-      const below = document.createElement("div");
-      below.className = "linked";
-      target.replaceChildren(main, below);
+      target.replaceChildren(main);
+      // The linked views have panels of their own (shell.js).
+      const below = document.getElementById("linked-hists");
+      const boxPanel = document.getElementById("linked-box");
+      below.replaceChildren();
+      boxPanel.replaceChildren();
       const cross = vg.Selection.crossfilter();
       // A ternary is a chart of samples too (ternaryplot.js extends
       // Scatter): same brush, same route to the map, its own marks.
@@ -227,7 +237,8 @@ async function start() {
         const columns = ternary
           ? [["x", "a"], ["y", "b"], ["z", "c"]].map(([k, field]) => ({ ...options[k], field }))
           : [{ ...options.x, field: "x", axis: axes.x }, { ...options.y, field: "y", axis: axes.y }];
-        linked = new Linked({ vg, coordinator, element: below, cross, onBrush: toHost });
+        linked = new Linked({ vg, coordinator, element: below, boxElement: boxPanel,
+                              cross, onBrush: toHost });
         try {
           const began = performance.now();
           await linked.show({ views: drawn.views, pivot: options.pivot, columns,
@@ -285,15 +296,30 @@ async function start() {
 
     /** Laid over the map (true) or back in the panel (false). The host
      *  has already moved the view; this re-lays the page for it. */
-    overlay(on) {
-      overlayOn = !!on;
+    overlay(arg) {
+      // true/false, or {on, layout} with the host's saved panel layout.
+      const on = arg && typeof arg === "object" ? !!arg.on : !!arg;
+      overlayOn = on;
       document.body.classList.toggle("overlay", overlayOn);
+      shell.setOverlay(on, arg && typeof arg === "object" ? arg.layout : null);
       report("info", `overlay ${overlayOn ? "on" : "off"}`);
       // The redraw drops any brush; the map's highlight must go with it.
       try { bridge.brushed(""); } catch (_) { /* nothing to clear */ }
       if (lastDraw) lastDraw();
       cardsMoved();
     },
+
+    /** What the panel has loaded and its warnings, for the Data panel.
+     *  The host's banner decides what is cached or cut short; this shows
+     *  what it decided (datapanel.js). */
+    dataStatus(payload) { dataPanel.update(payload || {}); },
+
+    /** QGIS's own widgets over the canvas (its message bar), which the
+     *  panels keep clear of (shell.js insetsFrom). */
+    keepOut(rects) { shell.setKeepOut(rects || []); },
+
+    /** The panels' window manager, for diagnostics and the preview. */
+    get shell() { return shell; },
 
     /** The chooser, for diagnostics and the preview harness. */
     get chooser() { return chooser; },

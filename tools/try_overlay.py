@@ -1,18 +1,22 @@
-r"""The Analysis view over the map, driven end to end in a real QGIS.
+r"""The overlay shell, driven end to end in a real QGIS.
 
 Not a console probe: QGIS runs this at startup, in a THROWAWAY profile,
 and it QUITS QGIS when it is done (hard - a save prompt must not hang an
-unattended run). It opens the panel, loads a parquet facility, adds an
-OpenStreetMap basemap, draws a scatter with its linked views, lays them
-over the map, and then checks the mouse gate (map_overlay.py) with Qt's
-synthetic input - so the real mouse is never touched:
+unattended run). Everything goes through the plugin as a user would reach
+it, with Qt's synthetic input - the real mouse is never touched:
 
-  1. hovering a card gives the page the mouse;
-  2. hovering open map gives it to the map;
-  3. Ctrl over a card gives it to the map;
-  4. a drag on the scatter card brushes ("N of M samples selected");
-  5. a drag on open map, with the Pan tool, moves the extent;
-  6. the view goes back into the tab and redraws.
+  1. the toolbar button brings up the overlay, with the dock hidden and the
+     Data panel saying nothing is loaded;
+  2. a parquet facility loads (through the panel's own code, dock hidden)
+     and the Data panel names it; the chooser is offered with no tab click;
+  3. hovering a panel gives the page the mouse, open map gives it to the
+     map, Ctrl over a panel gives it to the map;
+  4. a drag on the Chart panel brushes ("N of M samples selected");
+  5. a panel dragged by its header snaps to another edge; one minimised
+     becomes a tab; the layout is kept in QSettings;
+  6. a drag on open map, with the Pan tool, moves the extent;
+  7. "Change data…" brings up the dock; "Into the panel" puts the view
+     back in the Analysis tab.
 
 Each step is screenshotted. This exists because the two tests that would
 cover the web view skip outside QGIS's own application object
@@ -26,9 +30,7 @@ application.
     & "C:\Program Files\QGIS 4.2.1\bin\qgis.bat" --profiles-path <root> `
         --profile try --nologo --noversioncheck --code tools\try_overlay.py
 
-Then read <OUT>\log.txt; its last lines are the SUMMARY. First run
-2026-10-20, QGIS 4.2.1 on Windows 11, Facility A, SO As x Cr: all six held;
-the drag selected 93 of 112 samples at 10 locations.
+Then read <OUT>\log.txt; its last lines are the SUMMARY.
 """
 import json
 import os
@@ -36,8 +38,8 @@ import tempfile
 import time
 import traceback
 
-from qgis.core import QgsApplication, QgsProject, QgsRasterLayer, QgsVectorLayer
-from qgis.PyQt.QtCore import QEvent, QPoint, QPointF, Qt, QTimer
+from qgis.core import QgsProject, QgsRasterLayer, QgsVectorLayer
+from qgis.PyQt.QtCore import QEvent, QPoint, QPointF, QSettings, Qt, QTimer
 from qgis.PyQt.QtGui import QGuiApplication, QMouseEvent
 from qgis.PyQt.QtTest import QTest
 from qgis.PyQt.QtWidgets import QApplication
@@ -54,11 +56,17 @@ MATRIX, X_NAME, Y_NAME = (os.environ.get("OVERLAY_PAIR")
 LOG = open(os.path.join(OUT, "log.txt"), "w", encoding="utf-8")
 T0 = time.monotonic()
 STATE = {}
+CHECKS = []
 
 
 def say(message):
     LOG.write("%7.1f  %s\n" % (time.monotonic() - T0, message))
     LOG.flush()
+
+
+def check(label, ok, detail=""):
+    CHECKS.append((label, bool(ok)))
+    say("[%s] %s%s" % ("PASS" if ok else "FAIL", label, (" - %s" % detail) if detail else ""))
 
 
 def shot(name):
@@ -76,6 +84,16 @@ def page(js, then):
     STATE["panel"]._linked.views.view.page().runJavaScript(js, then)
 
 
+def ask_page(js, key):
+    """Ask the page something; the answer lands in STATE[key] (JSON)."""
+    def got(result):
+        try:
+            STATE[key] = json.loads(result) if result else None
+        except (TypeError, ValueError):
+            STATE[key] = result
+    page("JSON.stringify(%s)" % js, got)
+
+
 def wait(cond, then, label, limit=120.0, every=250):
     began = time.monotonic()
 
@@ -91,10 +109,14 @@ def wait(cond, then, label, limit=120.0, every=250):
         elif time.monotonic() - began > limit:
             say("TIMEOUT: %s (%s)" % (label, STATE.get("last_error")))
             shot("timeout.png")
-            finish()
+            summary()
         else:
             QTimer.singleShot(every, poll)
     poll()
+
+
+def after(ms, fn):
+    QTimer.singleShot(ms, guard(fn))
 
 
 def guard(fn):
@@ -103,14 +125,36 @@ def guard(fn):
             fn()
         except Exception:  # noqa: BLE001
             say("ERROR\n" + traceback.format_exc())
-            finish()
+            summary()
     return run
 
 
-def finish():
-    say("done; shots and this log are in %s" % OUT)
-    LOG.close()
-    QTimer.singleShot(500, lambda: os._exit(0))
+def to_window(viewport_point):
+    win = iface.mainWindow()
+    g = iface.mapCanvas().viewport().mapToGlobal(viewport_point)
+    return win.windowHandle(), win.mapFromGlobal(g)
+
+
+def rect_of(panel_id, then):
+    """A panel's rectangle in viewport pixels (the page fills the viewport)."""
+    ask_page("(() => { const r = document.getElementById(%s).getBoundingClientRect();"
+             " return {x: r.left, y: r.top, w: r.width, h: r.height}; })()"
+             % json.dumps(panel_id), "rect")
+    after(300, lambda: then(STATE["rect"]))
+
+
+def drag(start, end, steps=12, modifier=Qt.KeyboardModifier.NoModifier):
+    window, a = to_window(start)
+    _, b = to_window(end)
+    QTest.mouseMove(window, a)
+    QApplication.processEvents()
+    QTest.mousePress(window, Qt.MouseButton.LeftButton, modifier, a)
+    for i in range(1, steps + 1):
+        QTest.mouseMove(window, QPoint(a.x() + (b.x() - a.x()) * i // steps,
+                                       a.y() + (b.y() - a.y()) * i // steps), 15)
+        QApplication.processEvents()
+    QTest.mouseRelease(window, Qt.MouseButton.LeftButton, modifier, b)
+    QApplication.processEvents()
 
 
 # ------------------------------------------------------------------ steps
@@ -118,19 +162,32 @@ def finish():
 def start():
     win = iface.mainWindow()
     win.showNormal()
-    win.setGeometry(40, 40, 1600, 980)
+    win.setGeometry(40, 40, 1500, 900)
     win.raise_()
     win.activateWindow()
+    QSettings().remove("equis_loader/overlay_layout")     # start from the default
     if "equis_loader" not in plugins:
         loadPlugin("equis_loader")
         startPlugin("equis_loader")
-    plugin = plugins["equis_loader"]
-    plugin.run()
-    panel = plugin.dialog
-    STATE["panel"] = panel
     QgsProject.instance().addMapLayer(QgsRasterLayer(
         "type=xyz&url=https://tile.openstreetmap.org/{z}/{x}/{y}.png&zmax=19&zmin=0",
         "OpenStreetMap", "wms"))
+    plugin = plugins["equis_loader"]
+    plugin.run()                                   # the toolbar button
+    panel = plugin.dialog
+    STATE["panel"] = panel
+    check("the button brings up the overlay", panel._linked is not None
+          and panel._linked.overlay is not None)
+    check("the dock stays out of the way", not panel.isVisible())
+    wait(lambda: panel._linked.views.ready_seen, launched, "page ready")
+
+
+def launched():
+    after(800, lambda: (shot("0_launch.png"), load()))
+
+
+def load():
+    panel = STATE["panel"]
     panel.source_combo.setCurrentIndex(1)          # published parquet
     panel.parquet_edit.setText(DATA)
     panel._open_parquet_source()
@@ -138,34 +195,32 @@ def start():
 
 
 def loaded():
-    panel = STATE["panel"]
     layers = [lyr for lyr in QgsProject.instance().mapLayers().values()
               if isinstance(lyr, QgsVectorLayer)]
     if layers:
         iface.setActiveLayer(layers[0])
         iface.zoomToActiveLayer()
-    wait(lambda: panel._linked is not None and panel._linked.views is not None
-         and panel._linked.views.ready_seen, warmed, "analysis view warm")
+    linked = STATE["panel"]._linked
+    # Offered with no tab click: the page's matrix list arrives by itself.
+    wait(lambda: linked.session is not None and linked._task is None
+         and linked.session.matrices(), offered, "chooser offered", limit=60)
 
 
-def warmed():
-    panel = STATE["panel"]
-    panel.tabs.setCurrentIndex(panel.analysis_index)
-    linked = panel._linked
+def offered():
+    ask_page("document.querySelector('#data-body .data-what').textContent", "data_what")
     idle = {"n": 0}
+    linked = STATE["panel"]._linked
 
     def quiet():
-        # A dozen polls with no task: the page's own first choice (it picks
-        # a matrix when offered none) has come and gone, and cannot
-        # overtake ours - a later choice wins (linked_views._on_choice).
         idle["n"] = idle["n"] + 1 if linked._task is None else 0
         return idle["n"] >= 12
     wait(quiet, choose, "controller quiet", limit=60)
 
 
 def choose():
-    panel = STATE["panel"]
-    linked = panel._linked
+    check("the Data panel names what loaded", "Nothing loaded" not in (STATE.get("data_what") or "Nothing loaded"),
+          STATE.get("data_what"))
+    linked = STATE["panel"]._linked
     # By NAME: a prefix depends on the data (arsenic, or arsenic_t where
     # fractions split it), and a prefix the catalogue lacks is dropped.
     catalogue = linked.session.catalogue(MATRIX)
@@ -173,20 +228,9 @@ def choose():
     choice = {"matrix": MATRIX, "x": prefix.get(X_NAME.lower()),
               "y": prefix.get(Y_NAME.lower()), "chart": "scatter", "mode": "all"}
     say("choosing %s" % choice)
-    views = linked.views
-    original = views.call
-
-    def traced(name, payload):
-        text = ("matrix=%s" % payload.get("matrix") if name == "offer"
-                else json.dumps(payload)[:200])
-        say("host -> page %s %s" % (name, text))
-        return original(name, payload)
-    views.call = traced
-    # As the page's own chooser does it: through the bridge.
     page("window.equis.bridge.chosen(%s); 'sent'" % json.dumps(json.dumps(choice)),
          lambda r: None)
-    drawn_then(lambda: QTimer.singleShot(1500, guard(lambda: (shot("1_tab.png"),
-                                                             go_over()))))
+    drawn_then(lambda: after(1500, lambda: (shot("1_over_map.png"), gate())))
 
 
 def drawn_then(then):
@@ -200,37 +244,28 @@ def drawn_then(then):
     wait(ask, then, "chart and linked views drawn", limit=90)
 
 
-def go_over():
-    STATE["panel"].overlay_check.setChecked(True)
-    drawn_then(lambda: QTimer.singleShot(2000, guard(lambda: (
-        shot("2_over_map.png"), gate_tests()))))
+def gate():
+    rect_of("p-chart", gate_with)
 
 
-def to_window(viewport_point):
-    win = iface.mainWindow()
-    g = iface.mapCanvas().viewport().mapToGlobal(viewport_point)
-    return win.windowHandle(), win.mapFromGlobal(g)
-
-
-def gate_tests():
+def gate_with(r):
     ov = STATE["panel"]._linked.overlay
     vp = iface.mapCanvas().viewport().rect()
-    say("viewport %dx%d, cards %s" % (vp.width(), vp.height(), [
-        (c.x(), c.y(), c.width(), c.height()) for c in ov.cards]))
-    main = max(ov.cards, key=lambda c: c.bottom() - c.left() * 0.5)  # bottom-left
-    STATE["main"] = main
+    say("viewport %dx%d, %d cards" % (vp.width(), vp.height(), len(ov.cards)))
+    chart = QPoint(int(r["x"] + r["w"] / 2), int(r["y"] + r["h"] / 2))
+    STATE["chart"] = r
     empty = QPoint(vp.width() // 2, vp.height() // 2)
-    while ov.over_card(empty):
+    while ov.over_card(empty) and empty.y() < vp.height() - 40:
         empty += QPoint(0, 40)
     STATE["empty"] = empty
-    window, p = to_window(main.center())
+    window, p = to_window(chart)
     QTest.mouseMove(window, p)
     QApplication.processEvents()
-    STATE["card"] = ov.open
+    on_card = ov.open
     window, q = to_window(empty)
     QTest.mouseMove(window, q)
     QApplication.processEvents()
-    STATE["map"] = ov.open
+    on_map = ov.open
     QTest.mouseMove(window, p)
     QApplication.processEvents()
     # QTest cannot hold a key across a move, so: a move carrying Ctrl, sent
@@ -241,70 +276,96 @@ def gate_tests():
     QApplication.sendEvent(ov.view.focusProxy() if ov.open
                            else iface.mapCanvas().viewport(), ev)
     QApplication.processEvents()
-    STATE["ctrl"] = ov.open
-    say("page has the mouse: over a card %s (want True), over the map %s "
-        "(want False), Ctrl over a card %s (want False)"
-        % (STATE["card"], STATE["map"], STATE["ctrl"]))
-    QTimer.singleShot(300, guard(brush_test))
+    check("over a panel, the page has the mouse", on_card is True)
+    check("over open map, the map has it", on_map is False)
+    check("Ctrl over a panel, the map has it", ov.open is False)
+    after(300, brush)
 
 
-def drag(start, end, steps=12):
-    window, a = to_window(start)
-    _, b = to_window(end)
-    QTest.mouseMove(window, a)
-    QApplication.processEvents()
-    QTest.mousePress(window, Qt.MouseButton.LeftButton,
-                     Qt.KeyboardModifier.NoModifier, a)
-    for i in range(1, steps + 1):
-        QTest.mouseMove(window, QPoint(a.x() + (b.x() - a.x()) * i // steps,
-                                       a.y() + (b.y() - a.y()) * i // steps), 15)
-        QApplication.processEvents()
-    QTest.mouseRelease(window, Qt.MouseButton.LeftButton,
-                       Qt.KeyboardModifier.NoModifier, b)
-    QApplication.processEvents()
+def brush():
+    r = STATE["chart"]
+    drag(QPoint(int(r["x"] + r["w"] * 0.40), int(r["y"] + r["h"] * 0.20)),
+         QPoint(int(r["x"] + r["w"] * 0.85), int(r["y"] + r["h"] * 0.60)))
+    after(2500, lambda: (ask_page("document.querySelector('.linked-line').textContent", "brush"),
+                         after(500, arrange)))
 
 
-def brush_test():
-    main = STATE["main"]
-    drag(QPoint(main.left() + int(main.width() * 0.40), main.top() + int(main.height() * 0.15)),
-         QPoint(main.left() + int(main.width() * 0.85), main.top() + int(main.height() * 0.55)))
-    QTimer.singleShot(2500, guard(lambda: page(
-        "document.querySelector('.linked-line').textContent",
-        lambda r: (STATE.__setitem__("brush", r), say("brush line: %s" % r),
-                   QTimer.singleShot(800, guard(lambda: (shot("3_brushed.png"),
-                                                        pan_test())))))))
+def arrange():
+    check("a drag on the Chart panel brushes", "selected" in (STATE.get("brush") or ""),
+          STATE.get("brush"))
+    rect_of("p-hists", arrange_with)
 
 
-def pan_test():
+def arrange_with(r):
+    vp = iface.mapCanvas().viewport().rect()
+    # Count what the header receives, so a failed drag says whether the
+    # press reached the page at all.
+    page("window.__head = {down: 0, move: 0, up: 0};"
+         "const h = document.querySelector('#p-hists .panel-head');"
+         "h.addEventListener('pointerdown', () => window.__head.down++);"
+         "h.addEventListener('pointermove', () => window.__head.move++);"
+         "h.addEventListener('pointerup', () => window.__head.up++); 'ok'", lambda r_: None)
+    ask_page("getComputedStyle(document.body).getPropertyValue('--inset-v')", "inset")
+    head = QPoint(int(r["x"] + 60), int(r["y"] + 8))
+    say("Histograms header at %s; keep-out %s" % (
+        (head.x(), head.y()), STATE["panel"]._linked.overlay.keep_out()))
+    # Down to the bottom edge, a third of the way across.
+    drag(head, QPoint(vp.width() // 3, vp.height() - 60), steps=16)
+    page("document.querySelector('#p-box .panel-min').click(); 'ok'", lambda r_: None)
+    ask_page("window.__head", "head")
+    after(1200, lambda: (ask_page("window.equis.shell.layout", "layout"), after(400, arranged)))
+
+
+def arranged():
+    layout = STATE.get("layout") or {}
+    say("header events %s; page inset %s" % (STATE.get("head"), STATE.get("inset")))
+    saved = QSettings().value("equis_loader/overlay_layout", "")
+    check("a panel dragged to another edge snaps there",
+          (layout.get("p-hists") or {}).get("edge") == "bottom", layout.get("p-hists"))
+    check("a minimised panel becomes a tab", (layout.get("p-box") or {}).get("minimized") is True)
+    check("the layout is kept in QSettings", '"p-hists"' in str(saved))
+    shot("2_arranged.png")
+    after(300, pan)
+
+
+def pan():
     iface.actionPan().trigger()
     canvas = iface.mapCanvas()
     before = canvas.extent().center()
-    drag(STATE["empty"], STATE["empty"] + QPoint(-160, 90))
-    after = canvas.extent().center()
-    STATE["pan"] = abs(after.x() - before.x()) + abs(after.y() - before.y())
-    say("a drag on open map moved the extent %.1f map units (want > 0)" % STATE["pan"])
-    QTimer.singleShot(1500, guard(lambda: (shot("4_panned.png"), back())))
+    drag(STATE["empty"], STATE["empty"] + QPoint(-120, 60))
+    after_ = canvas.extent().center()
+    moved = abs(after_.x() - before.x()) + abs(after_.y() - before.y())
+    check("a drag on open map pans", moved > 0, "%.1f map units" % moved)
+    after(1200, data_button)
 
 
-def back():
+def data_button():
+    page("Array.from(document.querySelectorAll('#data-body button'))"
+         ".find(b => b.textContent.includes('data')).click(); 'ok'", lambda r: None)
+    after(1200, lambda: (check("Change data… brings up the dock", STATE["panel"].isVisible()),
+                         shot("3_data_dock.png"), into_panel()))
+
+
+def into_panel():
+    page("Array.from(document.querySelectorAll('#data-body button'))"
+         ".find(b => b.textContent.includes('panel')).click(); 'ok'", lambda r: None)
     panel = STATE["panel"]
-    panel.overlay_check.setChecked(False)
-    STATE["home"] = panel.analysis_page.layout().indexOf(panel._linked.views.view) >= 0
-    drawn_then(lambda: QTimer.singleShot(1500, guard(lambda: (
-        shot("5_back_in_tab.png"), summary()))))
+
+    def home():
+        return (panel._linked.overlay is None
+                and panel.analysis_page.layout().indexOf(panel._linked.views.view) >= 0)
+    wait(home, lambda: drawn_then(lambda: after(1500, lambda: (
+        check("Into the panel puts the view back in the tab", True),
+        shot("4_into_panel.png"), summary()))), "back in the tab", limit=20)
 
 
 def summary():
-    checks = [("over a card, the page has the mouse", STATE.get("card") is True),
-              ("over open map, the map has it", STATE.get("map") is False),
-              ("Ctrl over a card, the map has it", STATE.get("ctrl") is False),
-              ("a drag on the scatter brushes", "selected" in (STATE.get("brush") or "")),
-              ("a drag on open map pans", (STATE.get("pan") or 0) > 0),
-              ("the view goes back into the tab", STATE.get("home") is True)]
-    for label, ok in checks:
-        say("[%s] %s" % ("PASS" if ok else "FAIL", label))
-    say("SUMMARY %s" % ("ALL PASS" if all(ok for _, ok in checks) else "FAILED"))
-    finish()
+    say("SUMMARY %s (%d of %d)" % (
+        "ALL PASS" if CHECKS and all(ok for _, ok in CHECKS) else "FAILED",
+        sum(ok for _, ok in CHECKS), len(CHECKS)))
+    say("done; shots and this log are in %s" % OUT)
+    LOG.close()
+    QTimer.singleShot(500, lambda: os._exit(0))
 
 
 say("loaded; data %s" % DATA)

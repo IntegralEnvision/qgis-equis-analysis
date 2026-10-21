@@ -7,7 +7,7 @@
   "scripts": {
     "build": "node build.mjs",
     "check": "node build.mjs --check",
-    "test": "node --test test/histogram.test.mjs test/scatter.test.mjs test/chooser.test.mjs test/ternary.test.mjs"
+    "test": "node --test test/histogram.test.mjs test/scatter.test.mjs test/chooser.test.mjs test/ternary.test.mjs test/shell.test.mjs"
   },
   "devDependencies": {
     "@uwdata/vgplot": "0.31.0",

@@ -76,10 +76,15 @@ export function brushedSql(table, where) {
 }
 
 export class Linked {
-  constructor({ vg, coordinator, element, cross, onBrush = null }) {
+  /**
+   * `element` takes the brush line and the histograms; `boxElement`, when
+   * given, the box plot - over the map they are separate panels (shell.js).
+   */
+  constructor({ vg, coordinator, element, boxElement = null, cross, onBrush = null }) {
     this.vg = vg;
     this.coordinator = coordinator;
     this.element = element;
+    this.boxElement = boxElement;
     this.cross = cross;
     this.onBrush = onBrush;
     this.fg = vg.Selection.crossfilter({ include: [cross] });
@@ -176,7 +181,12 @@ export class Linked {
     area.className = "box-area";
     boxCard.append(bar, area);
 
-    this.element.replaceChildren(strip, hists, boxCard);
+    if (this.boxElement) {
+      this.element.replaceChildren(strip, hists);
+      this.boxElement.replaceChildren(boxCard);
+    } else {
+      this.element.replaceChildren(strip, hists, boxCard);
+    }
     this.box = new BoxChart({ element: area, filterBy: this.fg, source: name,
                               coordinator: this.coordinator });
     this.coordinator.connect(this.box);

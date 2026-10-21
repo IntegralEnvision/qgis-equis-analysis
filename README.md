@@ -721,6 +721,9 @@ a **ternary**:
 - **Over the map** (a checkbox on the tab) lays the same view over the map
   canvas as translucent cards. The cards take the mouse and the map takes it
   everywhere else; hold **Ctrl** to reach the map through a card. Experimental.
+  On the `overlay-shell` branch this is the interface: the toolbar button
+  brings up panels that cling to the map's edges and tuck away as tabs
+  ([docs/overlay-shell.md](docs/overlay-shell.md)).
 
 The design and the measurements behind it are in
 [docs/pivot-design.md](docs/pivot-design.md).

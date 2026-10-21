@@ -80,6 +80,7 @@ class WebBridge(QObject):
         # Set by the overlay (map_overlay.py) while the view is over the map.
         self.on_cards = None
         self.on_asked = None
+        self.on_remember = None
 
     # ----------------------------------------------------------- handshake
 
@@ -198,6 +199,19 @@ class WebBridge(QObject):
             self.on_asked(str(what))
         except Exception as exc:  # noqa: BLE001
             _log("asked handler raised %s: %s" % (type(exc).__name__, exc),
+                 None if Qgis is None else Qgis.Critical)
+
+    @pyqtSlot(str, str)
+    def remember(self, key, value):
+        """The page asks the host to keep something across sessions: today
+        only where the overlay's panels were put (shell.js). The host owns
+        storage - QSettings - so a layout survives a restart."""
+        if self.on_remember is None:
+            return
+        try:
+            self.on_remember(str(key), str(value))
+        except Exception as exc:  # noqa: BLE001
+            _log("remember handler raised %s: %s" % (type(exc).__name__, exc),
                  None if Qgis is None else Qgis.Critical)
 
     @pyqtSlot(str, str)
