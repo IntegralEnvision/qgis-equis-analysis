@@ -44,6 +44,8 @@ tools/test_interactive.py   tools/test_parquet_source_ui.py
 tools/test_tickable_combos.py   tools/test_bivariate_layer.py
 tools/test_analysis_task.py   (the Analysis chooser's worker, in the task manager)
 tools/try_scatter.py   tools/try_analysis_tab.py   (console probes: US-24, the Analysis tab)
+tools/try_overlay.py   (NOT a console probe: run by `qgis --code` in a throwaway
+                        profile; drives the overlay, checks the mouse gate, quits)
 tools/mosaic_poc/overlay.py   brush_scale.py   temporal_scale.py
 ```
 

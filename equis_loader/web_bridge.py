@@ -77,6 +77,9 @@ class WebBridge(QObject):
         self._on_brush = on_brush
         self._on_choice = on_choice
         self.ready_seen = False
+        # Set by the overlay (map_overlay.py) while the view is over the map.
+        self.on_cards = None
+        self.on_asked = None
 
     # ----------------------------------------------------------- handshake
 
@@ -168,6 +171,33 @@ class WebBridge(QObject):
         except Exception as exc:  # noqa: BLE001 - as for a brush: the next
             # choice should still work.
             _log("choice handler raised %s: %s" % (type(exc).__name__, exc),
+                 None if Qgis is None else Qgis.Critical)
+
+    @pyqtSlot(str)
+    def cards(self, payload):
+        """Over the map: the page's cards, [{x, y, w, h}] in CSS pixels.
+
+        The overlay gives the page the mouse over these and nowhere else
+        (map_overlay.py). Sent whenever the page's layout changes.
+        """
+        if self.on_cards is None:
+            return
+        try:
+            self.on_cards(json.loads(payload) if payload else [])
+        except Exception as exc:  # noqa: BLE001 - as for a brush
+            _log("cards handler raised %s: %s" % (type(exc).__name__, exc),
+                 None if Qgis is None else Qgis.Critical)
+
+    @pyqtSlot(str)
+    def asked(self, what):
+        """A page button asked the host for something it owns: "dock" puts
+        the view back in the panel. The page only asks; Qt moves widgets."""
+        if self.on_asked is None:
+            return
+        try:
+            self.on_asked(str(what))
+        except Exception as exc:  # noqa: BLE001
+            _log("asked handler raised %s: %s" % (type(exc).__name__, exc),
                  None if Qgis is None else Qgis.Critical)
 
     @pyqtSlot(str, str)

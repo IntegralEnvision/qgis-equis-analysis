@@ -1067,6 +1067,22 @@ class EquisDialog(QDockWidget):
         self.analysis_placeholder.setStyleSheet(
             "QLabel { color: #666; padding: 24px; }")
         analysis_layout.addWidget(self.analysis_placeholder)
+        # Over the map (map_overlay.py, asked for 2026-10-20 to be seen):
+        # the same view, moved onto the canvas as translucent cards.
+        overlay_row = QHBoxLayout()
+        overlay_row.setContentsMargins(6, 4, 6, 0)
+        self.overlay_check = QCheckBox("Over the map")
+        self.overlay_check.setToolTip(
+            "Lay the charts over the map as translucent cards. The cards "
+            "take the mouse; hold Ctrl to reach the map through one.")
+        self.overlay_check.toggled.connect(self._set_overlay)
+        overlay_row.addWidget(self.overlay_check)
+        self.overlay_note = QLabel("Shown over the map. Hold Ctrl to reach "
+                                   "the map through a chart.")
+        self.overlay_note.setStyleSheet("QLabel { color: #666; }")
+        self.overlay_note.setVisible(False)
+        overlay_row.addWidget(self.overlay_note, 1)
+        analysis_layout.insertLayout(0, overlay_row)
         self.analysis_index = self.tabs.addTab(self.analysis_page, "Analysis")
         self.tabs.currentChanged.connect(self._on_tab_changed)
         outer.addWidget(self.tabs, 1)
@@ -2657,6 +2673,32 @@ class EquisDialog(QDockWidget):
         self._linked.prepare()
         return views
 
+    def _set_overlay(self, on):
+        """Move the analysis view over the map, or back into this tab."""
+        linked = self._linked
+        if on:
+            if linked is None or linked.views is None:
+                if self.open_linked_views(show=False) is None:
+                    self.overlay_check.setChecked(False)
+                    return
+                linked = self._linked
+            if not linked.float_over(
+                    self.iface.mapCanvas(),
+                    on_dock=lambda: self.overlay_check.setChecked(False)):
+                self.overlay_check.setChecked(False)
+                return
+            self.overlay_note.setVisible(True)
+            return
+        if linked is None:
+            return
+        view = linked.sink()
+        if view is not None:
+            layout = self.analysis_page.layout()
+            if layout.indexOf(view) < 0:
+                layout.addWidget(view, 1)
+            view.show()
+        self.overlay_note.setVisible(False)
+
     def _follow_time_window(self):
         """Let the scatter follow the map's Temporal Controller. Once.
 
@@ -2928,6 +2970,12 @@ class EquisDialog(QDockWidget):
             self._linked = None
         if getattr(self, "analysis_placeholder", None) is not None:
             self.analysis_placeholder.setVisible(True)
+        if getattr(self, "overlay_check", None) is not None:
+            # The view it moved is gone; the box must not claim otherwise.
+            self.overlay_check.blockSignals(True)
+            self.overlay_check.setChecked(False)
+            self.overlay_check.blockSignals(False)
+            self.overlay_note.setVisible(False)
 
     # ----------------------------------------------------------- 5. report
 

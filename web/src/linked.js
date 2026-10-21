@@ -211,8 +211,8 @@ export class Linked {
       vg.yScale("sqrt"), vg.yTickFormat((d) => (d >= 1000 ? `${d / 1000}k` : String(d))),
       vg.xLabel(`${c.label}${c.unit ? ` (${c.unit})` : ""} →`),
       vg.yLabel("√n"), vg.yTicks(3), vg.xTicks(4),
-      vg.width(width), vg.height(96),
-      vg.marginLeft(34), vg.marginRight(8), vg.marginTop(6), vg.marginBottom(28),
+      vg.width(width), vg.height(106),
+      vg.marginLeft(34), vg.marginRight(8), vg.marginTop(16), vg.marginBottom(28),
     );
   }
 

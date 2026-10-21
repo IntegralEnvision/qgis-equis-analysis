@@ -51,6 +51,48 @@ async function start() {
   let histogram = null;
   let scatter = null;
   let linked = null;
+  // The last draw, so laying the page over the map (or back) can redraw it
+  // at the new size rather than leave a chart sized for the other place.
+  let lastDraw = null;
+
+  // OVER THE MAP (map_overlay.py). The host decides who gets the mouse, by
+  // these rectangles: over a card the page does, everywhere else the map.
+  // The page reports them whenever its layout moves; it keeps no gate of
+  // its own, because two gates on one mouse desynced in the overlay spike.
+  let overlayOn = false;
+  let cardsFrame = 0;
+  const CARDS = "#overlay-bar, #controls:not([hidden]), #views > *, "
+    + ".chooser-warn-panel:not([hidden])";
+  const sendCards = () => {
+    cardsFrame = 0;
+    if (!overlayOn) return;
+    const rects = Array.from(document.querySelectorAll(CARDS))
+      .map((node) => node.getBoundingClientRect())
+      .filter((r) => r.width > 0 && r.height > 0)
+      .map((r) => ({ x: Math.floor(r.left), y: Math.floor(r.top),
+                     w: Math.ceil(r.width), h: Math.ceil(r.height) }));
+    try {
+      bridge.cards(JSON.stringify(rects));
+    } catch (_) {
+      /* an older host without the slot: nothing to gate */
+    }
+  };
+  const cardsMoved = () => {
+    if (overlayOn && !cardsFrame) cardsFrame = requestAnimationFrame(sendCards);
+  };
+  new MutationObserver(cardsMoved).observe(document.body,
+    { childList: true, subtree: true, attributes: true, attributeFilter: ["hidden", "class"] });
+  const resized = new ResizeObserver(cardsMoved);
+  for (const id of ["controls", "views", "overlay-bar"]) {
+    const node = document.getElementById(id);
+    if (node) resized.observe(node);
+  }
+  window.addEventListener("resize", cardsMoved);
+  document.addEventListener("scroll", cardsMoved, true);
+  const back = document.querySelector("#overlay-bar button");
+  if (back) back.addEventListener("click", () => {
+    try { bridge.asked("dock"); } catch (_) { /* older host */ }
+  });
   let drawCount = 0;
   const coordinator = new Coordinator();
   const connector = qtConnector(bridge);
@@ -108,6 +150,7 @@ async function start() {
       // Retire the chart being replaced BEFORE the new one exists. See
       // Histogram.destroy for what an unretired chart did on resize. A
       // scatter shares the element, so it is retired too.
+      lastDraw = () => window.equis.histogram(options);
       if (histogram) histogram.destroy();
       if (linked) { linked.destroy(); linked = null; }
       if (scatter) { scatter.destroy(); scatter = null; }
@@ -145,6 +188,7 @@ async function start() {
         + `${(options.x || {}).chemical || "?"} x ${(options.y || {}).chemical || "?"} `
         + `pivot=${options.pivot || "?"} `
         + `locations=${(options.locations || []).length || "all"}`);
+      lastDraw = () => window.equis.scatter(options);
       if (histogram) { histogram.destroy(); histogram = null; }
       if (linked) { linked.destroy(); linked = null; }
       if (scatter) scatter.destroy();
@@ -237,6 +281,18 @@ async function start() {
       } else {
         chooser.setWorking(message);
       }
+    },
+
+    /** Laid over the map (true) or back in the panel (false). The host
+     *  has already moved the view; this re-lays the page for it. */
+    overlay(on) {
+      overlayOn = !!on;
+      document.body.classList.toggle("overlay", overlayOn);
+      report("info", `overlay ${overlayOn ? "on" : "off"}`);
+      // The redraw drops any brush; the map's highlight must go with it.
+      try { bridge.brushed(""); } catch (_) { /* nothing to clear */ }
+      if (lastDraw) lastDraw();
+      cardsMoved();
     },
 
     /** The chooser, for diagnostics and the preview harness. */

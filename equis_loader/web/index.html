@@ -101,9 +101,39 @@
   svg.boxes .box-lt { fill: #3b6ea8; font-weight: 600; }
   svg.boxes .box-lt.faint { fill: #b5bcc4; }
   svg.boxes .box-row:hover rect:first-of-type { fill: rgba(59, 110, 168, 0.07); }
+  /* OVER THE MAP (map_overlay.py). The page is transparent; only cards are
+     painted, and only cards get the mouse - the host gates it by the
+     rectangles app.js reports, so these positions ARE the hit areas.
+     Translucent, so the map reads through; chrome cut to the essentials. */
+  #overlay-bar { display: none; }
+  body.overlay { display: block; overflow: hidden; }
+  body.overlay #overlay-bar { display: flex; position: absolute; left: 8px; top: 8px;
+                              gap: 8px; align-items: center; font-size: 11px;
+                              color: #444; padding: 2px 6px; }
+  body.overlay #overlay-bar button { font: inherit; font-size: 11px; padding: 0 6px;
+                                     height: 20px; cursor: pointer; }
+  body.overlay #controls { position: absolute; left: 8px; top: 38px;
+                           width: min(430px, 46vw); padding: 4px 6px 0; }
+  body.overlay #views { position: absolute; inset: 0; overflow: visible; padding: 0; }
+  body.overlay #views > .main { position: absolute; left: 8px; bottom: 8px;
+                                width: min(430px, 46vw); max-height: calc(100vh - 200px);
+                                overflow: auto; padding: 4px 6px; box-sizing: border-box; }
+  body.overlay #views > .linked { position: absolute; right: 8px; top: 8px; margin: 0;
+                                  width: min(390px, 40vw); max-height: calc(100vh - 16px);
+                                  overflow: auto; padding: 4px 6px; box-sizing: border-box; }
+  body.overlay #views > .busy, body.overlay #views > .idle,
+  body.overlay #views > .note { position: absolute; left: 8px; bottom: 8px; }
+  body.overlay #overlay-bar, body.overlay #controls:not([hidden]), body.overlay #views > * {
+    background: rgba(255, 255, 255, 0.74); border-radius: 6px;
+    box-shadow: 0 1px 6px rgba(0, 0, 0, 0.28); }
+  body.overlay .card.main .caption ~ .caption,
+  body.overlay .bikey-note { display: none; }
+  body.overlay .box-area { max-height: 40vh; }
 </style>
 </head>
 <body>
+  <div id="overlay-bar"><button type="button" title="Put the charts back in the panel">⇲ Panel</button>
+    <span>Hold <b>Ctrl</b> to reach the map through a chart</span></div>
   <div id="controls" hidden></div>
   <div id="views"><div class="busy">Starting the chart engine…</div></div>
   <div id="status">starting…</div>

@@ -710,6 +710,17 @@ a **ternary**:
   time window are dimmed and the per-location picks are taken within it.
 - **Refusals are explicit**: an analyte reported in mixed units is left out
   and listed; a ternary whose three analytes do not share a unit is refused.
+- **Linked histograms and box plots** sit under the chart: one histogram per
+  analyte and a box plot of one analyte by location, year or all samples.
+  They read the same samples as the chart, and every brush - the chart's
+  rectangle or a histogram's interval - dims what the others leave out and
+  highlights the stations on the map. The boxes are **Kaplan-Meier**
+  quartiles, which use a non-detect only as "below its limit"; a quartile
+  below the lowest detection is drawn as unknown (hatched, open-edged) rather
+  than at a substituted value.
+- **Over the map** (a checkbox on the tab) lays the same view over the map
+  canvas as translucent cards. The cards take the mouse and the map takes it
+  everywhere else; hold **Ctrl** to reach the map through a card. Experimental.
 
 The design and the measurements behind it are in
 [docs/pivot-design.md](docs/pivot-design.md).

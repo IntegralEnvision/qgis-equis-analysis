@@ -180,7 +180,10 @@ export class Scatter {
     // side is the smaller of what the window offers, less the margins, so
     // the plotting area stays square whatever the dock's proportions.
     const side = Math.max(320, Math.min(
-      (this.element.clientWidth || 600) - 24,
+      // Less the left margin added back below, or a plot limited by a
+      // narrow dock overflows it by that much (seen 2026-10-20: the X
+      // label cut off in a 540 px panel).
+      (this.element.clientWidth || 600) - 56 - 12,
       (this.element.clientHeight || 600) - 150));
     const width = options.width || side + 56;      // + marginLeft
     const height = options.height || side + 40;    // + marginBottom

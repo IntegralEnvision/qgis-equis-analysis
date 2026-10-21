@@ -174,9 +174,29 @@ four detection symbols in a scatter and scatters always per sample.
       worker have run in QGIS's task manager (`tools/test_analysis_task.py`,
       a recorder in place of the web view); the web view, the bridge's
       `chosen` slot and the map layer have not been seen together yet.
-- [ ] See the chooser in QGIS: open the Analysis tab with the Facility A
-      parquet loaded and the matrix set to SO. It should offer 13 analytes,
-      and As x Cr should draw 112 samples and a 10-station scatter map.
+- [x] **Seen in QGIS 4.2.1** (2026-10-20, `tools/try_overlay.py`): the
+      Analysis tab offers SO's 13 analytes, As x Cr draws 112 samples, and
+      the scatter's map layer is built.
+- [x] **Linked views under the chart** (2026-10-20, asked: "richer use of
+      the histogram AND boxplots AND ternary plots AND scatter plots").
+      One table per draw, at the pivot's grain (`web/src/linked.js`): a
+      histogram per analyte and a Kaplan-Meier box plot by location, year
+      or all (`censored.js`, held to an independent KM by
+      `tools/test_censored.py`). One crossfilter; outside a brush is DIMMED,
+      never removed (decided 2026-10-20, as was censored statistics over
+      substitution). Water's box query: 53-98 ms over a chart table.
+- [x] **Over the map** (asked 2026-10-20: "it may be wrong but I would like
+      to see it"). The tab's view is moved onto the canvas as translucent
+      cards (`map_overlay.py`); Qt alone gates the mouse by the cards the
+      page reports, Ctrl passes through. `tools/try_overlay.py` checks six
+      things in a real QGIS and passed all six.
+- [ ] Use the overlay by hand on a real working session and decide whether
+      it stays. Unknowns: whether a QGIS message bar covering the top of
+      the canvas (it hides the overlay's "Panel" button) matters; card
+      placement on a small canvas; whether the wheel should zoom the map
+      over a card (today it scrolls the card).
+- [ ] A brush ON the box plot (click a group to select its samples), and
+      outliers drawn as points rather than counted.
 - [ ] A control for the histogram in the panel (step 6). After them comes the first
 increment: two variables, one matrix, the four detection classes, and a
 brush in both directions.

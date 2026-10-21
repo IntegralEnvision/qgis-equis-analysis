@@ -95,6 +95,8 @@ class LinkedViewsController(object):
         self._brush_layer_for = None
         self._by_code = {}
         self._index_for = None
+        # The view laid over the map canvas (map_overlay.py), or None.
+        self.overlay = None
 
     # ------------------------------------------------------------- lifecycle
 
@@ -436,7 +438,45 @@ class LinkedViewsController(object):
             return self.views.draw_scatter(options)
         return False
 
+    # --------------------------------------------------------------- overlay
+
+    def float_over(self, canvas, on_dock=None):
+        """Move the view onto `canvas`, as translucent cards. True if done.
+
+        `on_dock` is called when the page asks to go back to the panel; the
+        panel owns where the view lives, so it does the moving (sink()).
+        """
+        views = self.views
+        if views is None or canvas is None:
+            return False
+        if self.overlay is not None:
+            return True
+        from .map_overlay import MapOverlay
+        self.overlay = MapOverlay(views.view, canvas)
+        views.bridge.on_cards = self.overlay.set_cards
+        views.bridge.on_asked = (lambda what: on_dock()
+                                 if what == "dock" and on_dock else None)
+        self.overlay.attach()
+        views.call("overlay", True)
+        return True
+
+    def sink(self):
+        """Take the view off the map. Returns it for the panel to re-seat."""
+        views = self.views
+        if self.overlay is not None:
+            self.overlay.detach()
+            self.overlay = None
+        if views is None:
+            return None
+        views.bridge.on_cards = None
+        views.bridge.on_asked = None
+        views.call("overlay", False)
+        return views.view
+
     def close(self):
+        if self.overlay is not None:
+            self.overlay.detach()
+            self.overlay = None
         if self._task is not None:
             # Interrupts its query; the store it reads is about to close.
             self._task.cancel()
