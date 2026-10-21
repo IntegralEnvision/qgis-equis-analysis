@@ -1618,6 +1618,10 @@ class EquisDialog(QDockWidget):
                 "retrieves them.")
         self._refresh_step_hints(can, busy)
 
+        # Whatever changed what the panel can do changed what the overlay's
+        # Data panel should say.
+        self._push_overlay_status()
+
     def _auto_connect(self):
         # Never discard a session that is already loaded: this fires from a
         # timer, so it can land after the user has a report open.
@@ -2784,7 +2788,10 @@ class EquisDialog(QDockWidget):
         doc = QTextDocument()
         doc.setHtml(self.active_label.text())
         linked.views.call("dataStatus", {
-            "loaded": self._analysis is not None,
+            # The state machine's answer, not a second opinion derived here
+            # from _analysis: one authority for "are there rows" (CLAUDE.md).
+            "loaded": self._fsm.has_rows,
+            "state": self._fsm.describe(),
             "facility": name,
             "source": ("published parquet" if parquet
                        else "EQuIS, offline cache" if self._offline else "EQuIS"),
