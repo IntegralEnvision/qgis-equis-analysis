@@ -35,7 +35,8 @@ or DuckDB-WASM?
 | Chemrooms' `initEntityLayers`, through the bridge | 152 ms, 8 queries | 110 ms, 8 queries |
 | `buildSamplesLayerSql` (Arsenic, soil, total) | 182 ms | 176 ms |
 | Rows identical to the same SQL run directly in Python | 9 of 9 | 9 of 9 |
-| Opening ChemDuck on the plugin's database | 0.5 s | 0.6 s, plus 6.3 s to download `spatial` the first time |
+| Opening ChemDuck on the plugin's database | 0.5 s | 0.6 s (plus 6.3 s for a `spatial` download the spike didn't need; see finding 2) |
+| Re-run in QGIS with no `spatial` at all | — | opened in 0.38 s; setup 66 ms; 9 of 9 rows identical |
 
 **It works.** Chemrooms' code ran unchanged on a plugin page, through the
 plugin's own bridge, against the plugin's own DuckDB. The plugin's
@@ -62,13 +63,17 @@ layer query leaves out what it can't draw.
    "detect" not found`. It failed loudly here only because the columns happen
    to differ. In a schema of its own, with a cursor that defaults to it, both
    work side by side.
-2. **ChemDuck needs DuckDB's `spatial` extension** (its views build point
-   geometries), and QGIS's DuckDB doesn't have it. It is **55.5 MB** on
-   Windows. Downloading it at first use (6.3 s here) breaks the plugin's
-   no-network design; shipping it adds 55 MB per platform to the bundled
-   zips. The alternative is for ChemDuck to make geometry optional - only its
-   `geom` columns need the extension. Installing it into a deep folder also
-   failed on Windows' 260-character path limit.
+2. **The plugin does NOT need DuckDB's `spatial` extension** (corrected
+   2026-10-22; the first version of this note said it did). The spike loaded
+   it on an assumption, which cost a 6.3 s download of a 55.5 MB extension.
+   Re-run under QGIS's own DuckDB 1.5.4 with `spatial` neither installed nor
+   auto-loaded, ChemDuck's consumer opened and `aggregate_results` answered:
+   `geom` arrives as a WKB `BLOB` and is only passed through. ChemDuck needs
+   `spatial` where geometry is BUILT - its full loader and its sidecar
+   publisher - which is pipeline-side. What it would take to drop it there
+   too is in [chemduck-changes-for-qgis.md](chemduck-changes-for-qgis.md).
+   (Installing the extension into a deep folder also failed on Windows'
+   260-character path limit.)
 3. **The sidecars are a pipeline step.** Publishing them took 8.8 s and
    645 KB for Facility A. They belong in `pipeline/run_nightly.py`, beside
    the manifest, as Chemrooms already expects.
@@ -91,8 +96,9 @@ the plugin depends on it:
 
 - the seven rule decisions in [chemduck-parity.md](chemduck-parity.md) have
   to land, or the plugin inherits day-averaging;
-- the `spatial` question has to be settled (ship it, or make it optional in
-  ChemDuck);
+- ChemDuck's changes in [chemduck-changes-for-qgis.md](chemduck-changes-for-qgis.md),
+  chief among them a detection rule that reads blank flags as non-detects
+  and a missing flag column as all detected;
 - Chemrooms would export a small 2D-clean query core (aggregation separate
   from altitude) that both apps import.
 

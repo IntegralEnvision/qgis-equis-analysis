@@ -56,17 +56,11 @@ def open_chemduck(store, manifest, chemduck, work):
         parts = [os.path.join(root, p["path"]) for p in json.load(handle)["partitions"]]
     cur = store.con.cursor()
     began = time.time()
-    # ChemDuck's views build point geometries, so it needs DuckDB's spatial
-    # extension - 55.5 MB on Windows, and not installed in QGIS's own DuckDB
-    # (found 2026-10-22). SPIKE_EXT_DIR keeps the spike's copy out of the
-    # user's ~/.duckdb.
-    if os.environ.get("SPIKE_EXT_DIR"):
-        cur.execute("SET extension_directory = '%s'"
-                    % os.environ["SPIKE_EXT_DIR"].replace("\\", "/"))
-    began_ext = time.time()
-    cur.execute("INSTALL spatial")
-    cur.execute("LOAD spatial")
-    timings["spatial_s"] = round(time.time() - began_ext, 1)
+    # NO spatial extension. The first run loaded it on an assumption (a 6.3 s,
+    # 55.5 MB download); re-run under QGIS's DuckDB 1.5.4 with it neither
+    # installed nor auto-loaded, the consumer opened and answered - `geom`
+    # is a WKB BLOB, only passed through (2026-10-22). Building geometry is
+    # the publisher's business, not the plugin's.
     cur.execute("CREATE SCHEMA IF NOT EXISTS chemduck")
     cur.execute("USE chemduck")
     hy.open_consumer(cur, pub, parts)
