@@ -19,6 +19,7 @@ python tools/test_bivariate.py         # Jenks breaks, classes and colours for t
 python tools/test_analysis.py          # the Analysis tab's chooser: catalogue, pairs, choices
 python tools/test_ternary.py           # ternary shares/colours, one-unit rule, page SQL held to ternary.py
 python tools/test_censored.py          # box plots' Kaplan-Meier quartiles vs an independent KM (node, duckdb)
+python tools/measure_chemduck_parity.py --manifest <dir>/manifest.json --out <dir>   # vs ChemDuck, by cause
 python tools/analysis_preview.py       # the Analysis tab in a browser, no QGIS (--shots DIR: screenshots)
 
 # The parquet export pipeline: plain Python + pyarrow, imports no plugin code
@@ -242,6 +243,7 @@ the exporter follows.
 |---|---|
 | [docs/implementation-plan.md](docs/implementation-plan.md) | **What to do next**, in order, with acceptance criteria |
 | [docs/overlay-shell.md](docs/overlay-shell.md) | Branch `overlay-shell`: the plugin as panels on the map - plan, rules, status |
+| [docs/chemduck-parity.md](docs/chemduck-parity.md) | This plugin vs ChemDuck/Chemrooms on one facility: where they differ, why, and the rules to agree |
 | [docs/phase3-next-steps.md](docs/phase3-next-steps.md) | The linked views' current sequence: what has been seen working, and what is next |
 | [docs/pivot-design.md](docs/pivot-design.md) | One row per sample for multivariate views: the rules every cell needs, measured |
 | [docs/vision-linked-views.md](docs/vision-linked-views.md) | The user stories (US-1…US-24) and recommendations (R1…R10) |
