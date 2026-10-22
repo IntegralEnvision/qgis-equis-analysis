@@ -244,6 +244,7 @@ the exporter follows.
 | [docs/implementation-plan.md](docs/implementation-plan.md) | **What to do next**, in order, with acceptance criteria |
 | [docs/overlay-shell.md](docs/overlay-shell.md) | Branch `overlay-shell`: the plugin as panels on the map - plan, rules, status |
 | [docs/chemduck-parity.md](docs/chemduck-parity.md) | This plugin vs ChemDuck/Chemrooms on one facility: where they differ, why, and the rules to agree |
+| [docs/chemduck-spike.md](docs/chemduck-spike.md) | Chemrooms' data code on a plugin page through the bridge, no SQLRooms UI: works, and what it needs |
 | [docs/phase3-next-steps.md](docs/phase3-next-steps.md) | The linked views' current sequence: what has been seen working, and what is next |
 | [docs/pivot-design.md](docs/pivot-design.md) | One row per sample for multivariate views: the rules every cell needs, measured |
 | [docs/vision-linked-views.md](docs/vision-linked-views.md) | The user stories (US-1…US-24) and recommendations (R1…R10) |
