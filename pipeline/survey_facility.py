@@ -43,9 +43,12 @@ sys.path.insert(0, HERE)
 from nightly_slices import Api, read_env  # noqa: E402
 from slice_store import cell_key  # noqa: E402
 
-# Fraction codes counted on DT_TEST. N is "not applicable" (most solids),
-# T total and D dissolved. A code outside these is reported by --all-fractions.
-FRACTIONS = ("N", "T", "D")
+# Fraction codes are READ from RT_FRACTION and each is counted on DT_TEST.
+# They used to be a fixed ("N", "T", "D"), with a comment promising an
+# --all-fractions option that did not exist: the first facility's 3,647 PRT
+# (particulate) tests, about 55,000 results, were in no cell and nothing
+# said so (2026-10-23). The counts are reconciled against all tests, so a
+# code missing from RT_FRACTION, or a test with none, is reported too.
 
 
 def fail(message):
@@ -119,17 +122,26 @@ def main():
 
     print("reading samples ...")
     by_matrix = samples(api, args.facility)
+    status, body = api.json("/api/odata/RT_FRACTION?$orderby=FRACTION")
+    if status != 200 or not isinstance(body, dict):
+        fail("Could not read RT_FRACTION (HTTP %s), so the fractions cannot "
+             "be listed." % status)
+    codes = sorted({(row.get("FRACTION") or "").strip()
+                    for row in body.get("value") or []} - {""})
     fractions = {}
     uncounted = []
-    for code in FRACTIONS:
+    for code in codes:
         count = odata_count(api, "DT_TEST", "FACILITY_ID eq %d and FRACTION eq "
-                            "'%s'" % (args.facility, code))
+                            "'%s'" % (args.facility, code.replace("'", "''")))
         if count is None:
             # A failed count is NOT zero: treating it as absent would drop a
             # fraction from every plan without a word.
             uncounted.append(code)
         elif count:
             fractions[code] = count
+    tests = odata_count(api, "DT_TEST", "FACILITY_ID eq %d" % args.facility)
+    no_fraction = odata_count(api, "DT_TEST", "FACILITY_ID eq %d and FRACTION "
+                              "eq null" % args.facility)
 
     print("\n%-8s %9s %9s  %-23s %s" % ("MATRIX", "SAMPLES", "LOCATIONS",
                                        "SAMPLED", "SAMPLE TYPES"))
@@ -148,6 +160,21 @@ def main():
     if uncounted:
         print("WARNING: could not count fraction(s) %s - re-run before "
               "trusting the cell list." % ", ".join(uncounted))
+    if no_fraction:
+        print("WARNING: %s test(s) have no fraction. No cell can reach them; "
+              "they will be in no slice." % "{:,}".format(no_fraction))
+    accounted = sum(fractions.values()) + (no_fraction or 0)
+    if tests is None or no_fraction is None:
+        print("WARNING: could not count all tests, so the fractions above "
+              "are not reconciled - re-run before trusting the cell list.")
+        uncounted.append("(reconciliation)")
+    elif accounted != tests and not uncounted:
+        print("WARNING: the fractions account for %s of %s tests. The rest "
+              "carry a code RT_FRACTION does not list, and will be in no "
+              "cell." % ("{:,}".format(accounted), "{:,}".format(tests)))
+        uncounted.append("(unlisted codes)")
+    else:
+        print("all %s tests are in a listed fraction" % "{:,}".format(tests))
     if "" in by_matrix:
         print("WARNING: %d sample(s) have no matrix code. No cell can reach "
               "them; they will be in no slice." % by_matrix[""]["samples"])
@@ -163,6 +190,7 @@ def main():
     if args.json:
         with open(args.json, "w", encoding="utf-8") as handle:
             json.dump({"facility_id": args.facility, "results": results,
+                       "tests": tests, "tests_without_fraction": no_fraction,
                        "fractions": fractions, "uncounted": uncounted,
                        "matrices": {m: {"samples": e["samples"],
                                         "locations": len(e["locations"]),

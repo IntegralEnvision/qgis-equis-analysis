@@ -76,13 +76,18 @@ def write_published(root):
                                    "matrix": "WS", "fraction": "D"}]}, handle)
 
 
-def mark_run(status, rows):
+def mark_run(status, rows, rebuilt=True):
+    """Stands in for a check that collected; `rebuilt` dates the partition
+    as nightly_slices.repack does when a cell was complete."""
     def effect(root):
         path = os.path.join(root, MANIFEST_NAME)
         with open(path) as handle:
             data = json.load(handle)
         for entry in data["slices"].values():
             entry.update(last_run=utc_now(), last_status=status, last_rows=rows)
+        if rebuilt and status == "ok":
+            data.setdefault("partitions", {})["WS/D"] = {"as_of": utc_now(),
+                                                         "rows": rows}
         with open(path, "w") as handle:
             json.dump(data, handle)
     return effect
@@ -150,6 +155,35 @@ def test_order():
           steps)
 
 
+def test_nothing_rebuilt():
+    root = make_root(BASE_CONFIG)
+    fake = Fake(root, lines={"nightly_slices.py": ["no new data", "",
+                                                   "   WS/D     unchanged"]})
+    steps, notes, code = night(root, fake)
+    check("idle: a check that rebuilt nothing publishes and uploads nothing",
+          fake.scripts() == ["nightly_slices.py"], fake.scripts())
+    check("idle: and exits 0 - nothing to do is not a fault",
+          code == 0, (code, notes))
+    check("idle: publish says skipped, not failed or not run",
+          steps["publish"] == rn.SKIPPED, steps)
+
+    fake = Fake(root, lines={"nightly_slices.py": [
+        "   WS/D     waiting   1 slice(s) not yet run; OVERDUE (armed over "
+        "6 h ago): S_WS_D_00"]})
+    steps, notes, code = night(root, fake)
+    check("idle: an overdue slice is reported and exits 1",
+          code == 1 and any("OVERDUE" in n for n in notes), (code, notes))
+
+    fake = Fake(root)
+    night(root, fake, trigger=True)
+    check("trigger: --trigger reaches the check",
+          "--trigger" in fake.calls[0][1], fake.calls)
+    fake = Fake(root)
+    night(root, fake)
+    check("trigger: and is not passed otherwise",
+          "--trigger" not in fake.calls[0][1], fake.calls)
+
+
 def test_nightly_failure_stops():
     root = make_root(BASE_CONFIG)
     fake = Fake(root, codes={"nightly_slices.py": 2})
@@ -169,8 +203,10 @@ def test_empty_slice_degrades():
                     "   WS/D  KEPT as of 2026-10-16 - 1 slice(s) produced "
                     "nothing tonight: S_WS_D_00"]})
     steps, notes, code = night(root, fake)
-    check("degraded: a slice that stored nothing exits 1, and still publishes",
-          code == 1 and "publish_manifest.py" in fake.scripts(), (code, notes))
+    check("degraded: a slice that stored nothing exits 1; its cell was held, "
+          "so there is nothing new to publish",
+          code == 1 and "publish_manifest.py" not in fake.scripts(),
+          (code, notes))
     check("degraded: the slice is named, with its status",
           any("S_WS_D_00" in n and "no output" in n for n in notes), notes)
     check("degraded: the KEPT cell is reported",
@@ -302,6 +338,44 @@ def test_upload():
         del os.environ["TEST_SAS"]
 
 
+def test_sas_url():
+    os.environ["TEST_SAS_URL"] = ("https://acct.blob.core.windows.net/box"
+                                  "?sv=1&sp=racwdl&sig=SECRET")
+    try:
+        config = {"upload": {"sas_url_env": "TEST_SAS_URL", "prefix": "f1/"}}
+        base, sas = rn.upload_target(config)
+        check("sas url: container and token come from the one variable",
+              base == "https://acct.blob.core.windows.net/box/f1"
+              and sas == "sv=1&sp=racwdl&sig=SECRET", (base, sas))
+        check("sas url: the blob path goes before the token",
+              rn.blob_url(base, "matrix=WS/fraction=D/part-0000.parquet", sas)
+              .startswith("https://acct.blob.core.windows.net/box/f1/matrix%3DWS"))
+        base, _ = rn.upload_target({"upload": {"sas_url_env": "TEST_SAS_URL"}})
+        check("sas url: no prefix is the container root",
+              base == "https://acct.blob.core.windows.net/box", base)
+        root = make_root(dict(BASE_CONFIG, upload={
+            "sas_url_env": "TEST_SAS_URL", "prefix": "x?sig=LEAK"}))
+        try:
+            rn.load_config(root)
+            refused = ""
+        except rn.Refused as exc:
+            refused = str(exc)
+        check("sas url: a token in the tracked config is refused",
+              "token" in refused and "LEAK" not in refused, refused[:60])
+    finally:
+        del os.environ["TEST_SAS_URL"]
+    env = os.path.join(make_root(BASE_CONFIG), ".env")
+    with open(env, "w") as handle:
+        handle.write("equis_site=https://t.equisonline.com\n"
+                     "parquet_cache_rw: https://a.blob.core.windows.net/c?sv=1\n")
+    values = rn.read_env_file(env)
+    check(".env: `name=https://...` splits at the =, not the colon in https:",
+          values.get("equis_site") == "https://t.equisonline.com", values)
+    check(".env: `name: https://...?a=b` splits at the colon",
+          values.get("parquet_cache_rw")
+          == "https://a.blob.core.windows.net/c?sv=1", values)
+
+
 # ----------------------------------------------------------------- lock
 def test_lock():
     root = make_root(BASE_CONFIG)
@@ -329,11 +403,13 @@ if __name__ == "__main__":
     try:
         test_config()
         test_order()
+        test_nothing_rebuilt()
         test_nightly_failure_stops()
         test_empty_slice_degrades()
         test_pending()
         test_publish_failure_stops_upload()
         test_upload()
+        test_sas_url()
         test_lock()
     finally:
         for name in os.listdir(tempfile.gettempdir()):

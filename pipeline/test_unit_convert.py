@@ -173,6 +173,41 @@ check("describe names what moved",
       describe({("mg/L", "ug/L"): 18397}) == "mg/L->ug/L x18,397",
       describe({("mg/L", "ug/L"): 18397}))
 
+# --- the wrong basis: dropped, not converted ---------------------------------
+from unit_convert import basis, dropped_counts, split_mismatched  # noqa: E402
+
+check("basis: per volume and per mass are told apart",
+      [basis(u) for u in ("ug/L", "MG/L", "ng/mL", "mg/kg", "ug/Kg",
+                          "mg/kg dw")]
+      == ["volume", "volume", "volume", "mass", "mass", "mass"])
+check("basis: units with no mass basis have none, so never drop",
+      [basis(u) for u in ("SU", "%", "percent", "mV", "pCi/L", "NTU",
+                          "ppm", "", None, "mg/kg/day")] == [None] * 10)
+
+# The first facility, 2026-10-23: dissolved Mercury non-detects at "4 ug/kg"
+# among surface-water metals in ug/L, the limit's unit one column over.
+hg = pa.table({
+    "CHEMICAL_NAME": ["Arsenic", "Mercury", "Mercury", "pH", "Lead"],
+    "RESULT_UNIT": ["ug/L", "", "", "SU", "mg/L"],
+    "REPORT_RESULT_UNIT": ["ug/L", "ug/kg", "ug/L", "SU", "mg/L"],
+    "RESULT_NUMERIC": pa.array([1.0, None, None, 7.1, 0.002], pa.float64())})
+kept, dropped = split_mismatched(hg, "ug/L")
+check("drop: a per-mass non-detect in a per-volume cell is taken out",
+      dropped is not None and dropped.num_rows == 1
+      and dropped.column("CHEMICAL_NAME").to_pylist() == ["Mercury"])
+check("drop: water units, pH, and a convertible mg/L all stay",
+      kept.column("CHEMICAL_NAME").to_pylist()
+      == ["Arsenic", "Mercury", "pH", "Lead"])
+check("drop: counted by chemical and unit, for the warning",
+      dropped_counts(dropped) == {"Mercury ug/kg": 1},
+      str(dropped_counts(dropped)))
+kept, dropped = split_mismatched(hg, "mg/kg")
+check("drop: the reverse - per-volume rows in a per-mass cell",
+      dropped is not None and dropped.num_rows == 3, str(dropped and dropped.num_rows))
+check("drop: a target with no basis drops nothing",
+      split_mismatched(hg, "SU")[1] is None
+      and split_mismatched(hg, None)[1] is None)
+
 print()
 if FAILURES:
     print("FAILED: %s" % ", ".join(FAILURES))

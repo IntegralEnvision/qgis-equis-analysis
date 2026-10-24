@@ -25,9 +25,9 @@ python tools/analysis_preview.py       # the Analysis tab in a browser, no QGIS 
 python pipeline/test_slice_pipeline.py  # pipeline bookkeeping (pyarrow)
 python pipeline/test_unit_convert.py    # collect-time unit conversion
 python pipeline/test_arcgis_export.py   # GeoParquet for ArcGIS Pro: files, CRS, refusals
-python pipeline/test_run_nightly.py     # the unattended night: order, stops, upload
+python pipeline/test_run_nightly.py     # the unattended check: order, stops, upload
 python tools/test_arcgis_parity.py      # that export's non-detect columns vs ReportStore (duckdb)
-python pipeline/run_nightly.py --root data/<facility>   # one facility's whole night
+python pipeline/run_nightly.py --root data/<facility>   # one facility's check: arm on new data, rebuild what ran
 
 python tools/vendor_deps.py --target win --python 312   # build a dep bundle
 python tools/package.py                                 # plain plugin zip

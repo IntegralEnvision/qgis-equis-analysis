@@ -43,7 +43,9 @@ The sample proxy is **biased, not noisy**: results-per-sample runs 1.8 to
 18.0 and the heaviest locations have the lowest ratios, so balancing on
 samples spreads 1.05x at 4 bins but 2.60x at 32.
 
-So: **first plan on samples, then re-bin every night on measured rows.**
+So: **first plan on samples, then re-bin on measured rows** - by hand
+since 2026-10-23, after a load large enough to move the bins, rather than
+every night.
 The exact walk (`nightly_slices.py --weight walk`) attributes every result
 to its cell in one pass; use it only to seed a facility that must be right
 before its first extraction, and make its filters mirror the slices'
@@ -72,15 +74,18 @@ carrying hundreds of codes; rows are the bound that matters.
 
 ## Re-binning
 
-`nightly_slices.py --rewrite`, per cell:
+`nightly_slices.py --rewrite`, run by hand, per cell. Each slice whose list
+changed is **armed**, and its cell is not rebuilt until every armed slice
+has run: a cell built from all old lists or all new ones covers each
+location once, but one built half from each can double or drop a location.
 
 - **Skipped** when the cell has no measured weights yet - re-binning on
   all-zero weights would collapse it into one or two slices that then time
   out.
 - **Left alone** when the slice count is unchanged, nothing failed, balance
   is under 1.25x and nothing is over target. LPT reshuffles equal-weight
-  locations, so re-binning "because the bins differ" would rewrite every
-  report every night on a shared tenant.
+  locations, so re-binning "because the bins differ" would rewrite (and
+  re-run) every report on a shared tenant.
 - **Split** when a slice stored nothing. A failure has no rows to re-weight
   from, and weighting it at zero keeps it broken; more, smaller slices is
   the only lever that reliably helps.

@@ -9,7 +9,11 @@ data/<name>/
   matrix=WS/fraction=D/part-0000.parquet                  uploaded
   matrix=WS/fraction=N/part-0000.parquet
   ...
+  pipeline.json                what run_nightly.py needs  written by create_slice_reports.py; add upload by hand
   _staging/                    per-slice files mid-run    deleted by repack
+  _dropped/matrix=*/fraction=*/<slice>.csv
+                               rows left out for a unit   replaced every collect, never uploaded
+                               on the wrong basis
   arcgis/                      GeoParquet for ArcGIS Pro  derived, uploaded if wanted
 ```
 
@@ -45,14 +49,27 @@ Illustrative values:
    "locations": ["..."], "report_id": 7000001, "event_id": 8000001,
    "history": [{"when": "...", "rows": 91234, "seconds": 61.0, "status": "ok"}],
    "last_rows": 91234, "converted": {"mg/L->ug/L": 18397},
+   "dropped": {"Mercury ug/kg": 100},
+   "armed_at": "2026-10-23T15:00:00Z", "collected_run": "2026-10-23T15:09:12.4",
    "needs_report": true
   }
  },
+ "load_signal": {"DT_RESULT": 5432701, "DT_TEST": 5432701, "DT_SAMPLE": 5432701, "DT_LOCATION": 5432701},
+ "load_signal_at": "2026-10-23T15:00:00Z",
  "location_rows_by_cell": {"WS/D": {"MW-1": 4120}},
- "partitions": {"WS/D": {"as_of": "2026-10-05T03:41:00Z", "rows": 355440}},
+ "partitions": {"WS/D": {"as_of": "2026-10-05T03:41:00Z", "rows": 355440,
+                         "dropped": {"Mercury ug/kg": 130}}},
  "runs": [{"when": "...", "finished": "...", "rows": 1000000}]
 }
 ```
+
+- `armed_at` is when the pipeline last asked the slice's agent to run;
+  `collected_run` is the agent run whose output was last collected. A slice
+  whose agent has not run since `armed_at` holds its cell (`waiting`).
+- `load_signal` is the newest EBATCH per table at the last check; when it
+  moves, every slice is armed.
+- `dropped` (per slice, and summed per partition when it is rebuilt) counts
+  rows left out for a unit on the wrong basis, by chemical and unit.
 
 - `prefix` is fixed when a facility is first sliced; names live on in the
   tenant. A hand-made manifest without it falls back to `parquet`.
@@ -67,9 +84,13 @@ Illustrative values:
 {"cells": {
   "WS/D":    {"unit": "ug/L",  "source": "proposed 2026-10-05 from a 41,210-row probe: 71% of rows; edit to change"},
   "SE/D":    {"unit": "mg/L",  "source": "a leachate"},
-  "SE/N":    "mg/kg"
+  "SE/N":    "mg/kg",
+  "WS/PRT":  {"unit": null, "source": "both bases are legitimate here"}
 }}
 ```
+
+`"unit": null` means deliberately none: nothing converted, nothing dropped,
+and no later proposal fills it in.
 
 Proposed by the calibration probe as the cell's dominant concentration unit
 (pH, percent and other dimensionless units are never proposed), never
@@ -85,10 +106,14 @@ factor table allows). A cell with no entry is not converted.
  "generated": "2026-10-05T04:02:11Z", "rows": 1000000,
  "partitions": [
   {"matrix": "WS", "fraction": "D", "path": "matrix=WS/fraction=D/part-0000.parquet",
-   "rows": 355440, "bytes": 41234567, "unit": "ug/L", "as_of": "2026-10-05T03:41:00Z"}
+   "rows": 355440, "bytes": 41234567, "unit": "ug/L", "as_of": "2026-10-05T03:41:00Z",
+   "dropped_rows": 130, "dropped": {"Mercury ug/kg": 130}}
  ]
 }
 ```
+
+`dropped_rows` and `dropped` appear only on a partition that left rows out
+for a unit on the other basis from its `unit` (README, "Rows dropped").
 
 Built from the files on disk, not from the pipeline's intentions, so a
 partition that was never written is never advertised. Row counts come from

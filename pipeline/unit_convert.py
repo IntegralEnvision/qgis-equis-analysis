@@ -33,6 +33,18 @@ so the collect can say what it changed rather than changing it silently.
 The ORIGINAL unit and value are kept in RESULT_UNIT_ORIGINAL and
 RESULT_VALUE_ORIGINAL: a converted number that cannot be traced back to
 what the lab reported is not an audit trail, and someone will ask.
+
+WHAT IT DROPS, AND SAYS SO. A row whose unit is a concentration on the
+OTHER basis from its cell's target - per mass (mg/kg) in a cell converted
+per volume (ug/L), or the reverse - is not a measurement of that cell's
+medium, it is a load error. The first facility's surface water carried 260
+dissolved and total Mercury non-detects at "4 ug/kg" (2026-10-23): the
+particulate unit applied to every fraction when two EDDs were prepared.
+Kept, they sit in a water layer as a number no factor can convert and no
+reader can compare. split_mismatched() takes them out; the collect prints
+them, counts them per partition and writes them to <root>/_dropped/ so the
+source can be corrected. Units with no mass basis - SU, %, mV, pCi/L, NTU,
+ppm - are never dropped: they belong on both sides (CLAUDE.md).
 """
 
 import json
@@ -59,6 +71,80 @@ VALUE_COLUMNS = ("RESULT_NUMERIC", "REPORT_RESULT_VALUE",
                  "METHOD_DETECTION_LIMIT", "REPORTING_DETECTION_LIMIT",
                  "REPORT_QUANTITATION_LIMIT")
 UNIT_COLUMNS = ("RESULT_UNIT", "REPORT_RESULT_UNIT", "DETECTION_LIMIT_UNIT")
+
+
+# What a concentration can be per. Read only to tell per-mass from
+# per-volume; a unit outside these has no basis and is never dropped.
+MASS_UNITS = {"pg", "ng", "ug", "µg", "mg", "g", "kg"}
+VOLUME_UNITS = {"l", "ml", "ul", "µl", "dl", "m3"}
+
+
+def basis(unit):
+    """'volume' for mass per volume (ug/L), 'mass' for mass per mass (mg/kg).
+
+    None for anything else - SU, %, mV, pCi/L, NTU, ppm, mg/kg-hr - which
+    is the answer that drops nothing. A trailing qualifier on the
+    denominator ("mg/kg dw") is read past.
+    """
+    text = (unit or "").strip().lower()
+    if text.count("/") != 1:
+        return None
+    top, bottom = [part.strip() for part in text.split("/")]
+    bottom = bottom.split()[0] if bottom else ""
+    if top not in MASS_UNITS:
+        return None
+    if bottom in VOLUME_UNITS:
+        return "volume"
+    if bottom in MASS_UNITS:
+        return "mass"
+    return None
+
+
+def row_units(table):
+    """Each row's unit: the first non-empty of UNIT_COLUMNS, else ""."""
+    present = [c for c in UNIT_COLUMNS if c in table.column_names]
+    columns = [table.column(c).to_pylist() for c in present]
+    units = []
+    for index in range(table.num_rows):
+        value = ""
+        for column in columns:
+            candidate = (column[index] or "").strip()
+            if candidate:
+                value = candidate
+                break
+        units.append(value)
+    return units
+
+
+def split_mismatched(table, target):
+    """(kept, dropped) - dropped holds rows on the other basis from `target`.
+
+    `dropped` is None when nothing was, which is the usual answer. A target
+    with no basis (a cell converted to SU, or none named) drops nothing.
+    """
+    import pyarrow as pa
+    import pyarrow.compute as pc
+
+    want = basis(target)
+    if want is None or not any(c in table.column_names for c in UNIT_COLUMNS):
+        return table, None
+    wrong = [basis(unit) not in (None, want) for unit in row_units(table)]
+    if not any(wrong):
+        return table, None
+    mask = pa.array(wrong, type=pa.bool_())
+    return table.filter(pc.invert(mask)), table.filter(mask)
+
+
+def dropped_counts(table):
+    """{"<chemical> <unit>": rows} over dropped rows, for the warning."""
+    names = (table.column("CHEMICAL_NAME").to_pylist()
+             if "CHEMICAL_NAME" in table.column_names
+             else [""] * table.num_rows)
+    counts = {}
+    for name, unit in zip(names, row_units(table)):
+        key = ("%s %s" % (name or "?", unit)).strip()
+        counts[key] = counts.get(key, 0) + 1
+    return counts
 
 
 def target_for(matrix, fraction, units):
@@ -164,16 +250,7 @@ def convert_table(table, target, factors, keep_original=True):
     # skipped and the facility came out MORE mixed than before: 237 mixed
     # (chemical, matrix) pairs became 292. Caught by checking the result
     # rather than trusting the "ok" the converter printed.
-    columns = [table.column(c).to_pylist() for c in present]
-    units = []
-    for index in range(table.num_rows):
-        value = ""
-        for column in columns:
-            candidate = (column[index] or "").strip()
-            if candidate:
-                value = candidate
-                break
-        units.append(value)
+    units = row_units(table)
     # Which rows move, and by how much. Built once as a plain list because
     # the factor depends on the row's own unit; pyarrow has no elementwise
     # dictionary lookup, and the alternative is one mask per unit, which is

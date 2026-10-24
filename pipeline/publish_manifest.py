@@ -90,6 +90,13 @@ def build(root, facility, partition_file="part-0000.parquet"):
         unit = units.get(cell_key(entry["matrix"], entry["fraction"]))
         if unit:
             entry["unit"] = unit
+        # Rows the pipeline left out for a unit on the other basis from
+        # `unit` (mg/kg in a ug/L cell), by "<chemical> <unit>". Published
+        # so a reader can see the partition is short, and of what.
+        dropped = local.partition_dropped(entry["matrix"], entry["fraction"])
+        if dropped:
+            entry["dropped"] = dropped
+            entry["dropped_rows"] = sum(dropped.values())
     published = {"version": 1, "facility": facility, "rows": total,
                  "generated": utc_now(), "partitions": partitions}
     if local.data.get("facility_id") is not None:

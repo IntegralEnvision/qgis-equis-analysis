@@ -1,7 +1,14 @@
-r"""One facility's whole night, unattended: collect, provision, publish, upload.
+r"""One facility's check, unattended: arm, collect, provision, publish, upload.
 
     python pipeline/run_nightly.py --root data/<facility>
     python pipeline/run_nightly.py --root data/<facility> --no-upload
+    python pipeline/run_nightly.py --root data/<facility> --trigger
+
+Schedule it as often as you like - hourly is reasonable. When the facility
+has no new data it costs the tenant five small reads and publishes nothing;
+EQuIS runs a slice only after this has armed it (see nightly_slices.py).
+--trigger arms every slice regardless, for changes the load signal cannot
+see: edits made in the EQuIS UI, or an older load rolled back.
 
 Run it from the directory whose `.env` holds the tenant's credentials, as
 for every other script here. It reads `<root>/pipeline.json`:
@@ -12,21 +19,29 @@ for every other script here. It reads `<root>/pipeline.json`:
       "template": null,
       "provision_pending": true,
       "arcgis": false,
-      "upload": {"base": "https://<account>.blob.core.windows.net/<container>/<name>",
-                 "sas_env": "PARQUET_SAS"}
+      "upload": {"sas_url_env": "parquet_cache_rw", "prefix": ""}
     }
 
-`sample_types` is REQUIRED, even as null (every type). New slices are
-created with it, and the manifest does not record what the first ones were
-created with: a guess here would quietly put QC samples into some slices of
-a cell and not others. `upload` is optional, and never holds the SAS token
+`upload.sas_url_env` names a variable (or `.env` key) holding a container
+SAS URL with write rights; `prefix` is an optional folder in it. The older
+{"base": <https URL>, "sas_env": <variable holding only the token>} still
+works; see upload_target().
+
+create_slice_reports.py writes `facility`, `sample_types` and `template`
+when it creates the first cell, and refuses a later cell made with other
+values; the other keys are a person's to add. `sample_types` is REQUIRED,
+even as null (every type): new slices are created with it, and a wrong one
+would quietly put QC samples into some slices of a cell and not others. `upload` is optional, and never holds the SAS token
 itself - pipeline.json is tracked; the token is read from the environment
 variable `sas_env` names, or from that key (lower-cased) in the `.env`.
 
 THE STEPS, AND WHAT A FAILURE STOPS
 -----------------------------------
-  1. nightly_slices.py             collect, re-bin, repack. A failure stops
-                                   the night: the manifest may be mid-change.
+  1. nightly_slices.py             arm on new data; collect and repack the
+                                   cells whose slices have all run. A failure
+                                   stops the run: the manifest may be
+                                   mid-change. If no cell was rebuilt, steps
+                                   3-5 are skipped.
   2. create_slice_reports.py --pending
                                    reports for slices step 1 added. Without
                                    this their cells stay KEPT (yesterday's)
@@ -39,14 +54,15 @@ THE STEPS, AND WHAT A FAILURE STOPS
                                    follows a manifest to a file not yet
                                    there. Unchanged files are skipped by MD5.
 
-EXIT CODE: 0 everything ran and every slice produced output; 1 the night
-completed but something needs a look (a slice stored nothing, a cell was
-KEPT, a non-stopping step failed); 2 a stopping step failed or the run was
-refused. Each step's outcome is reported separately - a step that did not
-run is "not run", never "failed".
+EXIT CODE: 0 everything ran and every slice produced output, or there was
+nothing to do; 1 the run completed but something needs a look (a slice
+stored nothing or stored an error, a cell was KEPT, a slice is overdue or
+could not be armed, a non-stopping step failed); 2 a stopping step failed or
+the run was refused. Each step's outcome is reported separately - a step
+that did not run is "not run", never "failed".
 
-Output is mirrored to <root>/_logs/nightly-<UTC time>.log (the last 30 are
-kept), and a lock file stops two nights overlapping.
+Output is mirrored to <root>/_logs/nightly-<UTC time>.log (30 days are
+kept), and a lock file stops two runs overlapping.
 """
 
 import argparse
@@ -65,15 +81,19 @@ import urllib.request
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 
-from slice_store import MANIFEST_NAME, Manifest, find_env_file, utc_now  # noqa: E402
+from slice_store import (  # noqa: E402
+    CONFIG_NAME, MANIFEST_NAME, Manifest, find_env_file, read_env_file,
+    utc_now,
+)
 
-CONFIG_NAME = "pipeline.json"
 LOCK_NAME = "_nightly.lock"
 LOG_DIR = "_logs"
-KEEP_LOGS = 30
-# A lock older than this is a crashed run, not a running one: a night takes
-# minutes to a couple of hours, and the next is due in 24.
-STALE_LOCK_HOURS = 20
+# By age, not count: a check can be scheduled hourly, and thirty logs would
+# then be barely a day.
+KEEP_LOG_DAYS = 30
+# A lock older than this is a crashed run, not a running one: a full rebuild
+# takes minutes to a couple of hours, and checks may be due every hour.
+STALE_LOCK_HOURS = 6
 # Put Blob takes one request up to 5000 MiB; well past any partition so far
 # (41 MiB was the largest on the first facility).
 MAX_SINGLE_PUT = 4 * 1024 ** 3
@@ -91,8 +111,9 @@ class Refused(Exception):
 def load_config(root):
     path = os.path.join(root, CONFIG_NAME)
     if not os.path.isfile(path):
-        raise Refused("No %s in %s. It names the facility and how its slices "
-                      "were made; see this script's docstring." % (CONFIG_NAME, root))
+        raise Refused("No %s in %s. create_slice_reports.py writes it when it "
+                      "creates the facility's first cell; see this script's "
+                      "docstring." % (CONFIG_NAME, root))
     with open(path, encoding="utf-8") as handle:
         config = json.load(handle)
     if not isinstance(config.get("facility"), int):
@@ -104,10 +125,16 @@ def load_config(root):
             "made with it, and a guess would mix QC into some of a cell's "
             "slices and not others." % CONFIG_NAME)
     upload = config.get("upload")
-    if upload:
+    if upload and upload.get("sas_url_env"):
+        if "?" in (upload.get("prefix") or "") or "sig=" in json.dumps(upload):
+            raise Refused("upload carries a SAS token. It does not belong in "
+                          "%s, which is tracked; it stays in the variable "
+                          "upload.sas_url_env names." % CONFIG_NAME)
+    elif upload:
         base = upload.get("base") or ""
         if not base.startswith("https://"):
-            raise Refused("upload.base must be an https:// URL.")
+            raise Refused("upload needs \"sas_url_env\" (the variable holding "
+                          "a container SAS URL), or an https:// \"base\".")
         if "?" in base or "sig=" in base:
             raise Refused("upload.base carries a query string. The SAS token "
                           "does not belong in %s, which is tracked; put it in "
@@ -130,18 +157,39 @@ def read_secret(name):
     path = find_env_file()
     if not path:
         return None
-    with open(path, encoding="utf-8") as handle:
-        for line in handle:
-            line = line.strip()
-            if not line or line.startswith("#"):
-                continue
-            for sep in (":", "="):
-                if sep in line:
-                    key, value = line.split(sep, 1)
-                    if key.strip().lower() == name.lower():
-                        return value.strip().strip("'\"")
-                    break
-    return None
+    return read_env_file(path).get(name.lower()) or None
+
+
+def upload_target(config):
+    """(base, sas) for the upload, or raise Refused. Never echoes the token.
+
+    Two forms. `sas_url_env` names a variable holding a whole container SAS
+    URL - `https://<account>.blob.core.windows.net/<container>?sv=...`, the
+    form Azure hands out and the one the read-only `parquet_cache` already
+    uses - and an optional `prefix` puts the facility in a folder of it.
+    `base` + `sas_env` is the older split form: the URL in the config, the
+    token alone in the variable. Either way the token stays out of
+    pipeline.json, which is tracked.
+    """
+    upload = config["upload"]
+    if upload.get("sas_url_env"):
+        url = read_secret(upload["sas_url_env"])
+        if not url:
+            raise Refused("no SAS URL in %s (environment or .env)."
+                          % upload["sas_url_env"])
+        parts = urllib.parse.urlsplit(url)
+        if parts.scheme != "https" or not parts.query:
+            raise Refused("%s is not an https SAS URL with a token."
+                          % upload["sas_url_env"])
+        base = "%s://%s%s" % (parts.scheme, parts.netloc,
+                              parts.path.rstrip("/"))
+        prefix = (upload.get("prefix") or "").strip("/")
+        return (base + "/" + prefix if prefix else base), parts.query
+    sas = read_secret(upload["sas_env"])
+    if not sas:
+        raise Refused("no SAS token in %s (environment or .env)."
+                      % upload["sas_env"])
+    return upload["base"], sas
 
 
 # ------------------------------------------------------------- lock, log
@@ -182,10 +230,12 @@ class Log(object):
             "%Y%m%dT%H%M%S%fZ")
         self.path = os.path.join(directory, "nightly-%s.log" % stamp)
         self.handle = open(self.path, "w", encoding="utf-8")
-        logs = sorted(n for n in os.listdir(directory)
-                      if n.startswith("nightly-") and n.endswith(".log"))
-        for old in logs[:-KEEP_LOGS]:
-            os.remove(os.path.join(directory, old))
+        cutoff = time.time() - KEEP_LOG_DAYS * 86400
+        for name in os.listdir(directory):
+            path = os.path.join(directory, name)
+            if (name.startswith("nightly-") and name.endswith(".log")
+                    and os.path.getmtime(path) < cutoff):
+                os.remove(path)
 
     def line(self, text=""):
         print(text)
@@ -222,6 +272,19 @@ def slices_without_output(root, since):
         if (entry.get("last_run") or "") >= since and entry.get("last_status") != "ok":
             out.append((name, entry.get("last_status")))
     return out
+
+
+def rebuilt_cells(root, since):
+    """Cells whose partition was rebuilt at or after `since`."""
+    manifest = Manifest(os.path.join(root, MANIFEST_NAME))
+    return sorted(cell for cell, entry in
+                  (manifest.data.get("partitions") or {}).items()
+                  if (entry.get("as_of") or "") >= since)
+
+
+# Lines nightly_slices.py prints for something a person should look at.
+ATTENTION = (" KEPT ", "OVERDUE", " FAILED:", "NOT ARMED", "ERROR STORED",
+             " DROPPED ", "DOWNLOAD FAILED")
 
 
 def pending_slices(root):
@@ -291,8 +354,7 @@ def upload_file(base, sas, relative, path, content_type):
     return "uploaded"
 
 
-def upload(log, root, config, sas):
-    base = config["upload"]["base"]
+def upload(log, root, base, config, sas):
     with open(os.path.join(root, "manifest.json"), encoding="utf-8") as handle:
         published = json.load(handle)
     files = [(p["path"], "application/octet-stream") for p in published["partitions"]]
@@ -316,7 +378,7 @@ def upload(log, root, config, sas):
 
 # ------------------------------------------------------------------- main
 
-def night(root, config, log, no_upload=False):
+def night(root, config, log, no_upload=False, trigger=False):
     """Run the steps; (steps, notes, exit code). Never raises for a step."""
     facility = str(config["facility"])
     steps = {name: NOT_RUN for name in
@@ -325,17 +387,20 @@ def night(root, config, log, no_upload=False):
     started = utc_now()
 
     code, lines = run_script(log, "nightly_slices.py",
-                             ["--facility", facility, "--root", root])
+                             ["--facility", facility, "--root", root]
+                             + (["--trigger"] if trigger else []))
     steps["nightly"] = OK if code == 0 else FAILED
     if code != 0:
         notes.append("nightly_slices.py exited %d; nothing was published." % code)
         return steps, notes, 2
-    kept = [line.strip() for line in lines if " KEPT " in line]
+    kept = [line.strip() for line in lines
+            if any(mark in line for mark in ATTENTION)]
     empty = slices_without_output(root, started)
     for name, status in empty:
         notes.append("slice %s: %s" % (name, status))
     for line in kept:
         notes.append(line)
+    rebuilt = rebuilt_cells(root, started)
 
     waiting = pending_slices(root)
     if not waiting:
@@ -356,6 +421,17 @@ def night(root, config, log, no_upload=False):
             notes.append("provisioning %d slice(s) failed; their cells stay KEPT."
                          % len(waiting))
 
+    if not rebuilt:
+        # Nothing new to publish. The usual outcome of a check: no new data,
+        # or slices armed and not yet run. Uploading would send nothing new.
+        for name in ("arcgis", "publish", "upload"):
+            steps[name] = SKIPPED
+        notes.append("no cell rebuilt; nothing published.")
+        degraded = (any(v == FAILED for v in steps.values()) or bool(empty)
+                    or bool(kept))
+        return steps, notes, 1 if degraded else 0
+    notes.append("rebuilt: %s" % ", ".join(rebuilt))
+
     if config["arcgis"]:
         code, _ = run_script(log, "arcgis_export.py", ["--root", root])
         steps["arcgis"] = OK if code == 0 else FAILED
@@ -364,7 +440,13 @@ def night(root, config, log, no_upload=False):
     else:
         steps["arcgis"] = SKIPPED
 
-    code, _ = run_script(log, "publish_manifest.py", ["--root", root])
+    # The published name, which readers see. Without `name` it is the root
+    # directory's, so a root called `pipeline` published facility
+    # "pipeline" over the container's real one.
+    code, _ = run_script(log, "publish_manifest.py",
+                         ["--root", root]
+                         + (["--facility", str(config["name"])]
+                            if config.get("name") else []))
     steps["publish"] = OK if code == 0 else FAILED
     if code != 0:
         notes.append("publish_manifest.py exited %d; nothing was uploaded." % code)
@@ -373,15 +455,15 @@ def night(root, config, log, no_upload=False):
     if no_upload or not config.get("upload"):
         steps["upload"] = SKIPPED
     else:
-        sas = read_secret(config["upload"]["sas_env"])
-        if not sas:
-            steps["upload"] = FAILED
-            notes.append("no SAS token in %s (environment or .env)."
-                         % config["upload"]["sas_env"])
-            return steps, notes, 2
-        log.line("$ upload to %s" % config["upload"]["base"])
         try:
-            counts = upload(log, root, config, sas)
+            base, sas = upload_target(config)
+        except Refused as exc:
+            steps["upload"] = FAILED
+            notes.append(str(exc))
+            return steps, notes, 2
+        log.line("$ upload to %s" % base)
+        try:
+            counts = upload(log, root, base, config, sas)
             steps["upload"] = OK
             log.line("   %d uploaded, %d unchanged"
                      % (counts["uploaded"], counts["unchanged"]))
@@ -400,6 +482,8 @@ def main(argv=None):
     parser.add_argument("--root", required=True, help="data/<facility>")
     parser.add_argument("--no-upload", action="store_true",
                         help="run everything except the upload")
+    parser.add_argument("--trigger", action="store_true",
+                        help="arm every slice now, new data or not")
     args = parser.parse_args(argv)
     root = args.root
     try:
@@ -409,7 +493,8 @@ def main(argv=None):
             try:
                 log.line("night for facility %d, root %s, started %s"
                          % (config["facility"], root, utc_now()))
-                steps, notes, code = night(root, config, log, args.no_upload)
+                steps, notes, code = night(root, config, log, args.no_upload,
+                                           args.trigger)
                 log.line()
                 log.line("summary")
                 for name in ("nightly", "pending", "arcgis", "publish", "upload"):

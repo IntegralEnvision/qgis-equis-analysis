@@ -1,4 +1,4 @@
-"""Create the slice reports and their nightly agents, and seed the manifest.
+"""Create the slice reports and their agents, and seed the manifest.
 
     # see the plan: writes only one ZZ_ probe report, run then deleted
     python pipeline/create_slice_reports.py --facility <id> --root data/<name> \
@@ -14,7 +14,7 @@
 
 This is the step `nightly_slices.py` assumes has already run. It divides one
 (matrix, fraction) cell's locations into bins, creates one report per bin with
-those locations saved to @sys_loc_codes, attaches a daily EIA to each, and
+those locations saved to @sys_loc_codes, attaches a one-time EIA to each, and
 records the lot in the manifest.
 
 WHAT IT WRITES TO THE SHARED TENANT
@@ -47,16 +47,20 @@ names an existing report instead, for one whose saved filters were tuned by
 hand; whichever source, every slice inherits the same filters, which is what
 makes the slices comparable.
 
-WHY 03:00
----------
-The agents run daily at 03:00 UTC by default (--at). EQuIS schedules are in
-UTC: the tenant's existing agents carry timeStart 420 and were observed firing
-at 07:00 UTC. Times are minutes from midnight, and a daily schedule sets
-timeStart == timeEnd.
+WHEN THE AGENTS RUN
+-------------------
+Once, 20-90 minutes after they are created, for the slice's first output;
+after that only when nightly_slices.py arms them, which it does when the
+facility has new data or a re-bin changed a slice's locations. They used to
+run daily at 03:00 UTC whatever had changed (until 2026-10-23).
+
+Why not EQuIS's own new-data agents (agentType 1): the tenant's only one,
+saved for one facility, fired after a load into another and
+stored "Report did not generate output", and did not fire for four later
+loads (read 2026-10-23). The pipeline reads the load signal itself instead.
 """
 
 import argparse
-import datetime
 import json
 import os
 import sys
@@ -70,9 +74,10 @@ sys.path.insert(0, HERE)
 
 from slice_store import (  # noqa: E402
     read_env,
-    DEFAULT_TARGET_ROWS, MANIFEST_NAME, UNITS_NAME, Manifest, bin_count,
+    CONFIG_NAME, DEFAULT_TARGET_ROWS, MANIFEST_NAME, UNITS_NAME, Manifest,
+    bin_count,
     cell_key, default_prefix, merge_extra_fields, pack_bins, propose_unit,
-    slice_name, utc_now,
+    read_load_signal, run_once_schedule, slice_name, utc_now,
 )
 import unit_convert  # noqa: E402
 
@@ -82,9 +87,6 @@ import unit_convert  # noqa: E402
 # extract available; it is refined per cell from the manifest once any slice
 # has produced output, and this default only shapes the very first plan.
 ROWS_PER_SAMPLE = 5.36
-
-# EQuIS schedule times are minutes from midnight, UTC.
-DEFAULT_RUN_AT = 3 * 60
 
 
 def fail(message):
@@ -398,16 +400,17 @@ def create_report(api, template, facility_id, name, matrix, fraction,
     return report_id, None
 
 
-def create_agent(api, report_id, name, user_id, email, run_at):
-    """Attach a daily agent. Returns (event_id, error).
+def create_agent(api, report_id, name, user_id, email):
+    """Attach a one-time agent, due today. Returns (event_id, error).
+
+    One-time, not daily: the slice runs now, for its first output, and again
+    only when nightly_slices.py arms it - on new data or a re-bin.
 
     Every sentinel id here matters: omitting them makes the server drop the
     Schedule block silently, returning 201 with scheduleId null - an agent
-    that never runs. `effective` is midnight and Z-suffixed for the same
-    reason; a runOnce agent effective at the creation moment is never
-    evaluated, and daily schedules inherit the same evaluator.
+    that never runs, and one that can never be armed, since a PUT cannot
+    create a schedule row. See slice_store.run_once_schedule for `effective`.
     """
-    today = datetime.date.today().isoformat()
     event = {"id": -1,
              "isDisabled": False,
              "userReportId": -report_id,          # NEGATIVE
@@ -423,23 +426,12 @@ def create_agent(api, report_id, name, user_id, email, run_at):
              "formatName": None,
              "supressNoDataNotice": False,
              # Store only. The output is still written and still served by the
-             # API; this just stops a large attachment being emailed nightly.
+             # API; this just stops a large attachment being emailed each run.
              "supressAllNotices": True,
              "ownerUserId": user_id,
              "scheduleId": 0,
              "noticeTemplateId": 0}
-    schedule = {"id": 0,
-                "statusFlag": "A",
-                "createdBy": user_id,
-                # Minutes from midnight UTC; a daily schedule sets both ends
-                # to the same minute, as every working agent here does.
-                "timeStart": run_at, "timeEnd": run_at, "timeInterval": 0,
-                "effective": today + "T00:00:00.000Z",
-                "expiration": None, "lastEvaluated": None,
-                "recurrenceType": 2,               # daily
-                "recurrenceDay": 0, "recurrenceInterval": 1,
-                "recurrenceOrdinal": 0,
-                "title": "daily:"}
+    schedule = run_once_schedule(user_id)
     template = {"id": 0,
                 "templateCode": "eia-%s-%d-%d" % (user_id, report_id,
                                                   int(time.time() * 1000)),
@@ -494,8 +486,47 @@ def set_up_manifest(manifest, facility_id, prefix):
              "would orphan them." % (manifest.prefix, prefix))
 
 
+def record_config(root, facility_id, sample_types, template, write=True):
+    """Write <root>/pipeline.json, or refuse a run that disagrees with it.
+
+    run_nightly.py reads it to make the slices a re-bin adds, so it must say
+    what THESE slices were made with. It used to be written by hand, after
+    the fact, from memory: a wrong `sample_types` there puts QC samples into
+    some of a cell's slices and not others, and nothing would notice.
+
+    The facility, sample types and template are this script's to state;
+    every other key (`upload`, `arcgis`, `provision_pending`) is a person's
+    and is kept as it is. A second cell made with a different value is
+    refused for the same reason the first would be.
+    """
+    path = os.path.join(root, CONFIG_NAME)
+    config = {}
+    if os.path.isfile(path):
+        with open(path, encoding="utf-8") as handle:
+            config = json.load(handle)
+    stated = {"facility": int(facility_id), "sample_types": sample_types,
+              "template": template}
+    for name, value in stated.items():
+        if name in config and config[name] != value:
+            fail("%s says %s is %s; this run would make slices with %s. Every "
+                 "slice of a facility needs the same, or a cell mixes them. "
+                 "Pass the recorded value, or edit %s if it is wrong."
+                 % (path, name, json.dumps(config[name]), json.dumps(value),
+                    CONFIG_NAME))
+    if not write or all(config.get(n, object()) == v for n, v in stated.items()):
+        return path
+    config.update(stated)
+    if not os.path.isdir(root):
+        os.makedirs(root)
+    with open(path, "w", encoding="utf-8") as handle:
+        json.dump(config, handle, indent=1)
+        handle.write("\n")
+    print("wrote %s" % path)
+    return path
+
+
 def provision(api, template, facility_id, manifest, name, matrix, fraction,
-              index, codes, user_id, email, run_at, replace):
+              index, codes, user_id, email, replace):
     """One slice: its report (created, or reused with THESE locations saved)
     and its agent, recorded in the manifest. Returns True on success."""
     from nightly_slices import save_locations
@@ -525,17 +556,19 @@ def provision(api, template, facility_id, manifest, name, matrix, fraction,
         print("   %-28s report %d%s"
               % (name, report_id, "  (%s)" % problem if problem else ""))
     event_id, agent_problem = create_agent(api, report_id, name, user_id,
-                                           email, run_at)
+                                           email)
     if event_id is None:
         print("   %-28s AGENT FAILED: %s" % ("", agent_problem))
     elif agent_problem:
         print("   %-28s agent %s  (%s)" % ("", event_id, agent_problem))
     else:
         print("   %-28s agent %s" % ("", event_id))
+    # Armed at creation: the new agent is due today, and until it has run
+    # this slice's cell reads as waiting rather than complete.
     entry = manifest.put_slice(name, matrix=matrix, fraction=fraction,
                                index=index, locations=codes,
                                report_id=report_id, event_id=event_id,
-                               created=utc_now())
+                               created=utc_now(), armed_at=utc_now())
     entry.pop("needs_report", None)
     manifest.save()
     return event_id is not None and not agent_problem
@@ -564,7 +597,7 @@ def provision_pending(api, template, args, manifest, user_id, email):
         ok += provision(api, template, args.facility, manifest, name,
                         entry.get("matrix"), entry.get("fraction"),
                         entry.get("index"), entry.get("locations") or [],
-                        user_id, email, args.at, args.replace)
+                        user_id, email, args.replace)
     print("\n%d of %d provisioned; manifest: %s"
           % (ok, len(waiting), manifest.path))
     return 0 if ok == len(waiting) else 1
@@ -623,9 +656,6 @@ def main():
                         help="slice-name prefix for a NEW facility (default "
                              "parquet_<facility id>); fixed once chosen")
     parser.add_argument("--target-rows", type=int, default=DEFAULT_TARGET_ROWS)
-    parser.add_argument("--at", type=int, default=DEFAULT_RUN_AT,
-                        help="minutes from midnight UTC (default %d = 03:00)"
-                             % DEFAULT_RUN_AT)
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--no-probe", action="store_true",
                         help="skip the calibration run (faster, but the slice "
@@ -676,6 +706,10 @@ def main():
 
     manifest = Manifest(os.path.join(args.root, MANIFEST_NAME))
     set_up_manifest(manifest, args.facility, args.prefix)
+    # Checked on a dry run too, which is when a mismatch is cheapest to hear.
+    record_config(args.root, args.facility, args.sample_types or None,
+                  None if from_base else args.template,
+                  write=not args.dry_run)
 
     print("site     : %s" % site)
     print("user     : %s (id %s)" % (username, user_id))
@@ -700,8 +734,8 @@ def main():
     if args.pending:
         return provision_pending(api, template, args, manifest, user_id, email)
 
-    print("cell     : %s   run daily at %02d:%02d UTC\n"
-          % (cell_key(matrix, fraction), args.at // 60, args.at % 60))
+    print("cell     : %s   agents run once now, then when armed\n"
+          % cell_key(matrix, fraction))
 
     print("counting samples per location ...")
     weights = location_weights(api, args.facility, matrix)
@@ -751,6 +785,15 @@ def main():
         else:
             per_location = probe_rows / float(len(bins[0]))
             measured = {code: per_location for code in weights}
+            # The per-slice estimates printed below are weights x this rate.
+            # Left at ROWS_PER_SAMPLE they ignored the probe: the first
+            # facility's WS/D probe measured 685 rows per location, so its
+            # four ~111-location slices are ~76,000 rows each, and the plan
+            # printed ~38,600 (2026-10-23).
+            if rows_per_unit != 1.0:
+                probed = sum(weights.get(code, 0) for code in bins[0])
+                if probed:
+                    rows_per_unit = probe_rows / float(probed)
             new_parts = bin_count(measured, args.target_rows,
                                   rows_per_unit=1.0)
             print("   %s rows from %d locations in %.1fs -> %.0f rows/location"
@@ -777,18 +820,27 @@ def main():
         print("--dry-run: nothing created.\n")
         return 0
 
+    # The facility's load signal as these slices first run, read BEFORE they
+    # are made: a load landing after this moves it, and the first check then
+    # arms them again rather than missing it. Kept if already recorded - a
+    # second cell must not swallow a load the first cell's slices missed.
+    if "load_signal" not in manifest.data:
+        signal = read_load_signal(api, args.facility)
+        if signal is not None:
+            manifest.data["load_signal"] = signal
+            manifest.data["load_signal_at"] = utc_now()
     manifest.save()
     created = 0
     for index, codes in enumerate(bins):
         name = slice_name(matrix, fraction, index, manifest.prefix)
         created += provision(api, template, args.facility, manifest, name,
                              matrix, fraction, index, codes, user_id, email,
-                             args.at, args.replace)
+                             args.replace)
 
     print("\ncreated %d slice(s); manifest: %s" % (created, manifest.path))
-    print("They run daily at %02d:%02d UTC. Tomorrow:\n"
+    print("Their agents run once in the next 20-90 minutes. Then:\n"
           "   python pipeline/nightly_slices.py --facility %d --root %s"
-          % (args.at // 60, args.at % 60, args.facility, args.root))
+          % (args.facility, args.root))
     return 0
 
 

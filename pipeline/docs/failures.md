@@ -13,6 +13,7 @@ why it is written down.
 | A filter on a chemical literally named "None" | EQuIS stores an empty parameter as the string `"None"` | Scrubbed when cloning parameters |
 | Locations fell out of every slice after `--replace` | a reused report kept its old `@sys_loc_codes` while the manifest recorded new ones | Reused reports have the new list saved and verified |
 | A crash on slice 3 lost slices 1-2's accounting | the manifest was saved once at the end | Saved per slice |
+| A slice's locations could vanish from a rebuilt cell | a failed run stores text, not nothing: `"Errors"` / "Report did not generate output" (64 bytes, read 2026-10-23); collect took it as a one-row slice, and the cell as complete | Output without a `SYS_LOC_CODE` column is recorded as `error output` and holds the cell |
 
 ## Data counted twice
 
@@ -27,10 +28,16 @@ glob, name the levels: `matrix=*/fraction=*/*.parquet`.
 
 - `POST /api/eia` without the sentinel ids drops the Schedule silently -
   201, `scheduleId` null. `create_agent` reads back and asserts it.
-- A daily schedule needs `timeStart == timeEnd`, minutes from midnight
-  **UTC**, and `effective` at midnight `Z`.
+- A one-time schedule needs `effective` at **midnight** `Z`: one effective
+  at the moment it was made is never evaluated. Slice agents are one-time
+  and re-armed by editing that row (`slice_store.arm_agent`): `effective`
+  back to today and `lastEvaluated` cleared, which made a fired agent fire
+  again 6 minutes later (2026-10-23). A PUT can edit a schedule row but not
+  create one.
+- **An armed slice that never runs** reads as `waiting`, then `OVERDUE`
+  after 6 hours. Check the agent in EQuIS; `--trigger` re-arms it.
 - **Notices: the evidence disagrees, so check.** `create_agent` sets
-  `supressAllNotices: true` to avoid emailing a large attachment nightly,
+  `supressAllNotices: true` to avoid emailing a large attachment each run,
   and the first facility's slices stored output that way. Other EIA work
   found that suppressing notices is how an agent ends up storing nothing,
   because the stored output is the notice attachment.
@@ -52,6 +59,16 @@ glob, name the levels: `matrix=*/fraction=*/*.parquet`.
   `RT_UNIT_CONVERSION_FACTOR`), so conversion happens at collect time with
   EQuIS's own factors, keeping `RESULT_UNIT_ORIGINAL` / `RESULT_VALUE_ORIGINAL`.
   A pair with no factor, or a `FORMULA` factor, is left alone - never guessed.
+
+- **A unit on the wrong basis.** The first facility's surface water had 260
+  dissolved and total Mercury non-detects at "4 ug/kg" (2026-10-23): the
+  particulate fraction's unit, applied to all three when two EDDs were
+  prepared. No factor converts mg/kg to ug/L, so they sat in a ug/L layer
+  as numbers nobody could compare. Now dropped with a warning, written to
+  `_dropped/`, and counted on the published partition (`unit_convert.
+  split_mismatched`). Commit mode matters for the fix: **Merge does not
+  overwrite** a non-empty column, so reloading the corrected EDDs with the
+  mode they were loaded with changes nothing; UpdateOnly does.
 
 ## Types
 

@@ -140,6 +140,10 @@ UNITS_NAME = "units.json"
 # published copy was sitting on disk under a name nobody thought to send.
 MANIFEST_NAME = "manifest_local.json"
 
+# What run_nightly.py needs to know about a facility. create_slice_reports.py
+# writes the facility, sample types and template; a person adds the rest.
+CONFIG_NAME = "pipeline.json"
+
 # What this used to be called, so an existing project keeps working.
 LEGACY_MANIFEST_NAME = "manifest.json"
 
@@ -461,6 +465,30 @@ def find_env_file(start=None):
         directory = parent
 
 
+def read_env_file(path):
+    """{name (lower-case): value} from a `.env` of `name: value` lines.
+
+    `name = value` works as well. The line splits at whichever separator
+    comes FIRST: it used to try `:` before `=`, so `equis_site=https://...`
+    split at the colon in `https:` and read as a name nobody asked for -
+    the file looked as if it lacked the site (found 2026-10-23). The one
+    parser for both the EQuIS credentials and run_nightly's upload secret.
+    """
+    values = {}
+    with open(path, "r", encoding="utf-8") as handle:
+        for line in handle:
+            line = line.strip()
+            if not line or line.startswith("#"):
+                continue
+            cuts = [i for i in (line.find(":"), line.find("=")) if i > 0]
+            if not cuts:
+                continue
+            cut = min(cuts)
+            values[line[:cut].strip().lower()] = (
+                line[cut + 1:].strip().strip("'\""))
+    return values
+
+
 def read_env():
     """(site, api_key) for EQuIS, or exit saying where it looked.
 
@@ -475,17 +503,7 @@ def read_env():
         return site.rstrip("/"), key
     path = os.environ.get("EQUIS_ENV") or find_env_file()
     if path and os.path.isfile(path):
-        values = {}
-        with open(path, "r", encoding="utf-8") as handle:
-            for line in handle:
-                line = line.strip()
-                if not line or line.startswith("#"):
-                    continue
-                for sep in (":", "="):
-                    if sep in line:
-                        name, value = line.split(sep, 1)
-                        values[name.strip().lower()] = value.strip().strip("'\"")
-                        break
+        values = read_env_file(path)
         site = values.get("equis_site") or values.get("site")
         key = values.get("api_key") or values.get("key")
         if site and key:
@@ -539,7 +557,11 @@ def load_units(root):
     someone's data.
 
     Shape: {"cells": {"WS/N": {"unit": "ug/L", "source": "..."}, ...}}.
-    A bare string in place of the object is accepted too.
+    A bare string in place of the object is accepted too. `"unit": null`
+    says "deliberately none": the cell is neither converted nor dropped
+    from, and no later proposal fills it in. The first facility's WS/PRT
+    carries particulate both per volume and per mass, both legitimate,
+    and any target would drop one of them (2026-10-23).
     """
     path = os.path.join(root, UNITS_NAME)
     if not os.path.isfile(path):
@@ -599,6 +621,152 @@ def partition_path(root, matrix, fraction):
 def utc_now():
     return datetime.datetime.now(datetime.timezone.utc).strftime(
         "%Y-%m-%dT%H:%M:%SZ")
+
+
+def parse_utc(text):
+    """An aware UTC datetime from either clock's format, or None.
+
+    The manifest writes `2026-10-23T10:00:00Z`; EQuIS reports an agent's
+    last run as `2026-10-19T20:35:19.82`, UTC without saying so. Compared as
+    strings the two sort wrongly, so they are compared as times.
+    """
+    if not text:
+        return None
+    text = str(text).strip().rstrip("Z")
+    if "." in text:
+        text = text.split(".", 1)[0]
+    try:
+        moment = datetime.datetime.strptime(text, "%Y-%m-%dT%H:%M:%S")
+    except ValueError:
+        return None
+    return moment.replace(tzinfo=datetime.timezone.utc)
+
+
+# The tables Analytical Results II reads a facility's data from. Each row
+# carries the EBATCH of the EDD that last wrote it, so the newest EBATCH per
+# table moves whenever a load touches the facility.
+SIGNAL_TABLES = ("DT_RESULT", "DT_TEST", "DT_SAMPLE", "DT_LOCATION")
+
+
+def read_load_signal(api, facility_id):
+    """{table: newest EBATCH} for one facility, or None if any read failed.
+
+    Four reads of one row each: about 1 s apiece on the tenant (2026-10-23,
+    two facilities). There is no cheap row count to add to
+    it - `/$count` and `$apply=aggregate` both answer with pages of rows.
+
+    What it sees: any EDD that writes to the facility, and a rollback of the
+    newest one (the number goes DOWN, which is a change too). What it cannot
+    see: edits made in the EQuIS UI, which do not set EBATCH, and deleting or
+    rolling back an older load. Those need `--trigger` by hand.
+    """
+    signal = {}
+    for table in SIGNAL_TABLES:
+        status, body = api.json(
+            "/api/odata/%s?$filter=FACILITY_ID eq %d and EBATCH ne null"
+            "&$select=EBATCH&$orderby=EBATCH desc&$top=1"
+            % (table, int(facility_id)))
+        if status != 200 or not isinstance(body, dict):
+            return None
+        rows = body.get("value") or []
+        signal[table] = rows[0].get("EBATCH") if rows else None
+    return signal
+
+
+def read_agent_runs(api):
+    """{event_id: last run (EQuIS's UTC text) or None}, in ONE request.
+
+    One listing of every agent rather than one request per slice: a facility
+    has dozens of slices and this is asked on every check.
+    """
+    status, body = api.json("/api/eia")
+    if status != 200:
+        return None
+    records = body if isinstance(body, list) else (body or {}).get("value") or []
+    runs = {}
+    for record in records:
+        event = record.get("ReportEvent") or {}
+        if event.get("id") is not None:
+            runs[int(event["id"])] = event.get("lastExecutionDateUTC_ReadOnly")
+    return runs
+
+
+def run_once_schedule(user_id=None, existing=None):
+    """A one-time schedule that EQuIS evaluates today.
+
+    `effective` is MIDNIGHT today, Z-suffixed, with the window the whole day:
+    a runOnce agent effective at the moment it was made is never evaluated
+    (three agents sat for 28 hours). Expect 20-90 minutes to the run.
+
+    `existing` is an agent's current schedule row, edited in place so its id
+    is kept: a PUT can change a schedule row but not create one.
+    """
+    schedule = dict(existing or {"id": 0, "statusFlag": "A",
+                                 "createdBy": user_id})
+    schedule.update({
+        "timeStart": 0, "timeEnd": 1439, "timeInterval": 0,
+        "effective": datetime.date.today().isoformat() + "T00:00:00.000Z",
+        "expiration": None, "lastEvaluated": None,
+        "recurrenceType": 1,                       # once
+        "recurrenceDay": 0, "recurrenceInterval": None,
+        "recurrenceOrdinal": 0, "title": "runOnce:"})
+    return schedule
+
+
+def arm_agent(api, event_id):
+    """Ask one existing agent to run once more, today. Returns (ok, problem).
+
+    There is no "run now" endpoint (7_26_1_26015's spec has none), so this
+    re-arms the agent's one-time schedule. A daily agent made before agents
+    became one-time is converted by the same edit.
+
+Seen to work 2026-10-23 on a ZZ_ agent (the first facility, one location):
+    it fired 9 minutes after creation; this same edit, made after that run,
+    cleared `lastEvaluated`, was evaluated 45 s later and fired again 6
+    minutes after, storing a new attachment of the same 1,142 rows. Editing
+    `effective` back to today and clearing `lastEvaluated` is the whole of
+    it; nothing else needed changing.
+    """
+    status, record = api.json("/api/eia/%d" % int(event_id))
+    if status != 200 or not isinstance(record, dict):
+        return False, "could not read agent %s (HTTP %s)" % (event_id, status)
+    if not record.get("Schedule"):
+        return False, "agent %s has no schedule row to re-arm" % event_id
+    schedule = run_once_schedule(existing=record["Schedule"])
+    status, answer = api.json(
+        "/api/eia/%d" % int(event_id), "PUT",
+        {"ReportEvent": record.get("ReportEvent"), "Schedule": schedule,
+         "NoticeTemplate": record.get("NoticeTemplate"),
+         "Recipients": record.get("Recipients") or [],
+         "HookInfo": record.get("HookInfo")})
+    if status not in (200, 201, 204):
+        return False, "HTTP %s %s" % (status, str(answer)[:120])
+    # A 200 does not mean it applied. Read back the two fields that matter.
+    status, check = api.json("/api/eia/%d" % int(event_id))
+    applied = (check or {}).get("Schedule") or {}
+    if (str(applied.get("effective") or "")[:10] != schedule["effective"][:10]
+            or applied.get("recurrenceType") != 1):
+        return False, "PUT answered %s but the schedule did not change" % status
+    return True, None
+
+
+def output_problem(path):
+    """Why a slice's stored output is not data, or None if it looks like data.
+
+    A failed run still stores something: "Report did not generate output.
+    Please try again." under a header of "Errors" (64 bytes, read
+    2026-10-23), or EQuIS's "MISSING UNIT CONVERSION FACTOR" (78 bytes).
+    Taken as data, either became a one-row slice with no locations, its cell
+    counted as complete, and every location the slice should have carried
+    vanished from the rebuilt partition without an error.
+    """
+    with open(path, "rb") as handle:
+        head = handle.read(4096).decode("utf-8-sig", "replace")
+    first = head.splitlines()[0] if head else ""
+    if "SYS_LOC_CODE" in first.upper():
+        return None
+    detail = " ".join(line.strip().strip('"') for line in head.splitlines()[:3])
+    return "not report output: %s" % detail[:100]
 
 
 class Manifest(object):
@@ -745,11 +913,82 @@ class Manifest(object):
                            []).append(entry)
         return out
 
+    def armed(self, name, when=None):
+        """Record that this slice's agent was asked to run."""
+        self.put_slice(name, armed_at=when or utc_now())
+
+    def cell_states(self, runs):
+        """{(matrix, fraction): (state, [slice names])} from agents' last runs.
+
+        `runs` is read_agent_runs()'s {event_id: last run}. A slice's output
+        is CURRENT when its agent has run since the pipeline last armed it.
+        Per cell, one of:
+
+          waiting    some slice is not current (named): armed and not yet
+                     run, never run, or without a report or agent. A cell
+                     built now would mix new output with old.
+          ready      every slice current, and at least one ran since its
+                     output was last collected (named): rebuild it.
+          failed     every slice current, but a slice's current output was
+                     collected and was not data (named). Nothing will change
+                     until it runs again, so it is said, not waited on.
+          unchanged  every slice current and already collected.
+
+        Mixing is the one wrong state. Every cell's old location lists cover
+        each location exactly once, and so do its new ones, so a cell built
+        from all-old or all-new output is right; one built half from each,
+        after a re-bin, can carry a location twice or not at all.
+        """
+        out = {}
+        for cell, entries in self.cells().items():
+            waiting, fresh, failed = [], [], []
+            for entry in entries:
+                event_id = entry.get("event_id")
+                ran = parse_utc((runs or {}).get(int(event_id))) \
+                    if event_id else None
+                armed = parse_utc(entry.get("armed_at"))
+                if (not entry.get("report_id") or ran is None
+                        or (armed is not None and ran < armed)):
+                    waiting.append(entry["name"])
+                elif parse_utc(entry.get("collected_run")) != ran:
+                    fresh.append(entry["name"])
+                elif entry.get("last_status") != "ok":
+                    failed.append(entry["name"])
+            if waiting:
+                out[cell] = ("waiting", sorted(waiting))
+            elif fresh:
+                out[cell] = ("ready", sorted(fresh))
+            elif failed:
+                out[cell] = ("failed", sorted(failed))
+            else:
+                out[cell] = ("unchanged", [])
+        return out
+
     def mark_partition(self, matrix, fraction, rows, when=None):
-        """Record that a cell's partition was rebuilt from a COMPLETE run."""
+        """Record that a cell's partition was rebuilt from a COMPLETE run.
+
+        With what its slices DROPPED for a unit on the wrong basis, summed,
+        so the partition says what it is missing for as long as it stands.
+        """
+        dropped = {}
+        for entry in self.cells_by_key().get(cell_key(matrix, fraction), []):
+            for key, n in (entry.get("dropped") or {}).items():
+                dropped[key] = dropped.get(key, 0) + int(n)
         parts = self.data.setdefault("partitions", {})
         parts[cell_key(matrix, fraction)] = {"as_of": when or utc_now(),
                                              "rows": int(rows)}
+        if dropped:
+            parts[cell_key(matrix, fraction)]["dropped"] = dropped
+
+    def cells_by_key(self):
+        """cells(), keyed "WS/D" as the partitions are."""
+        return {cell_key(*cell): entries
+                for cell, entries in self.cells().items()}
+
+    def partition_dropped(self, matrix, fraction):
+        entry = (self.data.get("partitions") or {}).get(
+            cell_key(matrix, fraction)) or {}
+        return dict(entry.get("dropped") or {})
 
     def partition_as_of(self, matrix, fraction):
         entry = (self.data.get("partitions") or {}).get(

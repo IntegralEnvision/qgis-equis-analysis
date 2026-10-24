@@ -1,22 +1,38 @@
-"""The nightly loop: collect EIA output, write parquet, re-plan tomorrow.
+"""Run the slices when the facility has new data; rebuild what has finished.
 
     python pipeline/nightly_slices.py --facility <id> --root data/<facility>
+    python pipeline/nightly_slices.py ... --trigger     # arm every slice now
+    python pipeline/nightly_slices.py ... --rewrite     # after a significant load
 
-Three phases, each usable alone so a failure in one does not force the others
-to be re-run:
+With no flags it CHECKS, and that is what run_nightly.py runs, as often as
+it is scheduled:
 
-  --collect   read each slice's stored EIA output, write it to parquet
-  --rewrite   re-bin from what actually came back, update the reports
+  1. read the facility's load signal - the newest EBATCH in each table the
+     report reads. If it moved since the last check, ARM every slice: its
+     one-time agent is set to run again today (20-90 minutes later).
+  2. list the agents' last runs, in one request.
+  3. collect and repack each cell whose slices have ALL run since they were
+     armed and at least one has output not yet collected.
+
+Nothing runs on the tenant unless something changed. Agents used to run
+every night whether or not a facility had new data; this replaced that
+(2026-10-23) to stop loading a shared tenant for nothing.
+
+Phases still usable alone:
+
+  --collect   read every slice's stored EIA output, write it to parquet
+  --rewrite   re-bin from what actually came back, update the reports, and
+              arm the slices whose locations changed. Run by hand after a
+              load significant enough to move the bins; no longer nightly.
   --repack    rewrite the parquet sorted and row-grouped for fast reads
-
-With none of those flags it does all three in that order.
 
 WHAT IT TOUCHES
 ---------------
-Reads EIA output and writes local parquet. With --rewrite it also EDITS the
-slice reports' @sys_loc_codes (never their other parameters, never a report
-it did not create). It creates nothing and deletes nothing; setting up the
-reports and agents is create_slice_reports.py's job.
+Reads EIA output and writes local parquet. Arming EDITS a slice agent's
+schedule (one-time, effective today), and --rewrite EDITS the slice reports'
+@sys_loc_codes (never their other parameters, never a report it did not
+create). It creates nothing and deletes nothing; setting up the reports and
+agents is create_slice_reports.py's job.
 
 THE FEEDBACK LOOP HAS A BLIND SPOT
 ----------------------------------
@@ -49,9 +65,20 @@ sys.path.insert(0, HERE)
 from slice_store import (  # noqa: E402
     read_env,
     DEFAULT_TARGET_ROWS, MANIFEST_NAME, TARGET_LOCATIONS_PER_SLICE,
-    UNITS_NAME, Manifest, bin_count, cell_key, count_results_by_location,
-    load_units, pack_bins, partition_path, slice_name, utc_now,
+    UNITS_NAME, Manifest, arm_agent, bin_count, cell_key,
+    count_results_by_location, load_units, output_problem, pack_bins,
+    parse_utc, partition_path, read_agent_runs, read_load_signal, slice_name,
+    utc_now,
 )
+
+# An armed agent normally runs 20-90 minutes later. Past this, a waiting
+# slice is reported rather than waited on in silence.
+OVERDUE_HOURS = 6
+
+# Rows left out of a cell for a unit on the wrong basis, as EQuIS stored
+# them, one CSV per slice: <root>/_dropped/matrix=*/fraction=*/<slice>.csv.
+# CSV, and outside the matrix=* tree, so no reader's glob can count them.
+DROPPED_DIR = "_dropped"
 
 
 # Sorted on the columns a reader filters by, so row-group statistics can
@@ -132,45 +159,69 @@ class Api(object):
                 time.sleep(2 * (attempt + 1))
         return None, "unreachable"
 
-    def eia_output(self, report_id, event_id, out_path, timeout=600):
-        """Download one agent's stored output. Returns (bytes, seconds).
+    def eia_output(self, report_id, event_id, out_path, timeout=600,
+                   tries=3):
+        """Download one agent's stored output. Returns (bytes, seconds, error).
 
         `where`, `outFields` and `resultRecordCount` are ignored on stored
         output - it is a frozen snapshot and only `oType` is honoured - so
         everything is filtered locally after this.
+
+        (None, s, None) means EQuIS answered and there is nothing stored.
+        (None, s, "<why>") means the download itself failed, after `tries`
+        attempts. They are kept apart because they call for opposite things:
+        the first is the run's outcome, the second says nothing about the
+        run and must be retried. Both used to return (None, s), so a 38.8 MB
+        slice that hit a network fault on the first facility (2026-10-23)
+        read as "stored nothing" and held its cell; the same download
+        succeeded seconds later.
         """
         url = ("%s/api/reports/%d/events/%d/data?oType=csv"
                % (self.base, report_id, event_id))
-        request = urllib.request.Request(url)
-        request.add_header("Authorization", "Bearer " + self.api_key)
-        request.add_header("Accept", "text/csv, application/zip, */*")
         started = time.time()
-        try:
-            with urllib.request.urlopen(request, timeout=timeout) as resp:
-                if resp.status == 204:
-                    return None, time.time() - started
-                written = 0
-                with open(out_path, "wb") as handle:
-                    while True:
-                        chunk = resp.read(1 << 20)
-                        if not chunk:
-                            break
-                        handle.write(chunk)
-                        written += len(chunk)
-                return written, time.time() - started
-        except urllib.error.HTTPError as exc:
-            return None, time.time() - started
-        except Exception:  # noqa: BLE001
-            return None, time.time() - started
+        error = None
+        for attempt in range(tries):
+            request = urllib.request.Request(url)
+            request.add_header("Authorization", "Bearer " + self.api_key)
+            request.add_header("Accept", "text/csv, application/zip, */*")
+            try:
+                with urllib.request.urlopen(request, timeout=timeout) as resp:
+                    if resp.status == 204:
+                        return None, time.time() - started, None
+                    written = 0
+                    with open(out_path, "wb") as handle:
+                        while True:
+                            chunk = resp.read(1 << 20)
+                            if not chunk:
+                                break
+                            handle.write(chunk)
+                            written += len(chunk)
+                    if not written:
+                        return None, time.time() - started, None
+                    return written, time.time() - started, None
+            except urllib.error.HTTPError as exc:
+                error = "HTTP %d" % exc.code
+            except Exception as exc:  # noqa: BLE001
+                error = "%s: %s" % (type(exc).__name__, str(exc)[:80])
+            if attempt < tries - 1:
+                time.sleep(5 * (attempt + 1))
+        return None, time.time() - started, error
 
 
-def csv_to_parquet(csv_path, parquet_path, target=None, factors=None):
-    """Convert one slice's CSV to parquet. Returns (rows, counts, units).
+def csv_to_parquet(csv_path, parquet_path, target=None, factors=None,
+                   dropped_path=None):
+    """Convert one slice's CSV to parquet. Returns (rows, counts, units, dropped).
 
     `target` and `factors` turn on unit conversion - see unit_convert.py for
     why it happens here rather than in EQuIS. Without them nothing is
     converted and the third return value is empty, which is what a facility
     whose conversion table is complete should get.
+
+    `target` alone also turns on the drop: rows whose unit is a
+    concentration on the other basis from it (mg/kg in a ug/L cell) are left
+    out of the parquet, written to `dropped_path` as CSV, and counted in
+    `dropped` ({"<chemical> <unit>": rows}). Dropped BEFORE conversion, so
+    the audit file holds them exactly as EQuIS stored them.
     """
     import pyarrow as pa
     import pyarrow.csv as pacsv
@@ -185,53 +236,62 @@ def csv_to_parquet(csv_path, parquet_path, target=None, factors=None):
         csv_path, read_options=pacsv.ReadOptions(block_size=1 << 24),
         convert_options=convert)
     writer = None
+    dropped_writer = None
     rows = 0
     counts = collections.Counter()
     units = {}
+    dropped = {}
     try:
+        # Per BATCH, not per file: a slice can be hundreds of MB and holding
+        # it whole to multiply one column would undo the reason this streams
+        # at all.
         for batch in reader:
-            if writer is None and not (target and factors):
-                directory = os.path.dirname(parquet_path)
-                if directory and not os.path.isdir(directory):
-                    os.makedirs(directory)
-                writer = pq.ParquetWriter(parquet_path, batch.schema,
-                                          compression="zstd",
-                                          compression_level=9,
-                                          use_dictionary=True)
+            table = pa.Table.from_batches([batch])
+            if target:
+                table, wrong = unit_convert.split_mismatched(table, target)
+                if wrong is not None:
+                    if dropped_writer is None and dropped_path:
+                        os.makedirs(os.path.dirname(dropped_path),
+                                    exist_ok=True)
+                        dropped_writer = pacsv.CSVWriter(dropped_path,
+                                                         wrong.schema)
+                    if dropped_writer is not None:
+                        dropped_writer.write_table(wrong)
+                    for key, n in unit_convert.dropped_counts(wrong).items():
+                        dropped[key] = dropped.get(key, 0) + n
             if target and factors:
-                # Per BATCH, not per file: a slice can be hundreds of MB and
-                # holding it whole to multiply one column would undo the
-                # reason this streams at all.
-                table = pa.Table.from_batches([batch])
                 table, moved = unit_convert.convert_table(
                     table, target, factors)
                 for pair, n in moved.items():
                     units[pair] = units.get(pair, 0) + n
-                if writer is None:
-                    directory = os.path.dirname(parquet_path)
-                    if directory and not os.path.isdir(directory):
-                        os.makedirs(directory)
-                    writer = pq.ParquetWriter(parquet_path, table.schema,
-                                              compression="zstd",
-                                              compression_level=9,
-                                              use_dictionary=True)
-                writer.write_table(table)
-                rows += table.num_rows
-                if "SYS_LOC_CODE" in table.column_names:
-                    counts.update(table.column("SYS_LOC_CODE").to_pylist())
-                continue
-            writer.write_batch(batch)
-            rows += batch.num_rows
-            if "SYS_LOC_CODE" in batch.schema.names:
-                counts.update(batch.column("SYS_LOC_CODE").to_pylist())
+            if writer is None:
+                directory = os.path.dirname(parquet_path)
+                if directory and not os.path.isdir(directory):
+                    os.makedirs(directory)
+                writer = pq.ParquetWriter(parquet_path, table.schema,
+                                          compression="zstd",
+                                          compression_level=9,
+                                          use_dictionary=True)
+            writer.write_table(table)
+            rows += table.num_rows
+            if "SYS_LOC_CODE" in table.column_names:
+                counts.update(table.column("SYS_LOC_CODE").to_pylist())
     finally:
         if writer is not None:
             writer.close()
-    return rows, counts, units
+        if dropped_writer is not None:
+            dropped_writer.close()
+    return rows, counts, units, dropped
 
 
-def collect(api, manifest, root, only=None):
-    """Phase 1: pull each slice's stored output into parquet."""
+def collect(api, manifest, root, only=None, runs=None):
+    """Phase 1: pull each slice's stored output into parquet.
+
+    `runs` (read_agent_runs) lets each slice record WHICH run it collected,
+    `collected_run`, whatever the run stored - so a run that stored an error
+    is reported once, not downloaded again on every check until it reruns.
+    A download that FAILED records no run: it is tried again next check.
+    """
     staging = os.path.join(root, "_staging")
     if not os.path.isdir(staging):
         os.makedirs(staging)
@@ -269,7 +329,17 @@ def collect(api, manifest, root, only=None):
             print("   %-32s no report/agent recorded - skipped" % name)
             continue
         csv_path = os.path.join(staging, name + ".csv")
-        size, seconds = api.eia_output(report_id, event_id, csv_path)
+        size, seconds, error = api.eia_output(report_id, event_id, csv_path)
+        if error:
+            # Says nothing about the run, so `collected_run` is NOT moved:
+            # the cell stays ready and the next check downloads again.
+            manifest.record_run(name, None, seconds, "download failed")
+            manifest.save()
+            print("   %-32s DOWNLOAD FAILED (%s, %.0fs); retried next check"
+                  % (name, error, seconds))
+            continue
+        if runs is not None:
+            manifest.put_slice(name, collected_run=runs.get(int(event_id)))
         if not size:
             # 204, a 500, or an empty body. All mean "nothing stored", which
             # is what --rewrite acts on.
@@ -277,15 +347,31 @@ def collect(api, manifest, root, only=None):
             manifest.save()
             print("   %-32s NOTHING STORED (%.0fs)" % (name, seconds))
             continue
+        problem = output_problem(csv_path)
+        if problem:
+            # Recorded exactly as nothing stored: no rows, the cell held.
+            manifest.record_run(name, None, seconds, "error output")
+            manifest.save()
+            print("   %-32s ERROR STORED, %s" % (name, problem))
+            os.remove(csv_path)
+            continue
         parquet_path = os.path.join(
             partition_path(staging, entry.get("matrix"),
                            entry.get("fraction")), name + ".parquet")
+        # Replaced every collect, so what is there is always this run's: a
+        # slice that drops nothing now must not leave last time's file.
+        dropped_path = os.path.join(
+            partition_path(os.path.join(root, DROPPED_DIR),
+                           entry.get("matrix"), entry.get("fraction")),
+            name + ".csv")
+        if os.path.exists(dropped_path):
+            os.remove(dropped_path)
+        target = unit_convert.target_for(entry.get("matrix"),
+                                         entry.get("fraction"), choices)
         try:
-            rows, counts, moved = csv_to_parquet(
-                csv_path, parquet_path,
-                target=unit_convert.target_for(entry.get("matrix"),
-                                               entry.get("fraction"), choices),
-                factors=factors)
+            rows, counts, moved, dropped = csv_to_parquet(
+                csv_path, parquet_path, target=target, factors=factors,
+                dropped_path=dropped_path)
         except Exception as exc:  # noqa: BLE001 - one unconvertible slice
             # must not cost the other 35. The download is the expensive part
             # and it already succeeded, so a conversion failure is recorded
@@ -324,6 +410,16 @@ def collect(api, manifest, root, only=None):
             manifest.put_slice(name, converted={"%s->%s" % k: v
                                                 for k, v in moved.items()})
             manifest.save()
+        # Set every collect, empty included: repack sums these into the
+        # partition, and a stale count would outlive the fix it reported.
+        manifest.put_slice(name, dropped=dropped)
+        manifest.save()
+        if dropped:
+            print("   %-32s DROPPED %s row(s) not on %s's basis: %s  -> %s"
+                  % ("", "{:,}".format(sum(dropped.values())), target,
+                     ", ".join("%s x%s" % (k, "{:,}".format(v)) for k, v in
+                               sorted(dropped.items(), key=lambda kv: -kv[1])),
+                     os.path.relpath(dropped_path, root)))
     for (matrix, fraction), counts in weights.items():
         # Merged per cell, and only for what came back, so one bad night does
         # not erase what previous nights measured.
@@ -435,7 +531,107 @@ def rewrite(api, manifest, target_rows, dry_run=False):
                                locations_saved=ok)
             if not ok:
                 print("   %-32s FAILED to save new locations" % entry["name"])
+                continue
+            # The stored output still comes from the OLD list. Armed, the
+            # slice reads as waiting until it has run on the new one, and its
+            # cell is not rebuilt half old, half new.
+            arm(api, manifest, [entry["name"]])
+    manifest.save()
     return changes
+
+
+def arm(api, manifest, names):
+    """Ask each named slice's agent to run once more. Returns the failures.
+
+    A slice is recorded as armed even when arming FAILED: it then reads as
+    waiting, and past OVERDUE_HOURS is reported. Leaving it unarmed would
+    let its old output count as current, and the cell would be rebuilt with
+    that slice's locations silently out of date.
+    """
+    failed = []
+    for name in names:
+        entry = manifest.slice(name) or {}
+        event_id = entry.get("event_id")
+        if not event_id:
+            continue
+        ok, problem = arm_agent(api, event_id)
+        manifest.armed(name)
+        manifest.put_slice(name, arm_problem=problem)
+        if not ok:
+            failed.append(name)
+            print("   %-32s NOT ARMED: %s" % (name, problem))
+    manifest.save()
+    return failed
+
+
+def check(api, manifest, root, facility_id, force=False):
+    """The default: arm on new data, rebuild what has finished. Returns rows.
+
+    Costs the tenant five small reads when nothing has changed. EQuIS runs
+    nothing unless it is asked: when the facility's load signal moves (or
+    with `force`), every slice is armed; on a later check, each cell whose
+    slices have all run since is collected and rebuilt. A cell is never
+    built from a mix of slices that have and have not run.
+
+    The first check on a manifest only records the signal. Slices made by
+    create_slice_reports.py are armed when they are created.
+    """
+    signal = read_load_signal(api, facility_id)
+    if signal is None:
+        fail("Could not read the facility's load signal; nothing was armed "
+             "or collected.")
+    known = manifest.data.get("load_signal")
+    print("load signal: %s" % ", ".join("%s %s" % (t[3:], signal[t])
+                                       for t in sorted(signal)))
+    if force or (known is not None and signal != known):
+        names = sorted(n for n, e in manifest.data["slices"].items()
+                       if e.get("event_id"))
+        print("%s: arming %d slice(s)\n"
+              % ("--trigger" if force else "new data since %s"
+                 % manifest.data.get("load_signal_at", "the last check"),
+                 len(names)))
+        arm(api, manifest, names)
+    elif known is None:
+        print("first check: signal recorded, nothing armed\n")
+    else:
+        print("no new data\n")
+    if signal != known:
+        manifest.data["load_signal"] = signal
+        manifest.data["load_signal_at"] = utc_now()
+        manifest.save()
+
+    runs = read_agent_runs(api)
+    if runs is None:
+        fail("Could not list the agents; nothing was collected.")
+    states = manifest.cell_states(runs)
+    now = parse_utc(utc_now())
+    ready = []
+    for cell in sorted(states, key=lambda c: (c[0] or "", c[1] or "")):
+        state, names = states[cell]
+        line = "   %-8s %-9s" % (cell_key(*cell), state)
+        if state == "waiting":
+            late = [n for n in names
+                    if parse_utc(manifest.slice(n).get("armed_at"))
+                    and (now - parse_utc(manifest.slice(n).get("armed_at"))
+                         ).total_seconds() > OVERDUE_HOURS * 3600]
+            line += " %d slice(s) not yet run" % len(names)
+            if late:
+                line += "; OVERDUE (armed over %d h ago): %s" % (
+                    OVERDUE_HOURS, ", ".join(late))
+        elif state == "ready":
+            ready.append(cell)
+            line += " %d slice(s) with new output" % len(names)
+        elif state == "failed":
+            line += " FAILED: stored no data on their last run: %s" % (
+                ", ".join(names))
+        print(line)
+    print()
+    if not ready:
+        return None
+    only = {e["name"] for cell in ready for e in manifest.cells()[cell]}
+    rows = collect(api, manifest, root, only=only, runs=runs)
+    repack(root, manifest, cells=ready)
+    return rows
 
 
 def save_locations(api, report_id, codes):
@@ -486,8 +682,11 @@ def incomplete_cells(manifest, staging):
     return out
 
 
-def repack(root, manifest):
+def repack(root, manifest, cells=None):
     """Phase 3: rewrite each partition sorted, with small row groups.
+
+    `cells` limits it to the cells collected this time: on a check, a cell
+    nobody asked for is not KEPT, it is simply not due.
 
     One file per (matrix, fraction) rather than per slice: slice boundaries
     are an artefact of how the data had to be fetched, and leaving them in the
@@ -508,9 +707,12 @@ def repack(root, manifest):
         return
     print("repacking partitions")
     held = incomplete_cells(manifest, staging)
+    if cells is not None:
+        held = {cell: names for cell, names in held.items() if cell in cells}
     for (matrix, fraction), missing in sorted(
             held.items(), key=lambda kv: (kv[0][0] or "", kv[0][1] or "")):
-        print("   %s  KEPT %s - %d slice(s) produced nothing tonight: %s"
+        print("   %s  KEPT %s - %d slice(s) produced nothing on their last "
+              "run: %s"
               % (cell_key(matrix, fraction),
                  "as of %s" % manifest.partition_as_of(matrix, fraction)
                  if manifest.partition_as_of(matrix, fraction)
@@ -573,8 +775,15 @@ def main():
     parser.add_argument("--root", required=True,
                         help="directory holding the parquet and manifest")
     parser.add_argument("--target-rows", type=int, default=DEFAULT_TARGET_ROWS)
-    parser.add_argument("--collect", action="store_true")
-    parser.add_argument("--rewrite", action="store_true")
+    parser.add_argument("--trigger", action="store_true",
+                        help="arm every slice now, new data or not (UI "
+                             "edits and old rollbacks do not move the "
+                             "load signal)")
+    parser.add_argument("--collect", action="store_true",
+                        help="download every slice's stored output, run or not")
+    parser.add_argument("--rewrite", action="store_true",
+                        help="re-bin from measured rows and arm the slices "
+                             "whose locations changed; after a significant load")
     parser.add_argument("--repack", action="store_true")
     parser.add_argument("--dry-run", action="store_true",
                         help="with --rewrite, show the new bins without "
@@ -590,8 +799,9 @@ def main():
     args = parser.parse_args()
 
     phases = (args.collect, args.rewrite, args.repack)
-    if not any(phases):
-        args.collect = args.rewrite = args.repack = True
+    checking = not any(phases) and args.weight != "walk"
+    if args.trigger and not checking:
+        fail("--trigger is part of the check; give it on its own.")
 
     site, key = read_env()
     api = Api(site, key)
@@ -605,6 +815,9 @@ def main():
           % (args.facility, args.root, started))
 
     rows = None
+    if checking:
+        rows = check(api, manifest, args.root, args.facility,
+                     force=args.trigger)
     if args.collect:
         rows = collect(api, manifest, args.root)
     if args.weight == "walk":
@@ -650,7 +863,7 @@ def main():
              if manifest.consecutive_failures(name) >= 2]
     if stale:
         print("\n%d slice(s) have produced nothing twice or more running - "
-              "they are being split, but check them:" % len(stale))
+              "--rewrite splits them, but check them first:" % len(stale))
         for name in sorted(stale):
             print("   %s (%d consecutive)"
                   % (name, manifest.consecutive_failures(name)))
