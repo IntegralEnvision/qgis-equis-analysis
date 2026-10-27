@@ -86,3 +86,49 @@ a locked screen; the layout was seen in the browser preview instead.
   overlap rather than leave the canvas, which is the right failure but not
   a good layout.
 - Two QGIS map views, or the 3D view: the overlay knows one canvas.
+- A floating plugin panel can be left mostly off-screen (seen at y = 878,
+  721 px tall, on a 960 px screen). "Change data…" should bring a floating
+  panel back on-screen when it shows it.
+
+## Known problem: docks drawn in the main window's corner
+
+**Seen twice, on the user's own QGIS 4.2.1 (Windows 11, 125% scaling,
+1536×960), with the overlay on; not reproduced.** Recorded 2026-10-27, to be
+re-checked after updating to the newest QGIS beta.
+
+**What it looks like.** A dock shown after some point in the session -
+Identify Results the first time, the plugin's own panel and the Python
+Console later - is drawn at the main window's top-left corner over the menus
+and toolbars, with no background (what's behind shows through) and no way
+to close it.
+
+**What is known** (from `tools/diagnose_windows.py`, run with the problem on
+screen):
+
+- **The main window's dock layout stopped placing docks.** Qt reported the
+  Python Console as docked (bottom area, not floating) at `(0,0)` with a
+  default size of 100×203: it was never laid out. Not a painting fault.
+- **The overlay itself was where it should be:** the web view a child of the
+  map canvas, filling it.
+- **Once broken, it stays broken.** Un-maximising and re-maximising QGIS
+  doesn't fix it; nor does turning the overlay off ("⇲ Into the panel").
+  Nothing appears in the Log Messages panel, so no Python exception was
+  seen.
+- The plugin's own panel was floating at the time.
+
+**What was ruled out** in a scratch profile, each run in a fresh QGIS 4.2.1,
+recording every dock's geometry (`docks1`/`docks2` runs, 2026-10-27): overlay
+with the panel docked; overlay with the panel floating; the classic panel;
+and both overlay variants again with the user's three other enabled plugins
+(`basemaps`, `db_manager_community`, `slyr`). In all five, the Python Console
+and Identify Results docked normally. So the trigger is something earlier in
+a real session, not the setup.
+
+**Leading guess, untested:** a dock drag (docking or undocking a panel)
+interrupted over the overlay, leaving Qt's dock layout frozen mid-drag so
+that every dock shown afterwards lands at `(0,0)`. Floating-panel drags on
+Windows are native window moves, which synthetic input can't reproduce.
+
+**Next time:** note what was done just before it broke, especially any panel
+drag with the overlay on; and re-test on the newer QGIS before investing
+further, since a Qt fix may already cover it.
