@@ -242,6 +242,7 @@ the exporter follows.
 | | |
 |---|---|
 | [docs/implementation-plan.md](docs/implementation-plan.md) | **What to do next**, in order, with acceptance criteria |
+| [docs/chemduck-adoption-plan.md](docs/chemduck-adoption-plan.md) | Making ChemDuck the one authority for the chemistry rules: phases, upstream requests, decisions |
 | [docs/overlay-shell.md](docs/overlay-shell.md) | Branch `overlay-shell`: the plugin as panels on the map - plan, rules, status |
 | [docs/chemduck-parity.md](docs/chemduck-parity.md) | This plugin vs ChemDuck/Chemrooms on one facility: where they differ, why, and the rules to agree |
 | [docs/chemduck-spike.md](docs/chemduck-spike.md) | Chemrooms' data code on a plugin page through the bridge, no SQLRooms UI: works, and what it needs |
