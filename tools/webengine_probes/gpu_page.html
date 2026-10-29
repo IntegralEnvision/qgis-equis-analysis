@@ -1,0 +1,152 @@
+<!doctype html><meta charset="utf-8"><title>gpu probe</title>
+<style>html,body{margin:0;background:#fff}
+#scene{position:absolute;left:0;top:0;width:400px;height:300px}
+#html{position:absolute;left:420px;top:20px;width:300px;height:200px;background:#ffff00;font:24px sans-serif}</style>
+<canvas id="scene" width="400" height="300"></canvas><div id="html">HTML OK</div>
+<script type="module">
+const R = {};
+function gl(kind) {
+  const c = document.createElement("canvas"); c.width = c.height = 8;
+  const g = c.getContext(kind, { preserveDrawingBuffer: true });
+  if (!g) return { ok: false, error: "no " + kind + " context" };
+  const dbg = g.getExtension("WEBGL_debug_renderer_info");
+  g.clearColor(1, 0.5, 0, 1); g.clear(g.COLOR_BUFFER_BIT);
+  const px = new Uint8Array(4); g.readPixels(4, 4, 1, 1, g.RGBA, g.UNSIGNED_BYTE, px);
+  return { ok: px[0] === 255 && px[1] >= 127 && px[1] <= 128 && px[2] === 0,
+           pixel: Array.from(px),
+           renderer: dbg ? g.getParameter(dbg.UNMASKED_RENDERER_WEBGL) : g.getParameter(g.RENDERER),
+           vendor: dbg ? g.getParameter(dbg.UNMASKED_VENDOR_WEBGL) : g.getParameter(g.VENDOR) };
+}
+function scene() {
+  // What the view SHOWS: magenta if WebGL drew it, cyan if only 2D could.
+  const c = document.getElementById("scene");
+  const g = c.getContext("webgl2") || c.getContext("webgl");
+  if (!g) { const x = c.getContext("2d"); x.fillStyle = "#00ffff"; x.fillRect(0, 0, 400, 300); return "2d cyan"; }
+  g.clearColor(1, 0, 1, 1); g.clear(g.COLOR_BUFFER_BIT); return "webgl magenta";
+}
+function sync(g) { const px = new Uint8Array(4); g.readPixels(0, 0, 1, 1, g.RGBA, g.UNSIGNED_BYTE, px); }
+function benchGL(n) {
+  const c = document.createElement("canvas"); c.width = c.height = 1024;
+  const g = c.getContext("webgl2");
+  if (!g) return { ok: false, n, error: "no webgl2" };
+  const sh = (t, s) => { const o = g.createShader(t); g.shaderSource(o, s); g.compileShader(o); return o; };
+  const pr = g.createProgram();
+  g.attachShader(pr, sh(g.VERTEX_SHADER, "#version 300 es\nin vec2 p; void main(){gl_Position=vec4(p,0,1);gl_PointSize=3.0;}"));
+  g.attachShader(pr, sh(g.FRAGMENT_SHADER, "#version 300 es\nprecision mediump float; out vec4 o; void main(){o=vec4(0.1,0.3,0.8,0.5);}"));
+  g.linkProgram(pr); g.useProgram(pr);
+  const pts = new Float32Array(2 * n); for (let i = 0; i < pts.length; i++) pts[i] = Math.random() * 2 - 1;
+  let t = performance.now();
+  const buf = g.createBuffer(); g.bindBuffer(g.ARRAY_BUFFER, buf); g.bufferData(g.ARRAY_BUFFER, pts, g.STATIC_DRAW);
+  const loc = g.getAttribLocation(pr, "p"); g.enableVertexAttribArray(loc); g.vertexAttribPointer(loc, 2, g.FLOAT, false, 0, 0);
+  g.enable(g.BLEND); g.blendFunc(g.SRC_ALPHA, g.ONE_MINUS_SRC_ALPHA);
+  sync(g); const upload = performance.now() - t;
+  const draws = [];
+  for (let k = 0; k < 3; k++) { t = performance.now(); g.clear(g.COLOR_BUFFER_BIT); g.drawArrays(g.POINTS, 0, n); sync(g); draws.push(+(performance.now() - t).toFixed(1)); }
+  return { ok: true, n, uploadMs: +upload.toFixed(1), drawMs: draws };
+}
+function bench2d(n) {
+  const c = document.createElement("canvas"); c.width = c.height = 1024;
+  const x = c.getContext("2d"); x.fillStyle = "rgba(25,76,204,0.5)";
+  const draws = [];
+  for (let k = 0; k < 2; k++) {
+    const t = performance.now();
+    x.clearRect(0, 0, 1024, 1024);
+    x.beginPath();
+    for (let i = 0; i < n; i++) { const px = Math.random() * 1024, py = Math.random() * 1024; x.moveTo(px + 1.5, py); x.arc(px, py, 1.5, 0, 6.2832); }
+    x.fill(); x.getImageData(0, 0, 1, 1);
+    draws.push(+(performance.now() - t).toFixed(1));
+  }
+  return { n, drawMs: draws };
+}
+async function gpu() {
+  if (!navigator.gpu) return { ok: false, error: "navigator.gpu undefined" };
+  const a = await navigator.gpu.requestAdapter();
+  if (!a) return { ok: false, error: "requestAdapter returned null" };
+  const info = a.info || {};
+  const d = await a.requestDevice();
+  const n = 4096, src = Float32Array.from({ length: n }, (_, i) => i);
+  const buf = d.createBuffer({ size: src.byteLength, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST });
+  d.queue.writeBuffer(buf, 0, src);
+  const read = d.createBuffer({ size: src.byteLength, usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST });
+  const mod = d.createShaderModule({ code: "@group(0) @binding(0) var<storage, read_write> v: array<f32>;\n" +
+    "@compute @workgroup_size(64) fn main(@builtin(global_invocation_id) id: vec3u) { v[id.x] = v[id.x] * 2.0; }" });
+  const p = d.createComputePipeline({ layout: "auto", compute: { module: mod, entryPoint: "main" } });
+  const bg = d.createBindGroup({ layout: p.getBindGroupLayout(0), entries: [{ binding: 0, resource: { buffer: buf } }] });
+  const e = d.createCommandEncoder(); const pass = e.beginComputePass();
+  pass.setPipeline(p); pass.setBindGroup(0, bg); pass.dispatchWorkgroups(n / 64); pass.end();
+  e.copyBufferToBuffer(buf, 0, read, 0, src.byteLength); d.queue.submit([e.finish()]);
+  await read.mapAsync(GPUMapMode.READ);
+  const out = new Float32Array(read.getMappedRange().slice(0));
+  let right = 0; for (let i = 0; i < n; i++) if (out[i] === 2 * i) right++;
+  return { ok: right === n, right, n, adapter: [info.vendor, info.architecture, info.device, info.description].filter(Boolean).join(" ") };
+}
+for (const k of ["webgl", "webgl2"]) { try { R[k] = gl(k); } catch (e) { R[k] = { ok: false, error: String(e) }; } }
+try { R.webgpu = await gpu(); } catch (e) { R.webgpu = { ok: false, error: String(e) }; }
+try { R.scene = scene(); } catch (e) { R.scene = "error " + e; }
+R.benchGL = []; R.bench2d = [];
+for (const n of [25000, 250000, 1000000]) {
+  try { R.benchGL.push(benchGL(n)); } catch (e) { R.benchGL.push({ n, error: String(e) }); }
+  try { R.bench2d.push(bench2d(n)); } catch (e) { R.bench2d.push({ n, error: String(e) }); }
+}
+R.secureContext = isSecureContext;
+
+// Frames the view actually shows: a full-view canvas redrawn every animation
+// frame for 3 s. With software compositing each WebGL frame is read back.
+function intervals(run) {
+  return new Promise((done) => {
+    const ts = []; const t0 = performance.now();
+    function frame(t) { ts.push(t); run(); if (t - t0 < 3000) requestAnimationFrame(frame); else done(ts); }
+    requestAnimationFrame(frame);
+  });
+}
+function stats(ts) {
+  const d = ts.slice(1).map((t, i) => t - ts[i]).sort((a, b) => a - b);
+  const q = (p) => +d[Math.min(d.length - 1, Math.floor(p * d.length))].toFixed(1);
+  return { frames: ts.length, seconds: +((ts[ts.length - 1] - ts[0]) / 1000).toFixed(2), p50: q(0.5), p95: q(0.95), max: q(1) };
+}
+async function fps() {
+  // Hidden, not removed: the screenshot after this must still find them.
+  const keep = ["scene", "html"].map((id) => document.getElementById(id));
+  for (const el of keep) el.style.visibility = "hidden";
+  const out = {};
+  for (const [kind, n] of [["webgl2", 250000], ["webgl2", 1000000], ["2d", 25000]]) {
+    const c = document.createElement("canvas");
+    c.width = innerWidth * devicePixelRatio; c.height = innerHeight * devicePixelRatio;
+    c.style.cssText = "position:absolute;left:0;top:0;width:100vw;height:100vh";
+    document.body.appendChild(c);
+    let run;
+    if (kind === "webgl2") {
+      const g = c.getContext("webgl2");
+      if (!g) { out[kind + "_" + n] = "no webgl2"; c.remove(); continue; }
+      const sh = (t, s) => { const o = g.createShader(t); g.shaderSource(o, s); g.compileShader(o); return o; };
+      const pr = g.createProgram();
+      g.attachShader(pr, sh(g.VERTEX_SHADER, "#version 300 es\nin vec2 p; uniform float k; void main(){gl_Position=vec4(p.x*cos(k)-p.y*sin(k),p.x*sin(k)+p.y*cos(k),0,1);gl_PointSize=2.0;}"));
+      g.attachShader(pr, sh(g.FRAGMENT_SHADER, "#version 300 es\nprecision mediump float; out vec4 o; void main(){o=vec4(0.1,0.3,0.8,0.6);}"));
+      g.linkProgram(pr); g.useProgram(pr);
+      const pts = new Float32Array(2 * n); for (let i = 0; i < pts.length; i++) pts[i] = Math.random() * 2 - 1;
+      g.bindBuffer(g.ARRAY_BUFFER, g.createBuffer()); g.bufferData(g.ARRAY_BUFFER, pts, g.STATIC_DRAW);
+      const loc = g.getAttribLocation(pr, "p"); g.enableVertexAttribArray(loc); g.vertexAttribPointer(loc, 2, g.FLOAT, false, 0, 0);
+      const k = g.getUniformLocation(pr, "k"); let a = 0;
+      g.viewport(0, 0, c.width, c.height); g.enable(g.BLEND); g.blendFunc(g.SRC_ALPHA, g.ONE_MINUS_SRC_ALPHA);
+      run = () => { g.clearColor(1, 1, 1, 1); g.clear(g.COLOR_BUFFER_BIT); g.uniform1f(k, a += 0.02); g.drawArrays(g.POINTS, 0, n); };
+    } else {
+      const x = c.getContext("2d");
+      const pts = Float32Array.from({ length: 2 * n }, () => Math.random());
+      let a = 0;
+      run = () => {
+        x.clearRect(0, 0, c.width, c.height); x.fillStyle = "rgba(25,76,204,0.6)"; x.beginPath(); a += 3;
+        for (let i = 0; i < n; i++) { const px = (pts[2 * i] * c.width + a) % c.width, py = pts[2 * i + 1] * c.height; x.moveTo(px + 1, py); x.arc(px, py, 1, 0, 6.2832); }
+        x.fill();
+      };
+    }
+    out[kind + "_" + n] = stats(await intervals(run));
+    c.remove();
+  }
+  out.canvasPx = [innerWidth * devicePixelRatio, innerHeight * devicePixelRatio];
+  for (const el of keep) el.style.visibility = "visible";
+  scene();
+  return out;
+}
+if (location.search.includes("fps")) { try { R.fps = await fps(); } catch (e) { R.fps = "error " + e; } }
+window.__probe = R;
+</script>

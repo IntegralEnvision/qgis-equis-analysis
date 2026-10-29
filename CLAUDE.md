@@ -46,6 +46,8 @@ tools/test_analysis_task.py   (the Analysis chooser's worker, in the task manage
 tools/try_scatter.py   tools/try_analysis_tab.py   (console probes: US-24, the Analysis tab)
 tools/try_overlay.py   (NOT a console probe: run by `qgis --code` in a throwaway
                         profile; drives the overlay shell end to end, 13 checks, quits)
+tools/webengine_probes/run_wasm.ps1   run_gpu.ps1   (also `qgis --code`, from PowerShell:
+                        WASM on a plugin page, and whether it can have a GPU)
 tools/mosaic_poc/overlay.py   brush_scale.py   temporal_scale.py
 ```
 
@@ -224,7 +226,7 @@ the exporter follows.
 | [docs/mosaic-qgis-plugin-architecture.md](docs/mosaic-qgis-plugin-architecture.md) | The Mosaic + WebEngine design sketch |
 | [docs/phase0-substrate.md](docs/phase0-substrate.md) | Bundling DuckDB into the plugin — measured |
 | [docs/phase1-substrate-parity.md](docs/phase1-substrate-parity.md) | The DuckDB store and its parity gate — measured |
-| [docs/webengine-support.md](docs/webengine-support.md) | Which QGIS builds can run a web view — measured |
+| [docs/webengine-support.md](docs/webengine-support.md) | Which QGIS builds can run a web view, and what WASM can do there — measured |
 | [tools/mosaic_poc/README.md](tools/mosaic_poc/README.md) | Overlay, brush-scale and temporal spikes — measured |
 | [docs/selection-ui-guidance.md](docs/selection-ui-guidance.md) | Why the panel is shaped the way it is |
 | [pipeline/README.md](pipeline/README.md) | Exporting a facility to parquet: survey, slice, collect, repack, publish, and the unattended night |

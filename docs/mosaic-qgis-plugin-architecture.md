@@ -264,7 +264,7 @@ coordinator.connect(new CanvasLinkClient($canvas, bridge, "samples"));
 > not the expected route. Caveat: one machine, one build — nothing between
 > QGIS 3.34 and 4.2 has been measured.
 
-Since no WASM or WebGL is needed, the GPU/`SharedArrayBuffer` problems that block Qgis2threejs don't apply here. The only hard requirement is a modern JS engine plus `QWebChannel`.
+Since no WASM or WebGL is needed, the GPU/`SharedArrayBuffer` problems that block Qgis2threejs don't apply here. The only hard requirement is a modern JS engine plus `QWebChannel`. (Measured 2026-10-27/29, QGIS 4.2.1 and 4.2.3 on Windows. By default Chromium starts with `--disable-gpu`, so there is no WebGL. `QTWEBENGINE_CHROMIUM_FLAGS="--use-gl=angle --use-angle=d3d11 --disable-gpu-compositing"`, set before QGIS starts, gives hardware WebGL 2 that displays, but no WebGPU. A custom-scheme page cannot become cross-origin isolated, so there are no WASM threads; single-threaded WASM works. See [webengine-support.md](webengine-support.md#webassembly-on-a-plugin-page).)
 
 **Fallback:** the connector interface is the seam. Swap `qtChannelConnector` for Mosaic's stock `restConnector("http://127.0.0.1:PORT")`, run a small HTTP server thread in the plugin (Mosaic ships a Python `duckdb-server` package that speaks its protocol), and open the same page in the system browser. Map linkage then goes over the same HTTP server. The JS dashboard code doesn't change.
 
