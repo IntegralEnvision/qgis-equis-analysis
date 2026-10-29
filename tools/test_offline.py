@@ -1133,6 +1133,38 @@ def main():
                   "exported" in panel.status_label.text().lower()
                   and "exported.csv" in panel.status_label.text(),
                   panel.status_label.text()[:70])
+
+            # AND AFTER THE STORE LANDS. Everything above ran on the table,
+            # before the background store build finished. Once it lands it
+            # answers `_analysis`, and the live path builds it WITHOUT the
+            # report's own columns (with_raw=False) - so an export that read
+            # `_analysis` raised StoreError from then on (found 2026-10-28).
+            # Installed here as `_on_store_ready` would, without the wait.
+            from equis_loader.store import ReportStore
+            held_store = panel._report_store
+            landed = ReportStore.from_table(panel._report_table)
+            panel._report_store = landed
+            try:
+                check("export: the store has landed, without the raw columns",
+                      panel._analysis is landed and not landed.has_raw)
+                os.remove(export_path)
+                try:
+                    panel._on_export_csv()
+                    raised = ""
+                except Exception as exc:       # noqa: BLE001
+                    raised = "%s: %s" % (type(exc).__name__, exc)
+                check("export: after the store lands, no error", not raised,
+                      raised[:90])
+                again = (list(csv.reader(io.StringIO(
+                    open(export_path, encoding="utf-8-sig").read())))
+                    if os.path.exists(export_path) else [])
+                check("export: after the store lands, the report's own columns",
+                      bool(again) and again[0] == list(panel._report_table.headers)
+                      and len(again) == len(written),
+                      "%d rows" % max(len(again) - 1, 0))
+            finally:
+                panel._report_store = held_store
+                landed.close()
         finally:
             dlg.QFileDialog.getSaveFileName = held_dialog_fn
 

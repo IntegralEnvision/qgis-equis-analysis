@@ -80,9 +80,21 @@ export function histogramSql({
   } else if (chemical) {
     where.push(`coalesce(chemical, '') = ${quote(chemical)}`);
   }
-  if (matrix) where.push(`coalesce(matrix, '') = ${quote(matrix)}`);
-  if (fraction) where.push(`coalesce(fraction, '') = ${quote(fraction)}`);
-  if (method) where.push(`coalesce(method, '') = ${quote(method)}`);
+  // Codes as the store compares them (store._code_filter): upper-case, any
+  // of a list. The host sends ReportStore.filter_codes for each, null being
+  // "no filter" - nothing chosen, or a column the source lacks, which must
+  // match everything rather than drop every row. A bare string is accepted
+  // as a list of one.
+  for (const [column, wanted] of [["matrix", matrix], ["fraction", fraction],
+                                  ["method", method]]) {
+    // Neither trimmed nor emptied: these are the store's codes already, and
+    // [""] is its "blank codes only", as it compares them.
+    const codes = (Array.isArray(wanted) ? wanted : wanted == null ? [] : [wanted])
+      .map((code) => String(code ?? "").toUpperCase());
+    if (codes.length) {
+      where.push(`upper(coalesce(${column}, '')) IN (${codes.map(quote).join(", ")})`);
+    }
+  }
 
   // US-6: the map's selection narrows the chart. An empty ARRAY is not the
   // same as null - it means "these zero locations", which is what a user

@@ -58,6 +58,35 @@ test("CAS RN identifies a chemical when present, the name otherwise", () => {
   assert.match(byName, /chemical, ''\) = 'Nickel'/);
 });
 
+test("matrix, fraction and method compare case-blind, as the store does", () => {
+  // store._code_filter compares upper(coalesce(col, '')); this compared the
+  // raw text, so 'so' found nothing in a report coded SO (found 2026-10-28).
+  const sql = histogramSql({ chemical: "Nickel", matrix: "so",
+                             fraction: "d", method: "sw6010" });
+  assert.match(sql, /upper\(coalesce\(matrix, ''\)\) IN \('SO'\)/);
+  assert.match(sql, /upper\(coalesce\(fraction, ''\)\) IN \('D'\)/);
+  assert.match(sql, /upper\(coalesce\(method, ''\)\) IN \('SW6010'\)/);
+});
+
+test("every matrix of a multi-matrix layer is binned, not the first", () => {
+  // A layer over sediment AND tailings (both solids, both mg/kg) was binned
+  // over sediment alone: the host sent only the first of the list.
+  const sql = histogramSql({ chemical: "Nickel", matrix: ["SE", "tails"],
+                             method: ["M1", "M2"] });
+  assert.match(sql, /upper\(coalesce\(matrix, ''\)\) IN \('SE', 'TAILS'\)/);
+  assert.match(sql, /upper\(coalesce\(method, ''\)\) IN \('M1', 'M2'\)/);
+});
+
+test("an empty or absent code list is no filter", () => {
+  // The store's rule: None or an empty collection filters nothing. The host
+  // also sends null for a column the source lacks, which must match
+  // everything rather than drop every row.
+  for (const matrix of [null, undefined, []]) {
+    const sql = histogramSql({ chemical: "Nickel", matrix });
+    assert.ok(!/coalesce\(matrix/.test(sql), `matrix=${JSON.stringify(matrix)}`);
+  }
+});
+
 test("quotes in an analyte name cannot break the SQL", () => {
   const sql = histogramSql({ chemical: "O'Brien's compound" });
   assert.match(sql, /'O''Brien''s compound'/);
@@ -135,7 +164,7 @@ test("each aggregation orders the way store.aggregate does", () => {
 
 test("the method filter is applied when given", () => {
   assert.match(histogramSql({ chemical: "Nickel", method: "SW6020A" }),
-               /method, ''\) = 'SW6020A'/);
+               /upper\(coalesce\(method, ''\)\) IN \('SW6020A'\)/);
   assert.ok(!histogramSql({ chemical: "Nickel" }).includes("method, ''"));
 });
 

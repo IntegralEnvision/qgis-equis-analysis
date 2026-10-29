@@ -330,6 +330,16 @@ class ReportTable:
                 if want in upper:
                     self._index[key] = upper.index(want)
                     break
+        # Every unit column present, in COLUMNS order, for cell() to coalesce
+        # across. A non-detect reports no result and no RESULT_UNIT, only the
+        # limit and ITS unit in REPORT_RESULT_UNIT. Taking the first column
+        # that existed read every live non-detect as unitless where the same
+        # row from parquet read ug/L (ReportStore.from_parquet coalesces),
+        # and hid a 1,000x unit mix from the guard: Lead at 3 ug/L beside a
+        # non-detect at 0.002 mg/L read as ug/L and blank (found 2026-10-29,
+        # tools/test_store_parity.py's unit checks).
+        self._unit_at = [upper.index(want) for want in COLUMNS["unit"]
+                         if want in upper]
         # Row lookup by chemical, and by (chemical, location). Built on first
         # use rather than here: loading a report should not pay for an index
         # nobody asks for, and reports that cannot drive the map are discarded
@@ -486,6 +496,13 @@ class ReportTable:
         return missing_required(lambda key: self._index.get(key, -1) >= 0)
 
     def cell(self, row, key):
+        if key == "unit":
+            for index in self._unit_at:
+                if index < len(row):
+                    unit = (row[index] or "").strip()
+                    if unit:
+                        return unit
+            return ""
         index = self._index.get(key, -1)
         if index < 0 or index >= len(row):
             return ""
@@ -819,6 +836,36 @@ class ReportTable:
                 entry["detect"] = detect
                 entry["at_limit"] = at_limit
         return summary
+
+    def units_for(self, chemical, cas_rn=None, detected_only=False,
+                  non_detect=ND_HALF, matrix=ALL_MATRICES,
+                  fraction=ANY_FRACTION, method=ALL_METHODS):
+        """The units this selection reports in, commonest first.
+
+        ReportStore.units_for's twin, for the mixed-unit guard. Without it
+        the guard was skipped on a live or cached report until its store
+        landed in the background, so a map built in those first seconds was
+        unchecked (found 2026-10-28). Same predicate as the store: the
+        filters, a usable value under `non_detect`, no location required.
+        Returns [(unit, rows), ...], '' for a row with no unit at all.
+        """
+        if self.column("unit") < 0:
+            return []
+        counts = {}
+        for row in self._candidate_rows(chemical, cas_rn):
+            if not self._matches(row, chemical, cas_rn):
+                continue
+            if not (self._in_matrix(row, matrix)
+                    and self._in_fraction(row, fraction)
+                    and self._in_method(row, method)):
+                continue
+            if detected_only and not self.is_detected(row):
+                continue
+            if self.row_value(row, non_detect=non_detect)[0] is None:
+                continue
+            unit = self.cell(row, "unit")
+            counts[unit] = counts.get(unit, 0) + 1
+        return sorted(counts.items(), key=lambda item: (-item[1], item[0]))
 
     def rows_for(self, chemical, cas_rn=None, detected_only=False,
                  non_detect=ND_HALF, matrix=ALL_MATRICES,

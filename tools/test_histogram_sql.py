@@ -202,6 +202,97 @@ check("most_recent picks the same values as store.aggregate",
 check("binning the whole store is refused, not attempted",
       refusal.startswith("threw:"), refusal[:80])
 
+
+# --- THE FILTERS SELECT THE STORE'S ROWS, under every combination ---------
+# The page writes its own WHERE over v_results, a second copy of the
+# matrix / fraction / method filters, and it drifted (found 2026-10-28): it
+# compared codes as typed where store._code_filter compares upper-case; the
+# host sent only the FIRST matrix, fraction and method of a layer, so a
+# sediment-and-tailings layer was binned over sediment alone; and a filter
+# on a column the source lacks dropped every row (the view carries it as
+# NULL), where CLAUDE.md's rule is that it matches everything. The host now
+# sends ReportStore.filter_codes for each, as dialog._chart_scope does here.
+# Before the fix: 288 of 864 combinations differed on the parity fixture,
+# 840 of 864 with no matrix, fraction or method column.
+import itertools  # noqa: E402
+
+from equis_loader import report_data as rd  # noqa: E402
+from equis_loader.store import ND_COLUMN  # noqa: E402
+import test_store_parity as parity  # noqa: E402
+
+COMBINATIONS = """
+import { readFileSync } from "node:fs";
+import { histogramSql } from "./src/histogram.js";
+// On stdin: every combination is past Windows' command-line limit.
+const asks = JSON.parse(readFileSync(0, "utf-8"));
+console.log(JSON.stringify(asks.map((a) => histogramSql(a))));
+"""
+
+
+def combination_sql(asks):
+    web = os.path.join(ROOT, "web")
+    path = os.path.join(web, "_sqlcombos.mjs")
+    with open(path, "w", encoding="utf-8") as handle:
+        handle.write(COMBINATIONS)
+    try:
+        result = subprocess.run(["node", "_sqlcombos.mjs"], input=json.dumps(asks),
+                                cwd=web, capture_output=True, text=True)
+    finally:
+        try:
+            os.unlink(path)
+        except OSError:
+            pass
+    if result.returncode:
+        raise RuntimeError("node failed: %s" % result.stderr[:600])
+    return json.loads(result.stdout.strip())
+
+
+def filters_match_store(label, headers, rows):
+    table = ReportTable(headers, rows)
+    combo_store = ReportStore.from_table(table)
+    codes = combo_store.filter_codes
+    analytes = [(a["chemical"], a["cas_rn"]) for a in table.analytes()]
+    combos = list(itertools.product(
+        analytes[:4],
+        (rd.ALL_MATRICES, "WG", "wg", ("WG", "SO"), ("so", "WG"), ()),
+        (rd.ANY_FRACTION, "D", ("D", "T"), ("t",)),
+        (rd.ALL_METHODS, "M1", ("m1", "ICM40B")),
+        (rd.ND_HALF, rd.ND_FULL, rd.ND_EXCLUDE)))
+    asks = [dict(chemical=c, casRn=k or None, matrix=codes("matrix", m),
+                 fraction=codes("fraction", f), method=codes("method", me),
+                 ndColumn=ND_COLUMN.get(nd, "value_half"))
+            for (c, k), m, f, me, nd in combos]
+    bad = []
+    for ((chemical, cas), matrix, fraction, method, nd), sql in zip(
+            combos, combination_sql(asks)):
+        got = sorted(r[0] for r in combo_store.con.execute(
+            "SELECT row_id FROM (%s)" % sql).fetchall())
+        # The rows the PYTHON implementation's filters keep, by position (the
+        # store's row_id): independent of filter_codes, which the store's own
+        # _where calls - a predicate taken from there moved with the rule
+        # under test and let a broken filter_codes pass.
+        want = [i for i, rw in enumerate(table.rows)
+                if table._matches(rw, chemical, cas)
+                and table._in_matrix(rw, matrix)
+                and table._in_fraction(rw, fraction)
+                and table._in_method(rw, method)
+                and table.row_value(rw, non_detect=nd)[0] is not None]
+        if got != want:
+            bad.append((chemical, matrix, fraction, method, nd, len(want), len(got)))
+    check("%s: the filters select the store's rows, %d combinations"
+          % (label, len(combos)), not bad,
+          "" if not bad else "%d differ; first (chemical, matrix, fraction, "
+          "method, nd, store rows, histogram rows): %r" % (len(bad), bad[0]))
+    combo_store.close()
+
+
+filters_match_store("parity fixture", parity.FULL_HEADERS, parity.awkward_rows())
+absent = [i for i, h in enumerate(parity.FULL_HEADERS)
+          if h not in ("MATRIX_CODE", "FRACTION", "ANALYTIC_METHOD")]
+filters_match_store("no matrix/fraction/method columns",
+                    [parity.FULL_HEADERS[i] for i in absent],
+                    [[r[i] for i in absent] for r in parity.awkward_rows()])
+
 print()
 if FAILURES:
     print("FAILED: %s" % ", ".join(FAILURES))

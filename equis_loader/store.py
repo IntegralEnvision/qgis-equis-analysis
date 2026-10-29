@@ -1052,17 +1052,32 @@ class ReportStore(object):
         collection means no filter, a column the report lacks means no filter,
         and comparison is case-insensitive.
         """
-        if wanted is None:
+        codes = self.filter_codes(key, wanted)
+        if codes is None:
             return "", []
-        if key not in self.present:
-            return "", []
-        if isinstance(wanted, (list, tuple, set, frozenset)):
-            codes = [str(w).upper() for w in wanted if str(w or "").strip()]
-            if not codes:
-                return "", []
+        if len(codes) > 1:
             marks = ", ".join("?" * len(codes))
             return ("upper(coalesce(%s, '')) IN (%s)" % (column, marks)), codes
-        return ("upper(coalesce(%s, '')) = ?" % column), [str(wanted or "").upper()]
+        return ("upper(coalesce(%s, '')) = ?" % column), codes
+
+    def filter_codes(self, key, wanted):
+        """The codes a matrix/fraction/method filter compares, or None.
+
+        None is "no filter": nothing wanted, an empty collection, or a column
+        this source lacks. Otherwise the codes upper-cased, to compare with
+        upper(coalesce(column, '')). Public because the histogram's SQL is
+        written by the page (web/src/histogram.js): the host sends it this,
+        so the page filters by the store's answer instead of its own. It
+        once compared codes as typed, binned only a layer's first matrix,
+        and dropped every row on a column the source lacks (found
+        2026-10-28; tools/test_histogram_sql.py).
+        """
+        if wanted is None or key not in self.present:
+            return None
+        if isinstance(wanted, (list, tuple, set, frozenset)):
+            codes = [str(w).upper() for w in wanted if str(w or "").strip()]
+            return codes or None
+        return [str(wanted or "").upper()]
 
     def _analyte_filter(self, chemical, cas_rn):
         """_matches(), as SQL.

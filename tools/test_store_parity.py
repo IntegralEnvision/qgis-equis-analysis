@@ -244,6 +244,75 @@ def direct_scope_checks():
           and before[0])
 
 
+def unit_column_checks():
+    """A non-detect's unit is in REPORT_RESULT_UNIT, whatever the source.
+
+    A non-detect reports no result, so RESULT_UNIT is blank on its row and
+    the unit is that of the limit, in REPORT_RESULT_UNIT. The parquet store
+    coalesced the two; ReportTable took the first column that existed, so
+    the same row read ug/L from parquet and unitless from a live report
+    (found 2026-10-28). Parity between the table and a store built FROM the
+    table can't see that - both read table.cell - so the parquet store is
+    asked too, and the answer is asserted outright.
+    """
+    print("")
+    headers = FULL_HEADERS + ["REPORT_RESULT_UNIT"]
+
+    def r(loc, numeric, reported, limit, unit, report_unit, detect, chem="Arsenic"):
+        return row(loc, chem, "7440-38-2" if chem == "Arsenic" else "7439-92-1",
+                   "01/05/2020", numeric, reported, limit, unit, detect) + [report_unit]
+
+    rows = [
+        r("MW-01", "4.0", "4.0", "1.0", "ug/L", "ug/L", "Y"),
+        # The non-detect: no result, no result unit, the limit's unit beside it.
+        r("MW-02", "", "1.0", "1.0", "", "ug/L", "N"),
+        # Whitespace is no unit either.
+        r("MW-03", "", "2.0", "2.0", "  ", "ug/L", "N"),
+        # Both blank: unitless, and said so rather than invented.
+        r("MW-04", "", "1.0", "1.0", "", "", "N"),
+        # The mix the guard exists for, reached only through REPORT_RESULT_UNIT.
+        r("MW-05", "3.0", "3.0", "1.0", "ug/L", "ug/L", "Y", chem="Lead"),
+        r("MW-06", "", "0.002", "0.002", "", "mg/L", "N", chem="Lead"),
+    ]
+    table, store = build(headers, rows)
+
+    import tempfile
+    folder = tempfile.mkdtemp(prefix="parity_units_")
+    path = os.path.join(folder, "units.parquet").replace("\\", "/")
+    con = st.duckdb_module().connect()
+    con.execute("CREATE TABLE t (%s)" % ", ".join('"%s" VARCHAR' % h for h in headers))
+    con.executemany("INSERT INTO t VALUES (%s)" % ", ".join("?" * len(headers)),
+                    [[cell if cell != "" else None for cell in rw] for rw in rows])
+    con.execute("COPY t TO '%s' (FORMAT PARQUET)" % path)
+    con.close()
+    parquet = st.ReportStore.from_parquet(path, hive=False)
+
+    def unit_at(source, chemical, location):
+        rws, _ = source.rows_for(chemical, None, non_detect=rd.ND_FULL)
+        return [x["unit"] for x in rws if x["location"] == location]
+
+    sources = (("python", table), ("sql from the table", store),
+               ("sql over parquet", parquet))
+    for name, source in sources:
+        check("units/%s: a non-detect reads its limit's unit" % name,
+              unit_at(source, "Arsenic", "MW-02") == ["ug/L"],
+              repr(unit_at(source, "Arsenic", "MW-02")))
+        check("units/%s: a blank-but-spaced unit falls through too" % name,
+              unit_at(source, "Arsenic", "MW-03") == ["ug/L"],
+              repr(unit_at(source, "Arsenic", "MW-03")))
+        check("units/%s: no unit anywhere stays unitless" % name,
+              unit_at(source, "Arsenic", "MW-04") == [""],
+              repr(unit_at(source, "Arsenic", "MW-04")))
+        units = getattr(source, "units_for", None)
+        found = units("Arsenic", None, non_detect=rd.ND_FULL) if units else None
+        check("units/%s: units_for counts the non-detects as ug/L" % name,
+              found == [("ug/L", 3), ("", 1)], repr(found))
+        lead = units("Lead", None, non_detect=rd.ND_FULL) if units else None
+        check("units/%s: a mix through REPORT_RESULT_UNIT is seen" % name,
+              lead is not None and sorted(u for u, _ in lead) == ["mg/L", "ug/L"],
+              repr(lead))
+
+
 def build(headers, rows):
     table = rd.ReportTable(headers, rows)
     # with_raw so filtered_rows can be compared; the default is off
@@ -393,6 +462,41 @@ def compare_all(label, table, store):
           "\n      python headers/rows: %r\n      sql   headers/rows: %r"
           % (export_bad[0][3], export_bad[0][4]))
 
+    # count_for: the footer's "N locations - M results would map". Its
+    # docstring promises the same predicate as rows_for, so the build can't
+    # draw fewer than the footer said; nothing held it to that until
+    # 2026-10-29. ReportTable has no count_for (the panel counts its rows),
+    # so the store is held to the table's rows_for, counted.
+    #
+    # units_for: the mixed-unit guard. ReportTable had none, so the guard
+    # was skipped until a live report's store landed (found 2026-10-28).
+    count_bad, units_bad = [], []
+    table_units = getattr(table, "units_for", None)
+    combos = itertools.product(
+        analytes[:4], (rd.ND_HALF, rd.ND_FULL, rd.ND_EXCLUDE),
+        (rd.ALL_MATRICES, "WG", "SO"), (rd.ANY_FRACTION, "D", ["D", "T"]),
+        (rd.ALL_METHODS, "M1"), (False, True))
+    for (chemical, cas), nd, matrix, fraction, method, only in combos:
+        ask = dict(detected_only=only, non_detect=nd, matrix=matrix,
+                   fraction=fraction, method=method)
+        rows, _ = table.rows_for(chemical, cas, **ask)
+        expected = (len({r["location"] for r in rows}), len(rows))
+        got = store.count_for(chemical, cas, **ask)
+        if tuple(got) != expected:
+            count_bad.append((chemical, ask, expected, got))
+        if table_units is not None:
+            left = table_units(chemical, cas, **ask)
+            right = store.units_for(chemical, cas, **ask)
+            if left != right:
+                units_bad.append((chemical, ask, left, right))
+    check("%s: count_for equals the table's rows_for, counted" % label,
+          not count_bad, "" if not count_bad else
+          "\n      first mismatch: %r" % (count_bad[0],))
+    check("%s: ReportTable answers units_for" % label, table_units is not None)
+    check("%s: units_for matches" % label, not units_bad,
+          "" if not units_bad else
+          "\n      first mismatch: %r" % (units_bad[0],))
+
     check("%s: series over %d location/analyte/convention combinations"
           % (label, series_checked), not series_bad,
           "" if not series_bad else
@@ -436,6 +540,7 @@ def main():
     scoped("lean", lean_table, lean_store)
 
     direct_scope_checks()
+    unit_column_checks()
 
     # WHICH COLUMNS A SOURCE CANNOT BE VALUED WITHOUT. Both implementations
     # read rd.REQUIRED_FOR_ANALYSIS, and must agree on every case: the panel

@@ -89,9 +89,12 @@ if ok:
     except (AttributeError, OSError):
         source = ""
     if source:
-        reads_table = "self._report_table.filtered_rows(" in source
+        # The table when there is one; the store only for a parquet source,
+        # which has no table and whose store carries the raw columns.
+        reads_table = ("self._report_table if self._report_table is not None"
+                       in source)
         reads_seam = "self._analysis.filtered_rows(" in source
-        print("[%s] export reads _report_table, not _analysis (1b.5)%s"
+        print("[%s] export reads _report_table when there is one (1b.5)%s"
               % ("PASS" if reads_table and not reads_seam else "FAIL",
                  "" if reads_table and not reads_seam
                  else " - the store does not carry the report's own columns"))

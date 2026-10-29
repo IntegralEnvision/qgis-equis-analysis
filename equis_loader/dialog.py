@@ -2969,13 +2969,20 @@ class EquisDialog(QDockWidget):
         scope, _from_layer = self._active_scope()
         if scope is None or not scope.get("chemical"):
             return None
-        first = lambda values: (values or [None])[0]
+        # The page writes its own WHERE over the store's view, so it is
+        # handed the STORE's codes: upper-cased, every one of a multi-matrix
+        # layer, and None for a column the source lacks. This sent the first
+        # of each list as typed, so a sediment-and-tailings layer was binned
+        # over sediment alone (found 2026-10-28; tools/test_histogram_sql.py).
+        if self._report_store is None:
+            return None                      # it reads the store's view
+        codes = self._report_store.filter_codes
         return {
             "chemical": scope.get("chemical"),
             "casRn": scope.get("cas_rn") or None,
-            "matrix": first(scope.get("matrix")),
-            "fraction": first(scope.get("fraction")),
-            "method": first(scope.get("method")),
+            "matrix": codes("matrix", scope.get("matrix") or None),
+            "fraction": codes("fraction", scope.get("fraction") or None),
+            "method": codes("method", scope.get("method") or None),
             # The store's own mapping, never a second copy: two tables of
             # these names is how the page and the store come to disagree
             # about which non-detect convention a chart is showing.
@@ -4367,8 +4374,9 @@ class EquisDialog(QDockWidget):
         """
         if how == UNAGGREGATED or self._analysis is None:
             return True
-        if not hasattr(self._analysis, "units_for"):
-            return True
+        # No "has it got units_for?" escape: a ReportTable once lacked it and
+        # the guard silently passed every live report until its store landed.
+        # Both implementations answer it now (tools/test_store_parity.py).
 
         matrix = self._matrix_mode()
         fraction = self._fraction_mode()
@@ -5228,11 +5236,19 @@ class EquisDialog(QDockWidget):
         # that is the invariant on `_analysis` - so reading it here is free
         # and needs no second store. Settled as 1b.5 in
         # docs/implementation-plan.md; do not "optimise" this to `_analysis`.
-        # `_analysis`, not `_report_table`: a parquet source has no table,
-        # and its store CAN answer this - the parquet carries the report's
-        # own 69 columns, so `raw` is a view over the same files rather than
-        # a copy. Verified: 115,017 Arsenic rows exported with every column.
-        headers, rows = self._analysis.filtered_rows(
+        # A parquet source has no table, and its store CAN answer this - the
+        # parquet carries the report's own 69 columns, so `raw` is a view over
+        # the same files rather than a copy. Verified: 115,017 Arsenic rows
+        # exported with every column. So: the table when there is one, else
+        # the store. This line once read `_analysis` for both, which on the
+        # live path is the background store once it lands - built without
+        # the report's columns, so every export after the first seconds of a
+        # report raised StoreError (found 2026-10-28; tools/test_offline.py
+        # now exports again after the store lands). Both are row-scoped by
+        # `_apply_row_scope`, so either honours the dates and the QC filter.
+        source = (self._report_table if self._report_table is not None
+                  else self._analysis)
+        headers, rows = source.filtered_rows(
             analytes=analytes,
             matrix=self._matrix_mode(),
             fraction=self._fraction_mode(),
