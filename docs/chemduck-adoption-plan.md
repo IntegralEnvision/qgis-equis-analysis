@@ -113,14 +113,60 @@ None is a ChemDuck defect.
    4.2.1 here, has DuckDB 1.5.5, in ChemDuck's `SUPPORTED_DUCKDB` (1.5.4,
    1.5.5). `tools/test_chemduck_vendor.py` is the check, to run under every
    QGIS the plugin supports.
-2. **Interactive speed, unmeasured in the plugin.** ChemDuck's own numbers on
-   its 3.45M-row test facility: `point_series` for one location 2.3 s;
-   `km_quartiles` by location 3.9 s; `load_source` of one 3,395-row
-   partition 2.8 s, most of it fixed cost. The plugin's grouped series
-   answers 300 locations in 52 ms today (CLAUDE.md), and a location click
-   plots at once. Phase 1 measures each call the plugin would make, on
-   Facility A, in QGIS's Python. A slow call is then raised with its
-   number, rather than worked around here.
+2. **Interactive speed: measured, and too slow for a click.** *Measured
+   2026-10-29* by `tools/measure_chemduck_calls.py` on Facility A, ChemDuck
+   opened on its sidecars beside the plugin's store, in QGIS 4.2.3's Python
+   (DuckDB 1.5.5). Medians of three warm runs. The machine was noisy, so
+   read the ratios:
+
+   | Question | Plugin today | ChemDuck |
+   | --- | --- | --- |
+   | Map, one analyte (3 cases, both aggregations) | 0.17–0.33 s | 4.2–8.1 s |
+   | Footer count | 0.07–0.18 s | 5.3–8.4 s |
+   | One location's time series | 0.07–0.11 s | 2.7–5.3 s |
+   | Every location's series (sparklines) | 0.20–0.62 s | 5.7–17.3 s |
+   | Box plot by location (`km_quartiles`) | on the page | 1.7–2.7 s |
+   | Pivot, two analytes, WS | 1.2 s | 1.5 s |
+   | Pivot, every analyte, TAILS | 1.5 s | 6.5 s |
+   | Catalogue (sidecar `analyte_summary`) | 0.17–0.22 s | under 0.01 s |
+   | Load a 557,691-row report | 38 s | 89 s |
+   | Open the source | 0.27 s | 40.5 s (5.4–8.1 s in plain Python, same day) |
+
+   **The time is in the macros, not the data.** ChemDuck's `results` view
+   filters one analyte in 0.06 s, and `v_results_denormalized` in 0.26 s.
+   `aggregate_points` over the same rows takes 3.65 s. DuckDB's profiler
+   puts most of it in four `GROUP BY`s over at most 63,000 rows, at 1.7–4.8 s
+   each, and a 1.27 s moisture lookup over every result on every call. The
+   same aggregate mix over synthetic rows takes 0.03–0.24 s. **Raised
+   2026-10-29** with these numbers and budgets: map ≤ 0.5 s, count ≤ 0.2 s,
+   one location's series ≤ 0.2 s, sparklines ≤ 1 s, open ≤ 2 s. It is in
+   ChemDuck's `docs/qgis-plugin-request-interactive-speed.md`.
+
+   **What this changes.** Phases 2 and 3 wait on that request; they are
+   what puts these calls on a click. What moves without waiting:
+   - the catalogue, read from the published sidecars, never the live views;
+   - the two-analyte pivot;
+   - the brushed box plot, whose macro reads rows the page already holds;
+   - the parity work, which is about the rules, not speed.
+
+   **Found by the same run, for the adapter:**
+   - **Fractions are named in ChemDuck, coded in the plugin.**
+     `Total`/`Dissolved`/`N` against `T`/`D`. The adapter translates.
+   - **Most of Facility A's methods are unclassified.** Arsenic in WS Total
+     is two variables: method class `UNK` (51,906 results at 96 locations)
+     and `lab` (11,061 at 123). A map call without `p_method_class` returns
+     a point per class. Phase 2 must choose the class, or ask. The data
+     owner's method classes, or ChemDuck's seed, decide which codes are
+     `lab` and which `field`.
+   - **Publishing Facility A's sidecars took 57.7 s,** against 8.8 s on
+     2026-10-22 before the catalogue sidecars and the newer rules. That is a
+     pipeline step (phase 6), so it isn't a click. It is noted for that
+     phase.
+   - **`load_source` from a relation needs pyarrow** (`relation.arrow()`).
+     QGIS 4.2.3's Python has pyarrow 25.0.1 and pandas 3.0.6. The plugin's
+     own DuckDB bundle carries arro3, not pyarrow. So a QGIS that relies on
+     that bundle can't load report rows this way unless pyarrow is bundled
+     too, or the rows go through a file.
 3. **The plugin's ChemDuck tools import ChemDuck's old `tools/` path**
    (`measure_chemduck_parity.py`, `spike_chemduck/host.py`), not the
    `chemduck` package. They move to the package when phase 1 turns the
@@ -247,7 +293,8 @@ QGIS; the plugin zip carries ChemDuck and the version test passes.
   `sample_cell_maps` for a pivot, `km_quartiles`, the catalogue views, and
   `load_source` at live-report scale. Each is set beside the plugin's
   number for the same answer today, on Facility A in QGIS's Python, with the
-  date and machine.
+  date and machine. *Done 2026-10-29* (open item 2): 10–50× slower on every
+  click-time call, raised with ChemDuck.
 - A **shared fixture facility**, synthetic and in this repository, exercises
   every rule; the real facility stays a pre-release smoke test.
 
