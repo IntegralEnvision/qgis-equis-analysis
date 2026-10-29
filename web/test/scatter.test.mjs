@@ -10,7 +10,7 @@ import { strict as assert } from "node:assert";
 import { test } from "node:test";
 import {
   CLASSES, axisLabel, axisType, classLabel, scatterBrushLabel,
-  scatterCaption, scatterCountsSql, scatterSql,
+  locationsSql, scatterCaption, scatterCountsSql, scatterSql,
 } from "../src/scatter.js";
 
 const BASE = { pivot: "p_abc123_1", x: "manganese", y: "lead",
@@ -44,6 +44,17 @@ test("an empty map selection means zero locations, not everything (US-6)", () =>
   // Case-insensitive, and quotes survive.
   const sql = scatterSql({ ...BASE, locations: ["mw-1", "O'Neil"] });
   assert.ok(sql.includes("'MW-1'") && sql.includes("'O''NEIL'"));
+});
+
+test("the map's clause is the same predicate the SQL uses (linked.js)", () => {
+  // The selection reaches the drawn views as a clause on the crossfilter
+  // (setMapSelection), not as a redraw: the two must say the same thing.
+  assert.equal(locationsSql(null), null);
+  assert.equal(locationsSql(undefined), null);
+  assert.equal(locationsSql([]), "FALSE");
+  const clause = locationsSql(["mw-1", "O'Neil"]);
+  assert.equal(clause, "upper(coalesce(location, '')) IN ('MW-1', 'O''NEIL')");
+  assert.ok(scatterSql({ ...BASE, locations: ["mw-1", "O'Neil"] }).includes(clause));
 });
 
 test("names that travel through JSON into SQL are checked, not trusted", () => {

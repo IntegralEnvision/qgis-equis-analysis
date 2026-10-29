@@ -18,7 +18,7 @@ import { Histogram } from "./chart.js";
 import { Scatter } from "./scatterplot.js";
 import { Ternary } from "./ternaryplot.js";
 import { Chooser } from "./chooser.js";
-import { Linked } from "./linked.js";
+import { Linked, setMapSelection } from "./linked.js";
 import { DataPanel } from "./datapanel.js";
 import { Shell } from "./shell.js";
 import { connectBridge, qtConnector } from "./connector.js";
@@ -53,6 +53,10 @@ async function start() {
   let histogram = null;
   let scatter = null;
   let linked = null;
+  // The scatter's crossfilter and the options it was drawn from, so a map
+  // selection can be put on the chart already there (mapSelection).
+  let cross = null;
+  let scatterOptions = null;
   // The last draw, so laying the page over the map (or back) can redraw it
   // at the new size rather than leave a chart sized for the other place.
   let lastDraw = null;
@@ -195,7 +199,10 @@ async function start() {
         + `${(options.x || {}).chemical || "?"} x ${(options.y || {}).chemical || "?"} `
         + `pivot=${options.pivot || "?"} `
         + `locations=${(options.locations || []).length || "all"}`);
-      lastDraw = () => window.equis.scatter(options);
+      // Held, not copied: mapSelection updates its locations, so a redraw
+      // on resize draws the selection as it is now.
+      scatterOptions = options;
+      lastDraw = () => window.equis.scatter(scatterOptions);
       if (histogram) { histogram.destroy(); histogram = null; }
       if (linked) { linked.destroy(); linked = null; }
       if (scatter) scatter.destroy();
@@ -216,12 +223,17 @@ async function start() {
       const boxPanel = document.getElementById("linked-box");
       below.replaceChildren();
       boxPanel.replaceChildren();
-      const cross = vg.Selection.crossfilter();
+      cross = vg.Selection.crossfilter();
       // A ternary is a chart of samples too (ternaryplot.js extends
       // Scatter): same brush, same route to the map, its own marks.
       const ternary = options.kind === "ternary";
       const Chart = ternary ? Ternary : Scatter;
       scatter = new Chart({ vg, coordinator, element: main, onBrush: toHost, cross });
+      // The map's selection is a clause, set once the chart's selection
+      // relays `cross` and before its marks first query - never baked
+      // into the chart's views, or a later, wider selection could not
+      // bring back what they left out.
+      setMapSelection(vg, cross, Array.isArray(options.locations) ? options.locations : null);
       chooser.showing((options.x || {}).prefix, (options.y || {}).prefix,
                       (options.points || {}).mode || null,
                       (options.z || {}).prefix || null,
@@ -229,7 +241,7 @@ async function start() {
       const drawn = scatter;
       drawn.onTimings = (t) => report("info", `scatter #${request} timings (ms since draw asked): `
         + Object.entries(t).map(([k, v]) => `${k}=${v}`).join(" "));
-      const state = await drawn.show(options);
+      const state = await drawn.show({ ...options, locations: null });
       report("info", `scatter #${request} drew: n=${state ? state.total : "?"}`
         + `${drawn !== scatter ? " (superseded)" : ""}`);
       if (drawn === scatter && state && state.total && drawn.views) {
@@ -250,6 +262,21 @@ async function start() {
         }
       }
       return state;
+    },
+
+    /**
+     * The map's selection changed: dim the scatter or ternary and every
+     * linked view to it IN PLACE - no spinner, no new views, the brush
+     * kept. `locations` is an array of codes, or null for no selection.
+     * False when there is no scatter to apply it to.
+     */
+    mapSelection(locations = null) {
+      const codes = Array.isArray(locations) ? locations : null;
+      if (scatterOptions) scatterOptions.locations = codes;
+      if (!cross || !scatter) return false;
+      setMapSelection(vg, cross, codes);
+      report("info", `map selection: ${codes ? codes.length : "none"}`);
+      return true;
     },
 
     /**

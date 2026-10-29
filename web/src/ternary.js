@@ -12,7 +12,7 @@
  * (1, 0), C (Z) at the top (1/2, h), h = sqrt(3)/2. A sample with shares
  * (sa, sb, sc) sits at x = sb + sc/2, y = sc * h.
  */
-import { pointsPhrase } from "./scatter.js";
+import { locationsSql, pointsPhrase } from "./scatter.js";
 
 export const HEIGHT = Math.sqrt(3) / 2;
 
@@ -74,12 +74,8 @@ export function ternarySql({ pivot, x, y, z, detectTrue, locations = null,
   const where = [carriesAll([x, y, z]), `${a} >= 0`, `${b} >= 0`, `${c} >= 0`,
                  `${a} + ${b} + ${c} > 0`];
   if (solid) where.push(`sample IN (SELECT sample FROM ${solidTable(solid)})`);
-  if (Array.isArray(locations)) {
-    where.push(locations.length
-      ? `upper(coalesce(location, '')) IN (${locations
-        .map((code) => quote(String(code).toUpperCase())).join(", ")})`
-      : "FALSE");
-  }
+  const located = locationsSql(locations);
+  if (located) where.push(located);
   return `SELECT *, sb + sc / 2 AS x, sc * ${HEIGHT} AS y,
                  ${colourSql(corners, grey)} AS colour
           FROM (

@@ -15,8 +15,8 @@ import os
 import re
 import threading
 
-from qgis.core import (Qgis, QgsApplication, QgsMessageLog,
-                       QgsProject, QgsTask)
+from qgis.core import (Qgis, QgsApplication, QgsFeatureRequest,
+                       QgsMessageLog, QgsProject, QgsTask)
 from qgis.gui import QgsCollapsibleGroupBox
 
 try:
@@ -2571,10 +2571,26 @@ class EquisDialog(QDockWidget):
     # ------------------------------------------------------- analysis tab
 
     def _analysis_showing(self):
-        """True when the Analysis tab is the one on screen."""
+        """True when the analysis view is on screen: over the map, or in its tab.
+
+        Over the map counts. It did not until 2026-10-29: the overlay's
+        toolbar button hides this dock, so every map selection made over
+        the map was owed to a tab nobody was looking at and never drawn -
+        the scatter, ternary and linked histograms ignored QGIS's selection
+        tools exactly where the map is beside them.
+        """
+        linked = getattr(self, "_linked", None)
+        if linked is not None and linked.overlay_visible:
+            return True
         return (getattr(self, "tabs", None) is not None
                 and self.tabs.currentIndex() == self.analysis_index
                 and self.isVisible())
+
+    def _draw_owed(self):
+        """The view came on screen: draw what was asked while it was hidden."""
+        if getattr(self, "_analysis_owed", False) and self._analysis_showing():
+            self._analysis_owed = False
+            self._refresh_chart()
 
     def _schedule_analysis_warmup(self):
         """Start the analysis view in the background, once, after data loads.
@@ -2614,9 +2630,7 @@ class EquisDialog(QDockWidget):
                 # sat at "Nothing to draw yet" until it was shown again.
                 self._linked.offer()
             return
-        if getattr(self, "_analysis_owed", False):
-            self._analysis_owed = False
-            self._refresh_chart()
+        self._draw_owed()
         # The chooser: offered on first sight, and again whenever the data
         # or its row scope changed since. Free when nothing did.
         self._linked.offer()
@@ -2709,6 +2723,7 @@ class EquisDialog(QDockWidget):
             self.overlay_note.setVisible(True)
             if self._report_store is not None:
                 linked.offer()
+            self._draw_owed()
             return
         if linked is None:
             return
@@ -2719,6 +2734,7 @@ class EquisDialog(QDockWidget):
                 layout.addWidget(view, 1)
             view.show()
         self.overlay_note.setVisible(False)
+        self._draw_owed()
 
     # ----------------------------------------------------- the overlay shell
 
@@ -2735,6 +2751,7 @@ class EquisDialog(QDockWidget):
         linked = self._linked
         if linked is not None and linked.overlay is not None:
             linked.set_overlay_visible(not linked.overlay_visible)
+            self._draw_owed()
             return True
         self.overlay_check.setChecked(True)
         if self._linked is None or self._linked.overlay is None:
@@ -2931,10 +2948,9 @@ class EquisDialog(QDockWidget):
             self._set_status("The scatter map could not be built.",
                              Qgis.MessageLevel.Warning)
             return None
+        # _add_to_group connects its selection: selecting on this layer dims
+        # the scatter, the same as selecting on Locations.
         self._add_to_group(layer)
-        # Selecting on this layer dims the scatter, the same as selecting on
-        # the Locations layer (_map_selection_codes reads both).
-        layer.selectionChanged.connect(self._on_map_selection_changed)
         self._scatter_layer = layer
         if self._linked is not None:
             self._linked.set_scatter_layer(layer)
@@ -4154,6 +4170,105 @@ class EquisDialog(QDockWidget):
     # lost by leaving them out.
     LOCAL_ONLY_PARAMS = (PARAM_METHODS, PARAM_FRACTIONS)
 
+    def _selection_layers(self):
+        """The layers a map selection is read from and mirrored across.
+
+        Locations, the scatter's own map, and every result layer mapped (the
+        preview among them) - each connected by _add_to_group, or where
+        Locations is added. Alive ones only, each once.
+        """
+        candidates = [self._locations_layer, getattr(self, "_scatter_layer", None)]
+        candidates += list(getattr(self, "_result_layers", None) or [])
+        layers = []
+        for lyr in candidates:
+            if (lyr is not None and self._layer_alive(lyr)
+                    and all(lyr is not seen for seen in layers)):
+                layers.append(lyr)
+        return layers
+
+    @staticmethod
+    def _selected_codes_on(layer):
+        """The location codes of a layer's selected features, as stored."""
+        if not layer.selectedFeatureCount():
+            return []
+        index = layer.fields().indexOf(LOCATION_FIELD)
+        if index < 0:
+            return []
+        # The code and nothing else: a per-result layer holds 250,000
+        # features, and a selection of thousands of them must not fetch
+        # every geometry and attribute to read one column (US-6: 10,000
+        # selected must not stall the UI).
+        request = (QgsFeatureRequest()
+                   .setFlags(QgsFeatureRequest.Flag.NoGeometry)
+                   .setSubsetOfAttributes([index]))
+        codes = []
+        for feature in layer.getSelectedFeatures(request):
+            code = feature.attribute(index)
+            if code not in (None, ""):
+                codes.append(str(code))
+        return codes
+
+    def _ids_by_code(self, layer):
+        """Lower-cased location code -> feature ids, for one layer.
+
+        INDEXED ONCE PER LAYER STATE, keyed on the feature count as the
+        brush's index is (linked_views._features_for): scanning a layer on
+        every selection would make each one O(dataset). Ids only, no
+        geometry - this answers "which features are at these stations".
+        """
+        cache = self.__dict__.setdefault("_code_index", {})
+        key = layer.featureCount()
+        hit = cache.get(layer.id())
+        if hit is not None and hit[0] == key:
+            return hit[1]
+        index = {}
+        field = layer.fields().indexOf(LOCATION_FIELD)
+        if field >= 0:
+            request = (QgsFeatureRequest()
+                       .setFlags(QgsFeatureRequest.Flag.NoGeometry)
+                       .setSubsetOfAttributes([field]))
+            for feature in layer.getFeatures(request):
+                code = str(feature.attribute(field) or "").strip().lower()
+                if code:
+                    index.setdefault(code, []).append(feature.id())
+        cache[layer.id()] = (key, index)
+        return index
+
+    def _select_codes(self, layer, codes):
+        """Select exactly the features of `layer` at `codes`. Guarded: the
+        selectionChanged this causes is not a new selection to mirror."""
+        index = self._ids_by_code(layer)
+        wanted = {str(c).strip().lower() for c in codes}
+        ids = sorted({i for c in wanted for i in index.get(c, ())})
+        if set(layer.selectedFeatureIds()) == set(ids):
+            return
+        self._mirroring = True
+        try:
+            layer.selectByIds(ids)
+        finally:
+            self._mirroring = False
+
+    def _mirror_selection(self, source):
+        """One selection, by location code, on every layer of ours.
+
+        QGIS draws a selection on the layer it was made on, and ours stack
+        at the same stations: a selection on Locations was drawn yellow and
+        then covered by the scatter map over it (measured 2026-10-29: 21
+        selection-colour pixels with Locations rendered alone, 0 under the
+        scatter map). Selecting the same stations on the others puts the
+        yellow on whichever layer is on top. The source keeps exactly what
+        the user selected; only the others follow.
+
+        IT CROSSES THE FETCH SEAM on purpose: a selection made on the
+        scatter's map now selects those Locations too, so the "Only
+        locations selected on the map" box counts it. The box still gates
+        the fetch, and its label shows the count.
+        """
+        codes = self._selected_codes_on(source)
+        for layer in self._selection_layers():
+            if layer is not source:
+                self._select_codes(layer, codes)
+
     def _map_selection_codes(self):
         """Every location selected on the map, whatever the checkbox says.
 
@@ -4168,22 +4283,12 @@ class EquisDialog(QDockWidget):
         empty list: None means "no location filter", [] would mean "these
         zero locations".
         """
-        # The Locations layer, and the scatter's own map when one is up: a
-        # selection made on either narrows the chart.
-        layers = [lyr for lyr in (self._locations_layer,
-                                  getattr(self, "_scatter_layer", None))
-                  if lyr is not None and self._layer_alive(lyr)]
+        layers = self._selection_layers()
         if not layers:
             return None
         codes = []
         for layer in layers:
-            for feature in layer.selectedFeatures():
-                try:
-                    code = feature[LOCATION_FIELD]
-                except KeyError:
-                    continue
-                if code not in (None, ""):
-                    codes.append(str(code))
+            codes.extend(self._selected_codes_on(layer))
         return sorted(set(codes)) or None
 
     def _selected_location_codes(self):
@@ -4226,6 +4331,13 @@ class EquisDialog(QDockWidget):
             count > 0 or self.map_selection_check.isChecked())
 
     def _on_map_selection_changed(self, *_args):
+        if getattr(self, "_mirroring", False):
+            # Our own _select_codes: the selection that caused it is being
+            # handled already, once.
+            return
+        source = self.sender()
+        if source is not None and hasattr(source, "selectedFeatureIds"):
+            self._mirror_selection(source)
         self._refresh_map_selection_label()
         # US-6: selecting on the map re-bins the chart, through QGIS's own
         # selection tools - the link is to layer.selectionChanged, so
@@ -5201,6 +5313,21 @@ class EquisDialog(QDockWidget):
             group.addLayer(layer)
         else:
             group.insertLayer(index, layer)
+        # Selecting on ANY layer of ours drives the charts - a result layer,
+        # the preview, the scatter or ternary map - not only on Locations:
+        # the layer a user selects on is the one they are looking at.
+        # Connected here, the one place every one of them passes, and
+        # disconnected first so a layer filed twice is not heard twice.
+        try:
+            layer.selectionChanged.disconnect(self._on_map_selection_changed)
+        except (TypeError, RuntimeError):
+            pass
+        layer.selectionChanged.connect(self._on_map_selection_changed)
+        # A new scatter map (or result layer) under an existing selection
+        # starts with those stations selected, so it is yellow at once.
+        codes = self._map_selection_codes()
+        if codes:
+            self._select_codes(layer, codes)
         return group
 
     def _on_export_csv(self):

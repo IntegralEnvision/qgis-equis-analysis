@@ -422,11 +422,16 @@ class LinkedViewsController(object):
         self.prepare()
 
     def refresh_scatter_locations(self, locations):
-        """The map's selection changed: redraw the scatter dimmed to it.
+        """The map's selection changed: dim the scatter to it, in place.
 
-        The pivot is NOT rebuilt - the samples have not changed, only which
-        of them are in the selection - so the axes stay put (US-24
-        criterion 4). None is "no selection"; [] is "zero locations".
+        Not a redraw. The page puts the selection on the linked views'
+        crossfilter (linked.js, setMapSelection) and only the solid marks
+        re-query: no spinner, the axes stay put (US-24 criterion 4), and a
+        brush is KEPT and composes with it (criterion 5). Until 2026-10-29
+        this redrew the whole page and cleared the brush, so every
+        selection flickered the charts off and back. The options keep the
+        selection too, so a later full draw (a new window, a reload) starts
+        from it. None is "no selection"; [] is "zero locations".
         """
         if self.showing != "scatter" or not self._scatter_options:
             return False
@@ -437,10 +442,10 @@ class LinkedViewsController(object):
             options["locations"] = list(locations)
         if options == getattr(self, "_pending", (None, None))[1]:
             return False
+        self._scatter_options = options
         self._pending = ("scatter", options)
-        self.clear_brush()
         if self.views is not None:
-            return self.views.draw_scatter(options)
+            return self.views.call("mapSelection", options.get("locations"))
         return False
 
     # --------------------------------------------------------------- overlay

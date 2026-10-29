@@ -17,20 +17,30 @@
  * includes `cross` (scatterplot.js). What the MAP highlights is the same
  * predicate, asked once here - not decided again by each chart.
  *
- * `solid` is the samples the chart draws solid - its Points mode, the
- * time window and the map's selection - as a column, and a fixed clause
+ * THE MAP'S SELECTION IS A CLAUSE ON `cross`, from MAP (setMapSelection),
+ * not a redraw. Until 2026-10-29 every selection made with QGIS's tools
+ * rebuilt the page - spinner, new views, new tables - so the charts
+ * flickered off and back, and a brush was cleared. As a clause, the solid
+ * marks re-query in place, the faint context and the axes never move, and
+ * a brush composes with it. It is no client's own clause, so every view
+ * applies it. It is not a BRUSH: the map highlights only what a brush
+ * picks (within the selection), never the selection itself.
+ *
+ * `solid` is the samples the chart draws solid - its Points mode and the
+ * time window - as a column, and a fixed clause
  * on `fg`. It is a column rather than a narrower view because Mosaic bins
  * each mark from its own table's extent: a selected layer read from a
  * narrower view would bin differently from the grey layer behind it.
  */
 import { BoxChart, whereOf } from "./boxchart.js";
 import { GROUPS } from "./censored.js";
-import { scatterBrushLabel } from "./scatter.js";
+import { locationsSql, scatterBrushLabel } from "./scatter.js";
 
 const BRUSH_SETTLE_MS = 80;
 const ACCENT = "#3b6ea8";
 const ND_GREY = "#a9a9a9";
 const SOLID = { linked: "solid" };   // the fixed clause's source
+const MAP = { linked: "map" };       // the map selection's source
 
 let serial = 0;
 const made = [];
@@ -75,6 +85,17 @@ export function brushedSql(table, where) {
           FROM ${table} WHERE solid${where.map((w) => ` AND (${w})`).join("")}`;
 }
 
+/**
+ * Put the map's selection on `cross`: `locations` an array of codes, or
+ * null for no selection. Before the views are built or after, alike -
+ * Linked copies what `cross` already holds when it is made.
+ */
+export function setMapSelection(vg, cross, locations) {
+  const where = locationsSql(locations);
+  cross.update({ source: MAP, value: where ? locations : null,
+                 predicate: where ? vg.sql`${where}` : null });
+}
+
 export class Linked {
   /**
    * `element` takes the brush line and the histograms; `boxElement`, when
@@ -88,6 +109,9 @@ export class Linked {
     this.cross = cross;
     this.onBrush = onBrush;
     this.fg = vg.Selection.crossfilter({ include: [cross] });
+    // `include` relays only what is published from now on, so the map's
+    // clause, set before the chart drew, is copied in by hand.
+    for (const clause of cross.clauses) this.fg.update(clause);
     this._timer = null;
     this._lastSent = undefined;
     this._destroyed = false;
@@ -233,11 +257,17 @@ export class Linked {
 
   async _emit() {
     if (this._destroyed || !this.table) return;
-    const where = whereOf(this.cross.predicate(null));
-    const key = where.join(" AND ");
+    // The brushes, without the map's clause: a selection alone is not a
+    // brush, and must not paint the map's highlight. With a brush, the
+    // map's clause narrows what it picks - "both active" (US-24).
+    const clauses = this.cross.clauses;
+    const brushes = whereOf(clauses.filter((c) => c.source !== MAP).map((c) => c.predicate));
+    const map = whereOf(clauses.filter((c) => c.source === MAP).map((c) => c.predicate));
+    const where = [...brushes, ...map];
+    const key = brushes.length ? where.join(" AND ") : "";
     if (key === this._lastSent) return;
     this._lastSent = key;
-    if (!where.length) {
+    if (!brushes.length) {
       this._line.textContent = scatterBrushLabel({ total: this.total });
       if (this.onBrush) this.onBrush(null);
       return;

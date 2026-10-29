@@ -45,7 +45,7 @@ tools/test_tickable_combos.py   tools/test_bivariate_layer.py
 tools/test_analysis_task.py   (the Analysis chooser's worker, in the task manager)
 tools/try_scatter.py   tools/try_analysis_tab.py   (console probes: US-24, the Analysis tab)
 tools/try_overlay.py   (NOT a console probe: run by `qgis --code` in a throwaway
-                        profile; drives the overlay shell end to end, 13 checks, quits)
+                        profile; drives the overlay shell end to end, 21 checks, quits)
 tools/webengine_probes/run_wasm.ps1   run_gpu.ps1   (also `qgis --code`, from PowerShell:
                         WASM on a plugin page, and whether it can have a GPU)
 tools/mosaic_poc/overlay.py   brush_scale.py   temporal_scale.py

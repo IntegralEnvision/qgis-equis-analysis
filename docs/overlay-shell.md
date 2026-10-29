@@ -77,6 +77,41 @@ brush, a panel dragged to another edge, a minimised tab, the saved layout,
 a pan on open map, both Data panel buttons. Screenshots of that run were of
 a locked screen; the layout was seen in the browser preview instead.
 
+QGIS's own selection drives the charts over the map, in place, and is
+drawn yellow (2026-10-29, QGIS 4.2.3, Facility A SO, As x Cr, 112 samples,
+a brush of 93 held throughout; `try_overlay.py` 21 checks, all passing).
+Three things were wrong, each found by measuring:
+
+- **Over the map it did nothing.** The toolbar button hides the dock, and
+  the panel drew only into a VISIBLE Analysis tab, so a selection was owed
+  to a tab nobody could see. The overlay now counts as on screen
+  (`_analysis_showing`). Every layer the plugin files - result layers, the
+  preview, the scatter or ternary map - drives the charts, connected in
+  `_add_to_group`.
+- **Every selection rebuilt the page**: spinner, new views, new tables,
+  the brush cleared - the charts flickered off and back. The selection is
+  now a clause on the linked views' crossfilter (`linked.js`,
+  `setMapSelection`); only the solid marks re-query, the chart object and
+  its table are kept, and the brush composes with it. 5 stations on
+  Locations: 49 samples solid (brush AND selection), 1.4 s from selection
+  to re-queried and counted as the probe polls it (100 ms polls, so an
+  upper bound); cleared, 93 of 93 (the brush's).
+- **No yellow.** QGIS drew the selection - 21 selection-colour pixels with
+  Locations rendered alone - and the scatter map over the same stations
+  covered all of it: 0 pixels with the plugin's layers stacked. A
+  selection is now mirrored by location code onto every plugin layer
+  (`_mirror_selection`), so it is yellow on whichever is on top: 95
+  pixels. A station both brushed and selected is partly covered by the
+  brush's highlight layer (48 pixels of 56 for two stations).
+
+The mirror crosses the fetch seam on purpose: a selection made on the
+scatter's map selects those Locations, so "Only locations selected on the
+map" counts it (the box still gates the fetch). Mirroring onto a large
+per-result layer repaints it, as selecting on it would. The single
+histogram (no scatter showing) still re-bins by redrawing (US-6). The
+ternary uses the same path and was not driven by the probe. Screenshots
+again of a locked screen; the pixels were counted from an offscreen render.
+
 ## Open questions
 
 - Whether the wheel over a panel should zoom the map (today it scrolls the

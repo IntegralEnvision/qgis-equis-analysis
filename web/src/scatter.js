@@ -100,6 +100,20 @@ export function pointsPhrase(drawn, points = null, all = null, carrying = "both"
 }
 
 /**
+ * The map's selection as a predicate on `location`, or null for none. An
+ * empty ARRAY is "these zero locations", FALSE, not "no filter" - the US-6
+ * rule. Case-insensitive: the report and the feature service do not agree
+ * on case (CLAUDE.md). Shared by the SQL here and the map's clause on the
+ * linked views' crossfilter (linked.js), so the two cannot disagree.
+ */
+export function locationsSql(locations) {
+  if (!Array.isArray(locations)) return null;
+  if (!locations.length) return "FALSE";
+  return `upper(coalesce(location, '')) IN (${locations
+    .map((code) => quote(String(code).toUpperCase())).join(", ")})`;
+}
+
+/**
  * The SQL behind the scatter: one row per sample carrying both analytes and
  * a known detection state for each, with its class.
  *
@@ -136,14 +150,8 @@ export function scatterSql({ pivot, x, y, detectTrue, locations = null,
   // every sample in the window - and names them in a table. The rule
   // lives there (bivariate.picks_sql), not here.
   if (solid) where.push(`sample IN (SELECT sample FROM ${solidTable(solid)})`);
-  if (Array.isArray(locations)) {
-    where.push(locations.length
-      // Case-insensitively: the report and the feature service do not
-      // agree on case (CLAUDE.md).
-      ? `upper(coalesce(location, '')) IN (${locations
-        .map((code) => quote(String(code).toUpperCase())).join(", ")})`
-      : "FALSE");
-  }
+  const located = locationsSql(locations);
+  if (located) where.push(located);
   return `SELECT sample, location, sample_date,
                  ${column(x, "value")} AS x, ${column(y, "value")} AS y,
                  ${column(x, "qualifier")} AS x_qualifier,
