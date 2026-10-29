@@ -1,0 +1,78 @@
+{
+ "note": "Written by tools/vendor_chemduck.py. Do not edit these files: re-vendor, and tools/test_chemduck_vendor.py checks them.",
+ "repository": "https://github.com/IntegralEnvision/chemduck.git",
+ "commit": "da0d3b54d36feb1bf5d088b25e61e97278863522",
+ "subject": "km_quartiles_of: Kaplan-Meier quartiles over rows the caller hands in",
+ "version": "0.2.0",
+ "vendored": "2026-10-29",
+ "files": {
+  "__init__.py": {
+   "bytes": 2852,
+   "sha256": "617d3089e07505eda2ad92680de679cec467f4eaeffc77f82669164d22ddb5d3"
+  },
+  "arii_hybrid.py": {
+   "bytes": 29282,
+   "sha256": "f404d4a5c2e9d172d78011682c63d9a8404e042ebb64911d497e166c274d52ec"
+  },
+  "eav_helpers.py": {
+   "bytes": 3740,
+   "sha256": "1ff3e19a654918aaef9625b2b798bb6b2fa158c62e6fab8004998bde989103ea"
+  },
+  "equis_arii_parquet_mapping.yaml": {
+   "bytes": 7807,
+   "sha256": "166b084dedffab57bbc3d9b4355e5ebbed7a2ceffc078dc5149a19dc15070b64"
+  },
+  "load_data.py": {
+   "bytes": 106427,
+   "sha256": "e8334576f5a75a68d0456f42fa727173a706a09483f78f37ac41d92c66da0c3b"
+  },
+  "sql/01_tables.sql": {
+   "bytes": 26668,
+   "sha256": "6c4ac1a4ddc26929358ff974d6df86f492f1c291ebbd769ecd84b2fa4b66ab85"
+  },
+  "sql/02_macros.sql": {
+   "bytes": 35780,
+   "sha256": "4ad521c33e64b49b11cbb2a0f0ed4ffb5539a2b993f107917ed2fc48738fa1de"
+  },
+  "sql/03_views.sql": {
+   "bytes": 28379,
+   "sha256": "1a9912bf37efd9060a36eee65209570ccf8965ad03f5ca7fa306a8875168f2fe"
+  },
+  "sql/04_extended_tables.sql": {
+   "bytes": 5529,
+   "sha256": "2b1f3b98fe39120e66a49485211ef34e040309c9ac72a0484d9cf714f5c1dd55"
+  },
+  "sql/05_extended_views.sql": {
+   "bytes": 11863,
+   "sha256": "12e3582ed33592326b9bad0d18497ff846ef24ac8de140c08510f3da5d91ffc1"
+  },
+  "sql/06_eav_views.sql": {
+   "bytes": 753,
+   "sha256": "852db2d830e95d4d6674cfdb7568bcaed30221ff1a0c0e9364f12360ac21c3d7"
+  },
+  "sql/07_catalogs.sql": {
+   "bytes": 3729,
+   "sha256": "1c0f61d5c0f44831bf15ac80aded08866b6adbfd038a866795226e67ca88b23f"
+  },
+  "sql/08_aggregate_points.sql": {
+   "bytes": 47020,
+   "sha256": "6288404a799097aa33bb977d059c5c36242655c18460f0b6f5299178f2d97d4b"
+  },
+  "sql/08_aggregate_results.sql": {
+   "bytes": 17861,
+   "sha256": "11f37f28c2f3e981813493c628ef56fac7fa3decfbe19ccbf7069c59bf783236"
+  },
+  "sql/09_desurvey.sql": {
+   "bytes": 19610,
+   "sha256": "0b265847faf23b494cf3d87e58de545c055ef54f44e580c5833db099bc961327"
+  },
+  "sql/10_sample_results.sql": {
+   "bytes": 24740,
+   "sha256": "68d0db748253a382a5b601c08ddcfeb0e97da9b69506d8b59f494eac3e7c6a26"
+  },
+  "sql/optional/spatial.sql": {
+   "bytes": 881,
+   "sha256": "dbf9c91c2e389b4a606d906272f621fdf7735cd5ccca0ea6938b81fa413051df"
+  }
+ }
+}
