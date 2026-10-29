@@ -107,7 +107,7 @@ statement.
 
 ## What is still open
 
-None is a ChemDuck defect.
+One is a ChemDuck defect, found by the parity test: item 5.
 
 1. **The QGIS's DuckDB.** *Checked 2026-10-29:* QGIS 4.2.3, which replaced
    4.2.1 here, has DuckDB 1.5.5, in ChemDuck's `SUPPORTED_DUCKDB` (1.5.4,
@@ -142,6 +142,42 @@ None is a ChemDuck defect.
    one location's series ≤ 0.2 s, sparklines ≤ 1 s, open ≤ 2 s. It is in
    ChemDuck's `docs/qgis-plugin-request-interactive-speed.md`.
 
+   **A cap on DuckDB's threads helps both sides.** ChemDuck's
+   `docs/duckdb-thread-cap.md` found its macros fastest at `threads = 4`:
+   about thirty pipeline breaks per call, each paying per-thread setup and
+   waiting on the slowest thread. The setting belongs to the whole
+   database, so ChemDuck in a schema of the plugin's connection can't be
+   capped alone. So the plugin's own calls were timed under the cap too.
+   `measure_chemduck_calls.py --threads`, Facility A, plain Python 3.14,
+   DuckDB 1.5.5, 2026-10-29, machine busy at about 58% CPU. Runs at 4,
+   then 14, then 4 threads, each the median of three warm runs:
+
+   | Question | Plugin, 4 / 14 / 4 | ChemDuck, 4 / 14 / 4 |
+   | --- | --- | --- |
+   | Map, one analyte (3 cases, both aggregations) | 0.05–0.12 / 0.09–0.25 s | 0.67–1.56 / 2.94–4.78 s |
+   | Footer count | 0.02–0.06 / 0.04–0.10 s | 1.00–1.54 / 3.66–5.28 s |
+   | One location's series | 0.03–0.05 / 0.05–0.08 s | 0.62–1.26 / 2.74–3.25 s |
+   | Sparklines | 0.10–0.32 / 0.14–0.37 s | 1.90–6.30 / 5.30–12.30 s |
+   | Pivot, two analytes, WS | 0.36, 0.51 / 0.83 s | 0.43, 0.50 / 1.12 s |
+   | Pivot, every analyte, TAILS | 0.53, 0.66 / 1.14 s | 1.63, 1.75 / 4.94 s |
+
+   Taking 14 threads' time over 4 threads' time, call by call:
+   - **First 4-thread run:** the plugin's 17 calls were 1.06–3.64× faster
+     at 4 threads (median 2.05), none slower. ChemDuck's 23 were 2.35–5.34×
+     faster (median 4.0).
+   - **Second 4-thread run, which overlapped another test:** the plugin's
+     median was 1.63×. Three of its calls were slower than at 14 threads, by
+     at most 0.022 s. ChemDuck's were 1.95–5.07× faster.
+
+   At 4 threads ChemDuck is still over the budgets: a map in 0.7–1.6 s
+   against 0.5, and a count in 1.0–1.5 s against 0.2. On the parity
+   fixture, 36 results as it then was, one `aggregate_points` call took
+   0.11 s on one thread and 0.41–0.85 s on fourteen. That's a per-call
+   floor with no rows to speak of, sent to ChemDuck for the speed work.
+
+   *Decision 8 below* takes the cap: one setting, in one place, because
+   it governs every query on the connection.
+
    **What this changes.** Phases 2 and 3 wait on that request; they are
    what puts these calls on a click. What moves without waiting:
    - the catalogue, read from the published sidecars, never the live views;
@@ -167,14 +203,22 @@ None is a ChemDuck defect.
      own DuckDB bundle carries arro3, not pyarrow. So a QGIS that relies on
      that bundle can't load report rows this way unless pyarrow is bundled
      too, or the rows go through a file.
-3. **The plugin's ChemDuck tools import ChemDuck's old `tools/` path**
-   (`measure_chemduck_parity.py`, `spike_chemduck/host.py`), not the
-   `chemduck` package. They move to the package when phase 1 turns the
-   parity measurement into a test.
+3. **`spike_chemduck/host.py` still imports ChemDuck's old `tools/` path**,
+   not the `chemduck` package. *2026-10-29:* `measure_chemduck_parity.py`,
+   the other one, is gone, replaced by `tools/test_chemduck_parity.py` on
+   the vendored package. The spike is a record, so it stays as it was.
 4. **`load_schema` prints a line per SQL file** ("Loading 03_views.sql...").
-   In QGIS that goes to the Python console's stdout. The adapter silences
-   it, as `measure_chemduck_parity.py` already does for the loader, until
-   ChemDuck logs through `logging`. That's a small request, not a blocker.
+   In QGIS that goes to the Python console's stdout. The adapter
+   (`chem._quiet`) silences it until ChemDuck logs through `logging`.
+   That's a small request, not a blocker.
+5. **A sample with no date, or no matrix, stops ChemDuck's load.** *Found
+   2026-10-29* by the parity fixture. `insert_samples` drops such a sample,
+   but `insert_results` still inserts its results, so the foreign key
+   refuses the whole load with a message naming only a sample id. The
+   plugin maps both rows. Facility A has neither, so the case is the live
+   report path's. It has been raised in ChemDuck's
+   `docs/qgis-plugin-request-load-undated.md`, and the parity test records
+   it as a known refusal that fails once the load succeeds.
 
 ## The design after adoption
 
@@ -302,6 +346,56 @@ QGIS; the plugin zip carries ChemDuck and the version test passes.
 listed; on Facility A each remaining difference falls in a listed
 category; and the timings are recorded, with any call too slow for a click
 raised with ChemDuck.
+
+> *Parity, done 2026-10-29.* The pieces:
+> - **The adapter**, `equis_loader/chem.py` (no QGIS). It opens ChemDuck in
+>   schema `chemduck` of the store's connection, by `load_source` or by
+>   `open_consumer`. It holds the row scope as the store does, and answers
+>   the map's question as `aggregate_points` points carrying the store's
+>   keys.
+> - **The fixture**, `tools/chem_fixture.py`: 26 locations, each built to
+>   show one rule and declaring what each aggregation should then do.
+> - **The test**, `tools/test_chemduck_parity.py`. It replaces
+>   `measure_chemduck_parity.py`, and holds every difference to 13 intended
+>   causes. Each cause is checked against the rows, not inferred from the
+>   answer's shape.
+>
+> On the fixture, both ways of opening ChemDuck give the same points, and
+> every location differs exactly as it declares. A date window and a
+> sample-type scope reach both sides. Nine deliberate rule breaks each fail
+> it: five in the adapter, three in the store, and the adapter passing
+> `p_units := 'flag'`. It passes under plain Python and under QGIS 4.2.3,
+> in 27–37 s on one thread.
+>
+> **Facility A**, the 12 most-measured analytes, 14,737 cells per recipe:
+> every difference falls in a listed cause (888 s at 4 threads). Most
+> recent, at both non-detect choices:
+> - agree: 7,352;
+> - points (depths and positions kept apart): 3,459;
+> - same date: 2,604;
+> - method classes: 1,052;
+> - units refused by both guards: 477;
+> - units converted by ChemDuck: 98;
+> - units by method class: 40.
+>
+> Maximum differs from that in three places: agree 9,486; tie to the later
+> date 439; no same-date difference.
+>
+> Rules Facility A doesn't exercise appear only in the fixture: no
+> non-reportable result, no QC sample type, no quantitation-limit-only
+> non-detect, no undated sample.
+>
+> **Found by it:**
+> - ChemDuck's load refuses a sample with no date or no matrix (open item 5);
+> - ChemDuck converts units at load (decision 9);
+> - ChemDuck refuses a solid's unit on water even when it's the variable's
+>   only unit;
+> - a call costs 0.11 s on one thread and 0.4–0.85 s on fourteen, even on 40
+>   rows (decision 8).
+>
+> *Still to do in this phase:* the debug log of adapter beside store for
+> each map built, and the report-rows path (`Chem.load` in the worker that
+> builds the store).
 
 ### Phase 2 — maps
 
@@ -462,6 +556,38 @@ and `test_run_nightly.py` checks the step and its failure stops.
    licence, or ship the plugin with ChemDuck only where it is licensed (an
    internal build that vendors it at build time, never committed here).
    Phase 0's vendoring and everything after it wait on the answer.
+
+8. **DuckDB's thread count.** `threads` is the database's setting: `SET
+   threads` on any cursor changes it for all of them, and DuckDB refuses
+   `SET SESSION threads`. So it can't be ChemDuck's alone or the store's
+   alone. Recommended: `ReportStore` sets `threads = min(4, the default)`
+   where it opens the session's connection, and nothing else sets it. That
+   is one authority, and it caps both sides, which the measurement above
+   says helps both. Background builds (`BuildStoreTask`, a `load_source`
+   worker) open their own databases, so this cap doesn't reach them, and
+   they can keep every core. *Not yet taken:* ChemDuck's note says to
+   measure again on an idle machine before settling on 4, and every figure
+   so far is from a busy one. The parity fixture runs on one thread for its
+   own speed: 12 s against 1 min 49 s at 14, at 21 locations.
+
+9. **Who converts units.** CLAUDE.md says conversion belongs to the
+   pipeline, with EQuIS's own factors, and never to presentation. The
+   plugin's guard stops a variable in two units and asks. *Found
+   2026-10-29* by the parity fixture: ChemDuck converts at load, by its own
+   factors. A variable in ug/L and mg/L becomes one in mg/L, each row
+   marked `unit_source = 'chemduck'`, and the map is drawn without a
+   question. On Facility A the pipeline has already converted, so
+   ChemDuck finds nothing to convert there (`as_reported`). On a live
+   report it would. ChemDuck also refuses a unit that contradicts its
+   matrix (ug/kg on water) even when it's the variable's only unit, where
+   the plugin maps it. Recommended: keep the pipeline's conversion as the
+   one source for parquet (phase 6 already says so), and for live reports
+   accept ChemDuck's conversion, with its factor and `unit_source` on the
+   layer, since a live report has no pipeline in front of it. A layer
+   whose rows ChemDuck converted says so on the status line, as a
+   multi-matrix aggregate does now. The parity test lists both as
+   intended (`units_converted`, `unit_contradicts_matrix`) until this is
+   decided.
 
 ## Risks
 

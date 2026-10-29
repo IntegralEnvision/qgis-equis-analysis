@@ -20,7 +20,8 @@ python tools/test_analysis.py          # the Analysis tab's chooser: catalogue, 
 python tools/test_ternary.py           # ternary shares/colours, one-unit rule, page SQL held to ternary.py
 python tools/test_censored.py          # box plots' Kaplan-Meier quartiles vs an independent KM (node, duckdb)
 python tools/test_histogram_sql.py     # the histogram's real SQL vs the store: values, aggregation, every filter (node)
-python tools/measure_chemduck_parity.py --manifest <dir>/manifest.json --out <dir>   # vs ChemDuck, by cause
+python tools/test_chemduck_parity.py   # the adapter's map vs the store's: every difference listed (fixture)
+python tools/test_chemduck_parity.py --manifest <dir>/manifest.json --pub <dir>   # the same on a real facility
 python tools/analysis_preview.py       # the Analysis tab in a browser, no QGIS (--shots DIR: screenshots)
 
 # The parquet export pipeline: plain Python + pyarrow, imports no plugin code
@@ -66,9 +67,10 @@ shipped unbundled plugin, which does run on 3.34).
 
 ## The one structural rule
 
-**`equis_api.py`, `report_data.py`, `sparkline.py`, `cache.py` and `store.py`
-import no QGIS.** That is why 1,500+ lines of tests run under a plain
-interpreter, and it is the reason most of this codebase can be verified
+**`equis_api.py`, `report_data.py`, `sparkline.py`, `cache.py`, `store.py`,
+`chem.py` and the vendored `chemduck/` import no QGIS.** That is why
+1,500+ lines of tests run under a plain interpreter, and it is the reason
+most of this codebase can be verified
 without a GUI. Anything needing a path takes it from the caller, as
 `cache.py` does. Do not import `qgis.*` into these modules to save a few
 lines elsewhere.

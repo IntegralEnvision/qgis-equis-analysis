@@ -268,8 +268,9 @@ Keep these. On each, the plugin is the one that should move:
 
 ## How to know it's done
 
-The plugin's `tools/measure_chemduck_parity.py` compares the two on a real
-facility and names the cause of every difference. Once the decisions in §4
+The plugin's `tools/test_chemduck_parity.py` (before 2026-10-29,
+`measure_chemduck_parity.py`) compares the two on a fixture facility and a
+real one, and names the cause of every difference. Once the decisions in §4
 are made and implemented on both sides, it becomes a gate: at the shared
 default recipe, the only differences left should be ones both projects have
 written down as intended. ChemDuck's own `tests/test_domain_rules.py` gains

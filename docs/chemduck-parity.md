@@ -1,8 +1,10 @@
 # Do the QGIS plugin and ChemDuck agree? A parity measurement on one facility
 
 **Written 2026-10-22.** Measured on Facility A (3,452,146 results, 906
-locations; stations are given neutral labels here), Windows 11, DuckDB 1.5.5. Reproduce with
-`tools/measure_chemduck_parity.py` in the QGIS plugin repository.
+locations; stations are given neutral labels here), Windows 11, DuckDB 1.5.5. Reproduced with
+`tools/measure_chemduck_parity.py` in the QGIS plugin repository, which was
+replaced on 2026-10-29 by `tools/test_chemduck_parity.py` (the tool is in
+the history at `dfe89f5`).
 
 > **Status, 2026-10-28.** This measured ChemDuck 0.1's `aggregate_results`,
 > before the shared rules. ChemDuck has since adopted them as
@@ -252,6 +254,11 @@ plugin calling it. This script then becomes a gate with a fixture, the way
 existing rules tests gain the cases above.
 
 ## Reproducing
+
+With the tool as it was at `dfe89f5` (`git show dfe89f5:tools/measure_chemduck_parity.py`),
+against ChemDuck 0.1. Its successor, `tools/test_chemduck_parity.py`, asks
+`aggregate_points` through the plugin's adapter and fails on any difference
+outside its list of intended ones.
 
 ```
 python tools/measure_chemduck_parity.py \

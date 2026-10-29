@@ -8,10 +8,16 @@ milliseconds; this says, call by call, whether that holds here.
 
     "C:\\Program Files\\QGIS 4.2.3\\bin\\python-qgis.bat" tools\\measure_chemduck_calls.py
         --manifest <facility>/manifest.json --pub <dir> [--out <dir>/calls.json]
+        [--threads N] [--skip-load]
 
 `--pub` is where ChemDuck's sidecars are published (built there if absent,
 and that time reported). Each call is run once cold, then three times; the
 median of the three is reported beside the cold time, never averaged with it.
+`--threads` sets DuckDB's `threads` after ChemDuck is open. It is the whole
+database's setting, not a connection's (ChemDuck's docs/duckdb-thread-cap.md),
+so it governs the plugin's calls and ChemDuck's alike: run once with it and
+once without to see both sides move. `--skip-load` leaves out the two
+report-loading calls, which take minutes and run in the background anyway.
 The row counts say each pair answered the same KIND of question; whether the
 answers agree is the parity test's business, not this one's.
 """
@@ -64,6 +70,10 @@ def main():
     parser.add_argument("--manifest", required=True)
     parser.add_argument("--pub", required=True, help="ChemDuck's sidecar folder")
     parser.add_argument("--out")
+    parser.add_argument("--threads", type=int,
+                        help="SET threads for the whole database (default: DuckDB's)")
+    parser.add_argument("--skip-load", action="store_true",
+                        help="leave out loading a report's rows")
     args = parser.parse_args()
 
     facility = os.path.dirname(os.path.abspath(args.manifest))
@@ -91,6 +101,10 @@ def main():
     began = time.perf_counter()
     quiet(cd.open_consumer, store.con, args.pub, parts, schema="chemduck")
     report["setup"]["chemduck_open_s"] = round(time.perf_counter() - began, 2)
+    if args.threads:
+        store.con.execute("SET threads = %d" % args.threads)
+    report["setup"]["threads"] = store.con.execute(
+        "SELECT current_setting('threads')").fetchone()[0]
     cur = cd.schema_cursor(store.con, "chemduck")
 
     def sql(text, params=None):
@@ -177,7 +191,7 @@ def main():
 
     # Loading report rows: the live path ingests a fetched report into a
     # store; ChemDuck's load_source would load the same rows into its schema.
-    for part in ("matrix=TAILS/fraction=T", "matrix=WS/fraction=D"):
+    for part in () if args.skip_load else ("matrix=TAILS/fraction=T", "matrix=WS/fraction=D"):
         path = os.path.join(facility, *part.split("/"), "part-0000.parquet").replace("\\", "/")
         reader = duckdb.connect()
         headers = [d[0] for d in reader.sql("FROM read_parquet('%s') LIMIT 0" % path).description]
