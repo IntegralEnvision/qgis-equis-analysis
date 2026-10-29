@@ -4,6 +4,15 @@
 locations; stations are given neutral labels here), Windows 11, DuckDB 1.5.5. Reproduce with
 `tools/measure_chemduck_parity.py` in the QGIS plugin repository.
 
+> **Status, 2026-10-28.** This measured ChemDuck 0.1's `aggregate_results`,
+> before the shared rules. ChemDuck has since adopted them as
+> `aggregate_points`: events by sample and timestamp, measurement points,
+> selection across methods, one limit chain, refusal of mixed units. Most of
+> the causes below are decided now, not open. The numbers stand as a record
+> of where the two started. The re-measurement against `aggregate_points` is
+> phase 1 of [chemduck-adoption-plan.md](chemduck-adoption-plan.md), where
+> this script becomes a test.
+
 ## Why this exists
 
 Three projects now read the same EQuIS Analytical Results II (ARII) parquet

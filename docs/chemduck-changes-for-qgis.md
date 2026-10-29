@@ -5,6 +5,18 @@ the measurements behind it are in the QGIS plugin repository
 (`equis_qgis_public`), in `docs/chemduck-parity.md` and
 `docs/chemduck-spike.md`.
 
+> **Status, 2026-10-28: all seven are done in ChemDuck**, and so is a second
+> round of requests (one bug, eight gaps, six divergences) at `dca591a`. The
+> detect flag is three-valued and a missing column refuses (`f9ce7b0`). No
+> extension is needed; geometry is in `sql/optional/spatial.sql`
+> (`ace3d90`). ChemDuck installs into a named schema and refuses to replace
+> a host's objects. The shared rules, change 4, were decided in ChemDuck's
+> `docs/shared-rules-decisions-response.md` and built as `aggregate_points`
+> (D1–D7). The per-sample macros, the sample-type scope and the importable
+> `chemduck` package (`68e95fc`) cover changes 5–7. What the plugin does with
+> them is [chemduck-adoption-plan.md](chemduck-adoption-plan.md). This
+> document is kept as the request it was.
+
 ## Context
 
 The QGIS plugin maps EQuIS chemistry from the same ARII parquet exports

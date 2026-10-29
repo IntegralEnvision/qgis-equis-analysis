@@ -5,6 +5,14 @@ QGIS's Python), Facility A. Code: `tools/spike_chemduck/`. Read
 [chemduck-parity.md](chemduck-parity.md) first: it explains why the values
 below differ from the plugin's.
 
+> **Status, 2026-10-28.** The spike reached ChemDuck through its old
+> `tools/` path. ChemDuck is now the importable `chemduck` package, and has a
+> second way in that the spike didn't have: `load_source`, which loads rows
+> the host already holds into a named schema. The arrangement measured here
+> (its own `chemduck` schema, a cursor whose default schema is `chemduck`,
+> no `spatial`)
+> is the one the adoption plan builds on.
+
 ## The question
 
 Can the plugin take Chemrooms' data handling - ChemDuck's SQL, and

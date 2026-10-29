@@ -2,6 +2,12 @@
 
 **Written 2026-10-28**, after surveying ChemDuck at `278c29b` (package
 0.2.0, shared rules D1–D7 implemented) and this plugin on `overlay-shell`.
+**Updated the same day** for ChemDuck `dca591a`, which answered every
+request this plan raised (one bug, eight gaps, six divergences). ChemDuck's
+`docs/qgis-plugin-requests-changelog.md` has the item-by-item record, and
+the item numbers below (B1, G1–G9, D1–D6) are its numbers. **Updated
+2026-10-29** for `da0d3b5` (G9, `km_quartiles_of`): nothing in this plan now
+waits on ChemDuck.
 Background: [chemduck-parity.md](chemduck-parity.md) (where the two
 disagreed, by cause), [chemduck-spike.md](chemduck-spike.md) (ChemDuck
 inside the plugin's DuckDB works),
@@ -30,58 +36,99 @@ What stays the plugin's:
 
 ## What ChemDuck gives us now
 
-| Plugin need | ChemDuck 0.2.0 |
+ChemDuck at `da0d3b5` (still package 0.2.0; `SUPPORTED_DUCKDB` 1.5.4 and
+1.5.5):
+
+| Plugin need | ChemDuck |
 | --- | --- |
-| One value per location (map) | `aggregate_points` (one row per measurement point) and `rollup_points` (one per location, by a named rule: `max_over_points`, `named_position`, `none`) |
+| One value per location (map) | `aggregate_points` (one row per measurement point) and `rollup_points` (one per location, by a named rule: `max_over_points`, `named_position`, `none`); `p_locations` narrows either |
 | Most recent / maximum | `p_event_agg := 'most_recent' \| 'maximum'`; `'statistic'` for Kaplan–Meier mean or median |
-| Non-detect handling | Named, versioned policies (`chemduck_default` and four others) with a display factor; `rank_across` / `rank_reruns` |
-| Row scope | `p_start_date`, `p_end_date` (whole days, inclusive), `p_sample_types` (NULL means normal samples) |
+| Non-detect handling | Named, versioned policies (`chemduck_default` and four others); `rank_across` / `rank_reruns`; `p_display_factor` draws a selected non-detect at another factor of its limit for one call, never changing which result is selected (G7) |
+| Row scope | `p_start_date`, `p_end_date` (whole days, inclusive), `p_sample_types` (NULL means normal samples, typed `N` or untyped), `p_reportable_only` (NULL means the dataset's choice: on where the source carries `REPORTABLE_RESULT`) (G8) |
+| A filter the source can't express | Matches everything, and every row's `filters_ignored` names it (D6), the plugin's own rule |
 | Fractions | Every fraction its own row; `p_fraction` to pick one |
-| Mixed units | Converted at load or publish; `p_units := 'refuse'` by default, with an error naming units and counts |
-| Combining matrices | `p_matrices`, guarded by matrix class, unit and measurement basis |
-| Per-sample (scatter, ternary) | `sample_results`, `sample_cell_maps` (one map per sample, the approach this plugin measured fastest) |
-| Provenance | `sample_id`, `method_code`, `selected_by`, `rerun_selected_by`, `limit_source`, `nd_policy`, `nd_rule`, `n_points`, `matrices`, `unit_source`, `n_unknown_detect` |
-| Install | `open_consumer(con, folder, partitions, schema=...)`; refuses to replace objects it didn't create; macros called through `schema_cursor(con, schema)` |
+| Mixed units | Converted at load or publish; `p_units := 'refuse'` by default, with an error naming units and counts; per variable, matrix included, in the per-sample macros too (B1) |
+| Combining matrices | `p_matrices`, guarded by matrix class, unit and measurement basis, on the aggregates and the per-sample macros alike, through one shared check (`matrix_combine_class`) (G2) |
+| Per-sample (scatter, ternary) | `sample_results`, `sample_cell_maps` (one map per sample, the approach this plugin measured fastest), both taking `p_method_class` and `p_matrices` (G2); `sample_results_refused` lists what the same call left out, with units, counts and reason (G1) |
+| Time series | `point_series`: one row per sample of each measurement point, re-runs resolved by `aggregate_points`' own code, ordered by point then event, for a list of locations in one call (G4) |
+| Box plots | `km_quartiles(analytes, p_group := 'none' \| 'location' \| 'year', ...)`: Q1, median, Q3, each with its "below the lowest detect" flag, plus F0, counts, min/max detect, max limit and `n_left_out`. The plugin's `censored.js`, ported, with `test_censored`'s cases (G5). `km_quartiles_of(p_rows)`: the same figures over rows the caller names, through `query_table` (a table, a view or the caller's CTE of `grp, value, detected`), for the brushed box plot; `km_quartiles` runs on it, so the arithmetic is written once (G9) |
+| Catalogue | `v_analyte_summary` per method class with `n_samples`; `v_method_classes`; `v_positions`; all three in the consumer bundle and published as sidecars (G6) |
+| Provenance | `sample_id`, `method_code`, `selected_by` (ending in the tie-break when one date has no time of day, D4), `rerun_selected_by`, `limit_source`, `limit_type` (D3), `display_factor`, `nd_policy`, `nd_rule`, `n_points`, `matrices`, `unit_source`, `n_unknown_detect`, `filters_ignored` |
+| Install | `open_consumer(con, folder, partitions, schema=...)` for published sidecars; `load_source(con, source, mapping, schema='chemduck')` for rows the host holds, as a path or in memory (a DuckDB relation from any connection, a DataFrame, an Arrow table), by the same rules and refusals as `load_to_duckdb` (G3). Both refuse to replace objects they didn't create; macros are called through `schema_cursor(con, schema)` |
+| Load report | `load_report` adds results not reportable, and results dated after the load with the latest date (G8) |
 | Dependencies | `duckdb>=1.5.4`, `pyyaml>=6.0`; no extensions. QGIS 4.2.1's Python has both (DuckDB 1.5.4, PyYAML 6.0.3) |
 
-## What ChemDuck still needs from us (upstream requests)
+## The upstream requests, answered
 
-These block a phase below, and each is a ChemDuck change, raised there rather
-than worked around here.
+Every request the first version of this plan raised is in ChemDuck, test
+first, each fix reverted once to see its test fail (29 reversions). Two
+divergences were settled the other way, with ChemDuck's code kept and its
+response amended:
 
-1. **Bug: `sample_results` checks units across matrices.** Its
-   units-conflict window (`10_sample_results.sql` line 113) partitions by
-   analyte, fraction, basis and method class, but not matrix. Called without
-   `p_matrix`, an analyte measured in water (ug/L) and soil (mg/kg) is treated
-   as mixed and silently dropped. *Blocks phase 4.*
-2. **A refused variable must be listed, not just dropped.** `sample_results`
-   under `'refuse'` leaves a mixed variable out without saying so. The plugin
-   shows what was left out, as its pivot does today. *Blocks phase 4.*
-3. **A load path into a named schema for report rows.** `load_to_duckdb` has
-   no `schema` parameter and writes a database file. The plugin's live, EIA
-   and cached reports arrive as ARII rows in memory and need loading into the
-   session database's `chemduck` schema. *Blocks phase 1 for non-parquet
-   sources.*
-4. **A per-point time-series macro**, policy-aware: one location, one
-   variable, every event, each with its value, detect flag, limit, date,
-   method and provenance. `v_timeseries_data` has no fraction, method class,
-   position or policy, and isn't in the consumer bundle. *Blocks phase 3.*
-5. **Kaplan–Meier quartiles.** The box plots need Q1/median/Q3 with the
-   undetermined flag. The plugin's `web/src/censored.js` and its independent
-   test (`tools/test_censored.py`) can move to ChemDuck as the starting
-   point. *Blocks phase 4's box plots.*
-6. **Catalogue views** for what the data holds, for the pickers: analytes by
-   matrix, fraction **and method class**; the method classes and positions
-   present. `v_analyte_summary` has no method class. *Blocks phase 2.*
-7. **A display factor as a call parameter**, separate from the policy. The
-   plugin offers "non-detects at the limit / at half the limit / hidden".
-   Only display changes between these, not selection, but today the only
-   0.5-factor policies also average. *Blocks phase 2, or decision 1 settles
-   it another way.*
-8. **`sample_results` takes `p_method_class` and `p_matrices`**, like the
-   aggregates.
-9. **A reportable-only scope**, and "dated after the load" in the load
-   report (both promised in the response; neither exists).
+- **D1, `p_nd_method`** still runs ChemDuck 0.1's aggregate unchanged,
+  because Chemrooms' maps were drawn with it. The plugin never calls it: the
+  adapter names a policy (`p_nd_policy`), always. Rows from the old path now
+  say so in `nd_rule`.
+- **D2, no refusal on a double halving**: no rule values a non-detect from
+  its reported value, so no query exists to refuse. The export's multiplier
+  is recorded (`nd_value_multiplier`, 1.0 on every non-detect with a limit
+  at ChemDuck's test facility).
+
+And one behaviour change to plan for: **`v_analyte_summary` and its sidecar
+now have one row per method class**, so a picker reading it offers field and
+lab pH as two variables. That is what phase 2 wants.
+
+## The brushed box plot, settled
+
+The linked box plot computes over the rows the other charts' brush leaves
+(`kmBoxSqlOver` on `lk_<n>_shown`), which no scope parameter expresses, so
+without a table-taking form the page would have kept its own Kaplan–Meier
+arithmetic. Asked of ChemDuck 2026-10-28
+(`docs/qgis-plugin-request-km-over-rows.md` there), built as G9.
+
+**Measured 2026-10-29** (DuckDB 1.5.5, Windows 11, this machine; scratch
+probe, not yet a repository test). The page's `kmBoxSqlOver` and
+`chemduck.km_quartiles_of` were run over the same rows: 5,559 synthetic
+samples in 400 locations, log-normal and gridded values (so ties),
+censoring from none to 95%, and 156 unknown-detect rows. Every column of
+every group was identical (n, counts, min and max detect, max limit, F0, the
+three quartiles and their undetermined flags), for each of 3 groupings x 3
+brushes (up to 398 groups, 127 with Q1 undetermined). The call had the shape
+the page will send: the brushed rows as a CTE, the macro, by its qualified
+name, in a sibling CTE of the same statement, from a cursor in `main`. Both
+took tens of milliseconds. The page's figure includes the whiskers, so the
+two times aren't the same work and aren't compared. DuckDB 1.5.4 wasn't
+re-run: QGIS 4.2.1 had been uninstalled for the beta. ChemDuck's own suite
+covers 1.5.4 and WASM 1.5.4.
+
+Whiskers and Tukey fences stay the page's. They are drawing, not a chemistry
+rule, computed from ChemDuck's quartiles and the detected values in the same
+statement.
+
+## What is still open
+
+None is a ChemDuck defect.
+
+1. **The QGIS's DuckDB.** *Checked 2026-10-29:* QGIS 4.2.3, which replaced
+   4.2.1 here, has DuckDB 1.5.5, in ChemDuck's `SUPPORTED_DUCKDB` (1.5.4,
+   1.5.5). `tools/test_chemduck_vendor.py` is the check, to run under every
+   QGIS the plugin supports.
+2. **Interactive speed, unmeasured in the plugin.** ChemDuck's own numbers on
+   its 3.45M-row test facility: `point_series` for one location 2.3 s;
+   `km_quartiles` by location 3.9 s; `load_source` of one 3,395-row
+   partition 2.8 s, most of it fixed cost. The plugin's grouped series
+   answers 300 locations in 52 ms today (CLAUDE.md), and a location click
+   plots at once. Phase 1 measures each call the plugin would make, on
+   Facility A, in QGIS's Python. A slow call is then raised with its
+   number, rather than worked around here.
+3. **The plugin's ChemDuck tools import ChemDuck's old `tools/` path**
+   (`measure_chemduck_parity.py`, `spike_chemduck/host.py`), not the
+   `chemduck` package. They move to the package when phase 1 turns the
+   parity measurement into a test.
+4. **`load_schema` prints a line per SQL file** ("Loading 03_views.sql...").
+   In QGIS that goes to the Python console's stdout. The adapter silences
+   it, as `measure_chemduck_parity.py` already does for the loader, until
+   ChemDuck logs through `logging`. That's a small request, not a blocker.
 
 ## The design after adoption
 
@@ -99,12 +146,14 @@ beside the plugin's.
 through it; nothing else in the plugin writes chemistry SQL. It:
 
 - opens ChemDuck on the session database (parquet: `open_consumer` on the
-  published sidecars; report rows: upstream request 3);
-- holds the row scope (dates, sample types) and passes it to every call, so
-  `_apply_row_scope` keeps setting it in one place;
-- maps the panel's choices to macro parameters (aggregation, policy and
-  display, fraction, matrix or matrices, method class, rollup);
-- turns ChemDuck's refusals into the panel's status-line messages;
+  published sidecars; report rows: `load_source` given a relation over the
+  store's own table, so the rows aren't copied through Python);
+- holds the row scope (dates, sample types, reportable only) and passes it
+  to every call, so `_apply_row_scope` keeps setting it in one place;
+- maps the panel's choices to macro parameters (aggregation, policy,
+  display factor, fraction, matrix or matrices, method class, rollup);
+- turns ChemDuck's refusals, `sample_results_refused`'s rows and
+  `filters_ignored` into the panel's status-line messages;
 - returns the shapes the callers use today, plus the provenance.
 
 **`ReportStore` shrinks** to the source and the plugin's own tables: open a
@@ -149,9 +198,30 @@ They're cheap, and they'd otherwise be carried into the comparison:
    matrix, fraction and method comparisons (`histogram.js:83-85`), and only
    the first matrix of a multi-matrix layer.
 
-Then: `tools/vendor_deps.py` vendors ChemDuck at a pinned commit into the
-plugin, and a test checks the pinned version, `SUPPORTED_DUCKDB` against the
+Then: `tools/vendor_chemduck.py` vendors ChemDuck at a pinned commit (`da0d3b5`
+or later) into the plugin, and a test checks the pinned version, `SUPPORTED_DUCKDB` against the
 running DuckDB, and the bundle's checksum.
+
+> *Done 2026-10-29:* ChemDuck 0.2.0 at `da0d3b5` is committed as the
+> subpackage `equis_loader.chemduck`. It's a subpackage so that another ChemDuck
+> a user has installed can't answer for it. The copy has 17 files, 372,921 bytes,
+> about 100 KB in the zip. The files are the commit's own bytes, read with
+> `git cat-file`, kept unconverted by `.gitattributes`, and hashed in
+> `VENDORED.json`. `tools/test_chemduck_vendor.py` checks the hashes and that
+> no file was added. It also checks the version, the absence of QGIS imports, the
+> running DuckDB against `SUPPORTED_DUCKDB`, an install into schema `chemduck`
+> with extensions off and nothing left in `main`, a `km_quartiles_of` answer,
+> packaging, and provenance against the checkout. A hand-edited SQL file
+> and an added file each fail it. It passes under plain Python (DuckDB
+> 1.5.5) and under QGIS 4.2.3 (Python 3.12.15, DuckDB 1.5.5, PyYAML 6.0.3,
+> Qt 6.11.0), 2026-10-29. Under QGIS the provenance step skips, because git
+> isn't on `python-qgis.bat`'s PATH.
+>
+> The five defects' QGIS tests ran in 4.2.3 the same day, with a scratch
+> settings folder (`QGIS_CUSTOM_CONFIG_PATH`; the real profile's
+> `QGIS4.ini` was unchanged): `test_offline` 248/248, `test_import_smoke`
+> 19/19, `test_parquet_source_ui` 18/18. With the export reading
+> `_analysis` again, `test_offline`'s new step fails with the StoreError.
 
 *Done when:* each defect has a failing test first, then a fix;
 `tools/test_offline.py` and `tools/test_parquet_source_ui.py` pass under
@@ -161,20 +231,30 @@ QGIS; the plugin zip carries ChemDuck and the version test passes.
 
 - The adapter opens ChemDuck on both paths. Parquet: sidecars published next
   to the manifest (phase 6), or built locally in a worker if absent
-  (8.8 s for Facility A). Reports: upstream request 3.
+  (8.8 s for Facility A). Reports: `load_source`, in the worker that builds
+  the store today.
 - Nothing in the UI changes. A debug setting logs, for each map built, the
   adapter's answer beside `ReportStore.aggregate`'s.
-- `tools/measure_chemduck_parity.py` becomes a test that compares the
-  adapter to the store and holds every difference to an **intended
-  differences list**: positions and depths kept apart, events by timestamp,
-  methods selected and reported, the quantitation limit reached, ties to the
-  later date. A difference with no entry fails.
+- `tools/measure_chemduck_parity.py` moves to the `chemduck` package and
+  the shared-rules path (`aggregate_points`, not 0.1's `aggregate_results`),
+  and becomes a test that compares the adapter to the store. It holds every
+  difference to an **intended differences list**: positions and depths kept
+  apart, events by timestamp, methods selected and reported, the
+  quantitation limit reached, ties to the later date, non-reportable results
+  left out. A difference with no entry fails.
+- **Measure the interactive calls** (open item 2): `aggregate_points` for a
+  map, `point_series` for one location and for a layer's sparklines,
+  `sample_cell_maps` for a pivot, `km_quartiles`, the catalogue views, and
+  `load_source` at live-report scale. Each is set beside the plugin's
+  number for the same answer today, on Facility A in QGIS's Python, with the
+  date and machine.
 - A **shared fixture facility**, synthetic and in this repository, exercises
   every rule; the real facility stays a pre-release smoke test.
 
 *Done when:* the parity test is green on the fixture with every difference
-listed, and on Facility A each remaining difference falls in a listed
-category.
+listed; on Facility A each remaining difference falls in a listed
+category; and the timings are recorded, with any call too slow for a click
+raised with ChemDuck.
 
 ### Phase 2 — maps
 
@@ -182,7 +262,9 @@ category.
   several points. **The panel asks how to roll up** when it must (decision 2);
   a location with one point is unaffected.
 - Layer fields gain the provenance: `method_code`, `selected_by`,
-  `limit_source`, `n_points`, `matrices`, `nd_policy`. The layer's stamped
+  `limit_source`, `limit_type`, `display_factor`, `n_points`, `matrices`,
+  `nd_policy`. A non-empty `filters_ignored` goes on the status line, as the
+  plugin's "a filter on a column the report lacks" rule says. The layer's stamped
   scope (`_stamp_scope`) adds the policy and the rollup, so a saved project
   says how its numbers were made.
 - **Guards become ChemDuck's.** The unit guard calls the macro and shows its
@@ -190,11 +272,13 @@ category.
   ChemDuck; multi-matrix layers use `p_matrices`, so ChemDuck's class guard
   replaces this plugin's unit-only one. CLAUDE.md's "matrix families are
   deliberately NOT modelled" changes with it, since ChemDuck models them.
-- The non-detect picker maps to a policy and display (decision 1).
+- The non-detect picker maps to a policy and `p_display_factor`
+  (decision 1).
 - `at_limit` is derived in the adapter: a selected non-detect (`detected` is
   false, with a limit) is at its limit, as today.
-- Pickers read ChemDuck's catalogue (upstream request 6): **variables split by
-  method class**, so "pH (field)" and "pH (lab)" are two choices.
+- Pickers read ChemDuck's catalogue (`v_analyte_summary`,
+  `v_method_classes`, `v_positions`): **variables split by method class**, so
+  "pH (field)" and "pH (lab)" are two choices.
 
 *Done when:* the parity test is green; on Facility A a map built for a fixed
 list of analytes and both aggregations matches the adapter's answer cell for
@@ -204,8 +288,9 @@ seen on the status line.
 
 ### Phase 3 — time series, sparklines, roll, location click
 
-- `series`, `series_many` → the time-series macro (upstream request 4), one
-  query for many locations, as `series_many` already is.
+- `series`, `series_many` → `point_series` with `p_locations`, one query
+  for many locations, as `series_many` already is. Phase 1's timing decides
+  whether a location click can call it directly.
 - The dock plot and sparklines keep `timeseries._is_detected`'s rule (at
   limit beats the flag), now fed from ChemDuck's detect and limit.
 - A location with several points plots one series per point, labelled by
@@ -219,17 +304,28 @@ roll draw from the adapter.
 
 ### Phase 4 — the Analysis tab
 
-- `build_pivot` → `sample_cell_maps` (after upstream requests 1, 2, 8). Cell
-  keys gain method class; the pivot's column names follow
-  (`<analyte>_<fraction>_<methodclass>`), and the page's SQL builders read the
-  same four columns per variable they read today.
+- `build_pivot` → `sample_cell_maps`, with `p_method_class` or `p_matrices`
+  as the panel chose. Cell keys gain method class; the pivot's column names
+  follow (`<analyte>_<fraction>_<methodclass>`), and the page's SQL builders
+  read the same four columns per variable they read today. What the pivot
+  lists as left out comes from `sample_results_refused` with the same
+  parameters.
 - The plugin's `QC_SUFFIX` stopgap goes when the source mapping's `qc_rules`
   are active, which waits on the data owner's answers. Until then the
   plugin's mapping declares the same rule, so there's still one place.
 - The histogram reads ChemDuck's per-sample results instead of `v_results`,
   with case-insensitive filters.
-- Box plots: Kaplan–Meier quartiles from ChemDuck (upstream request 5); the
-  page's `censored.js` retires, and its test moves to ChemDuck.
+- Box plots: Kaplan–Meier quartiles from ChemDuck, both kinds. The page's
+  box SQL becomes a `km_rows` CTE over the linked table (`grp`, `value`,
+  `detected`, the brush's predicates), `chemduck.km_quartiles_of('km_rows')`,
+  and the whisker step joined to it. `censored.js` keeps `GROUPS` (labels
+  identical to `km_quartiles`' `p_group`), the fences and `boxSummary`, and
+  loses the estimator.
+- `tools/test_censored.py` keeps its independent estimate, which is a test,
+  not a copy of the rule. It is retargeted: ChemDuck's quartiles, through
+  the page's SQL, against that estimate, plus the hand cases and Facility A.
+  The 2026-10-29 probe above becomes its comparison of the page against
+  `km_quartiles_of`, kept until the old estimator is deleted.
 - The scatter map's per-location picks (`bivariate.picks_sql`) become a
   `rank_across` pick in ChemDuck, so the scatter and the main map rank
   samples the same way.
@@ -282,9 +378,10 @@ and `test_run_nightly.py` checks the step and its failure stops.
    non-detect at its limit and uses Kaplan–Meier for statistics; the plugin
    today offers ½ DL, full limit, or excluded. Recommended: the map shows
    non-detects **at the limit, marked as non-detects**, which is the
-   response's rule; "half limit" stays a display option (upstream request
-   7); "hidden" filters non-detects out of the layer. Statistics are
-   Kaplan–Meier, said on the layer.
+   response's rule; "half limit" stays a display option
+   (`p_display_factor := 0.5`, which changes the drawn value and never the
+   selection); "hidden" filters non-detects out of the layer. Statistics
+   are Kaplan–Meier, said on the layer.
 2. **The rollup for locations with several points.** ChemDuck has no default,
    by design. Recommended for the map: ask, once per layer, only when the
    selection has multi-point locations, offering "highest (screening)", a
@@ -299,6 +396,25 @@ and `test_run_nightly.py` checks the step and its failure stops.
    pivot drops them (pinned by `test_pivot.py:170-177`). With ChemDuck's
    `['N']` scope and the source's QC rules, both drop them. Recommended:
    accept, and say so in the release notes.
+6. **Reportable only, by default.** The plugin reads `REPORTABLE_RESULT`
+   nowhere today. ChemDuck leaves non-reportable results out by default
+   where the source carries the column. That is the response's rule:
+   EQuIS's own judgement of which re-run to report. Recommended: accept. A
+   QC review that wants every result unticks it, and the layer's stamped
+   scope says which. ChemDuck found no non-reportable results at its test
+   facility, so the default changes nothing there. Facility A's count goes in
+   phase 1's intended-differences list either way.
+
+7. **Whether ChemDuck may ship with this plugin at all.** *Settled
+   2026-10-29: ChemDuck is to be opened, licence to be chosen, and vendoring
+   proceeds on that assumption.* Found 2026-10-29,
+   at phase 0's vendoring step: ChemDuck is a private repository
+   (`IntegralEnvision/chemduck`, no licence), and this plugin's is public,
+   with a zip meant for distribution. Vendoring it into either publishes it.
+   That decision is the owner's, not this plan's: open ChemDuck under a
+   licence, or ship the plugin with ChemDuck only where it is licensed (an
+   internal build that vendors it at build time, never committed here).
+   Phase 0's vendoring and everything after it wait on the answer.
 
 ## Risks
 
@@ -309,9 +425,11 @@ and `test_run_nightly.py` checks the step and its failure stops.
   as the plugin's bundle. The new QGIS beta may move it.
 - **Interactive speed.** The footer count and the pickers answer on every
   click today in tens of milliseconds. ChemDuck's macros do more (reruns,
-  same-day, events, provenance). Measure `aggregate_points` and the
-  catalogue views on Facility A before phase 2, against the numbers in
-  CLAUDE.md; ask ChemDuck for a cheaper count if needed.
+  same-day, events, provenance). Its own numbers so far are seconds, not
+  milliseconds (open item 2). Phase 1 measures every call on Facility A,
+  before phase 2 commits to one. Ask ChemDuck for a cheaper form where one is
+  needed, as its changelog shows it will: a first `sample_results` cost
+  2.1x until the scope moved after the scan.
 - **Cursors.** Macros bind tables in the caller's schema, so every call goes
   through `schema_cursor(con, "chemduck")`; and CLAUDE.md's pending-result
   rule (a pending result hides other connections' tables) applies to that
@@ -324,10 +442,10 @@ and `test_run_nightly.py` checks the step and its failure stops.
 
 | Phase | Needs from ChemDuck | Parallel with |
 | --- | --- | --- |
-| 0 Fix today's defects, vendor ChemDuck | — | — |
-| 1 Shadow, parity as a gate | 3 (report rows) | 6 |
-| 2 Maps | 6, 7 | 6 |
-| 3 Time series and sparklines | 4 | 4, 6 |
-| 4 Analysis tab | 1, 2, 5, 8 | 3, 6 |
+| 0 Fix today's defects, vendor ChemDuck | — (`da0d3b5` has everything); the beta's DuckDB checked | — |
+| 1 Shadow, parity as a gate, timings | — | 6 |
+| 2 Maps | — (possibly a cheaper call, from phase 1's timings) | 6 |
+| 3 Time series and sparklines | — (as phase 2) | 4, 6 |
+| 4 Analysis tab | — (`km_quartiles_of` landed, G9) | 3, 6 |
 | 5 Retire the copies | — | — |
 | 6 Pipeline sidecars | — | 1–4 |

@@ -19,6 +19,7 @@ python tools/test_bivariate.py         # Jenks breaks, classes and colours for t
 python tools/test_analysis.py          # the Analysis tab's chooser: catalogue, pairs, choices
 python tools/test_ternary.py           # ternary shares/colours, one-unit rule, page SQL held to ternary.py
 python tools/test_censored.py          # box plots' Kaplan-Meier quartiles vs an independent KM (node, duckdb)
+python tools/test_histogram_sql.py     # the histogram's real SQL vs the store: values, aggregation, every filter (node)
 python tools/measure_chemduck_parity.py --manifest <dir>/manifest.json --out <dir>   # vs ChemDuck, by cause
 python tools/analysis_preview.py       # the Analysis tab in a browser, no QGIS (--shots DIR: screenshots)
 
@@ -31,6 +32,8 @@ python tools/test_arcgis_parity.py      # that export's non-detect columns vs Re
 python pipeline/run_nightly.py --root data/<facility>   # one facility's check: arm on new data, rebuild what ran
 
 python tools/vendor_deps.py --target win --python 312   # build a dep bundle
+python tools/vendor_chemduck.py --commit <sha>          # vendor ChemDuck (committed; default: re-vendor the pin)
+python tools/test_chemduck_vendor.py                    # that copy: hashes, version, DuckDB tested, installs, ships
 python tools/package.py                                 # plain plugin zip
 python tools/package.py --bundle win_amd64-cp312        # zip with duckdb in it
 python tools/install.py                                 # copy into the QGIS profile
@@ -46,6 +49,7 @@ tools/test_tickable_combos.py   tools/test_bivariate_layer.py
 tools/test_depth_filter.py   (the depth and unit rows: slider dragged, spin boxes, through the dialog)
 tools/test_layer_fields.py   (every report column on the layers: names, types, GeoPackage;
                               EQUIS_PARQUET=<facility glob> adds the real facility, timed)
+tools/test_import_smoke.py   (imports, and the export reading the table when there is one)
 tools/test_analysis_task.py   (the Analysis chooser's worker, in the task manager)
 tools/try_scatter.py   tools/try_analysis_tab.py   (console probes: US-24, the Analysis tab)
 tools/try_overlay.py   (NOT a console probe: run by `qgis --code` in a throwaway
