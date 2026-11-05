@@ -154,6 +154,12 @@ CREATE OR REPLACE MACRO nd_stage_value(est, f, alln, det, dfac, n_items, win, in
 -- in, or an error naming why not: p_matrix given too, an empty list, a
 -- matrix not in matrix_classes, or matrices of different classes. caller
 -- prefixes the message. aggregate_points and the per-sample macros share it.
+--
+-- One subquery, the listed matrices against matrix_classes: every engine's
+-- scope carries this, and the optimizer orders each subquery's joins with
+-- the scan's even when p_matrices is NULL (six reads of matrix_classes cost
+-- 0.06 s of join ordering a call at the test facility). A NULL in the list
+-- is skipped, as list_contains skips it.
 
 CREATE OR REPLACE MACRO matrix_combine_class(caller, p_matrix, p_matrices) AS (
     CASE
@@ -162,18 +168,22 @@ CREATE OR REPLACE MACRO matrix_combine_class(caller, p_matrix, p_matrices) AS (
             caller || ': give p_matrix (one matrix) or p_matrices (matrices to combine), not both')
         WHEN len(CAST(p_matrices AS VARCHAR[])) = 0 THEN error(
             caller || ': p_matrices is empty; name the matrices to combine')
-        WHEN (SELECT count(*) FROM unnest(CAST(p_matrices AS VARCHAR[])) AS u(m)
-              WHERE m NOT IN (SELECT matrix FROM matrix_classes)) > 0 THEN error(
-            caller || ': matrices not curated in matrix_classes combine with nothing: '
-            || (SELECT string_agg(m, ', ' ORDER BY m) FROM unnest(CAST(p_matrices AS VARCHAR[])) AS u(m)
-                WHERE m NOT IN (SELECT matrix FROM matrix_classes)))
-        WHEN (SELECT count(DISTINCT matrix_class) FROM matrix_classes
-              WHERE list_contains(CAST(p_matrices AS VARCHAR[]), matrix)) > 1 THEN error(
-            caller || ': matrices of different classes never combine: '
-            || (SELECT string_agg(matrix || ' (' || matrix_class || ')', ', ' ORDER BY matrix)
-                FROM matrix_classes WHERE list_contains(CAST(p_matrices AS VARCHAR[]), matrix)))
-        ELSE (SELECT any_value(matrix_class) FROM matrix_classes
-              WHERE list_contains(CAST(p_matrices AS VARCHAR[]), matrix))
+        ELSE (
+            SELECT CASE
+                WHEN count(*) FILTER (WHERE u.m IS NOT NULL AND c.matrix IS NULL) > 0 THEN error(
+                    caller || ': matrices not curated in matrix_classes combine with nothing: '
+                    || string_agg(u.m, ', ' ORDER BY u.m)
+                           FILTER (WHERE u.m IS NOT NULL AND c.matrix IS NULL))
+                WHEN count(DISTINCT c.matrix_class) > 1 THEN error(
+                    caller || ': matrices of different classes never combine: '
+                    || array_to_string(list_transform(
+                           list_sort(list_distinct(list(struct_pack(m := c.matrix, k := c.matrix_class))
+                                                   FILTER (WHERE c.matrix IS NOT NULL))),
+                           lambda s: s.m || ' (' || s.k || ')'), ', '))
+                ELSE any_value(c.matrix_class)
+            END
+            FROM unnest(CAST(p_matrices AS VARCHAR[])) AS u(m)
+            LEFT JOIN matrix_classes c ON c.matrix = u.m)
     END
 );
 
@@ -217,6 +227,88 @@ CREATE OR REPLACE MACRO display_factor_check(caller, p_display_factor) AS (
          ELSE error(caller || ': p_display_factor must be 0 or more, not '
                     || CAST(p_display_factor AS VARCHAR)) END
 );
+
+-- ============================================================================
+-- point_scope / units_by_variable - What a points call reads, and its units
+-- ============================================================================
+-- aggregate_points and point_counts share both, so what is counted is what
+-- would map. point_scope: the rows of one analyte a call's filters keep
+-- (see aggregate_points for each filter), matrix being the class's under
+-- p_matrices; caller prefixes its refusals. units_by_variable: per variable
+-- (vkey) of the rows p_rows names (query_table: the caller's CTE, with
+-- vkey, units, unit_source, um and the variable's columns), its number of
+-- units and whether they conflict - refused, naming the variable, its
+-- units and their counts, unless um is 'flag'.
+
+CREATE OR REPLACE MACRO point_scope(p_caller, p_analyte, p_matrix, p_fraction, p_start_date,
+                                    p_end_date, p_sample_types, p_method_class, p_matrices,
+                                    p_locations, p_reportable_only) AS TABLE
+WITH scope AS (
+    SELECT
+    -- D6: the class the listed matrices share, or an error saying why not
+    matrix_combine_class(p_caller, p_matrix, p_matrices) AS combine_class,
+    reportable_scope(p_reportable_only) AS rep_only,
+    source_lacks('fraction') AS no_fraction,
+    source_lacks('sample_type') AS no_sample_type,
+    source_lacks('method_code') AS no_method,
+    source_lacks('matrix') AS no_matrix
+)
+SELECT
+    v.location_id, v.x, v.y, v.project,
+    COALESCE(scope.combine_class, v.matrix) AS matrix, v.matrix AS src_matrix,
+    v.unit_source,
+    COALESCE(v.top_depth, 0)    AS top_depth,
+    COALESCE(v.bottom_depth, 0) AS bottom_depth,
+    COALESCE(v.depth, 0)        AS depth,
+    v.sample_date, v.sample_datetime, v.position, v.sample_id, v.fraction, v.meas_basis,
+    v.analyte, v.anl_sm_mb, v.analyte_group, v.cas_number,
+    v.result, v.detected, v.units, v.std_units, v.result_id, v.method_code, v.date_analyzed,
+    v.method_class, v.reportable, v.test_rank,
+    v.detection_limit, v.limit_source, v.limit_type,
+    v.reporting_limit, v.method_detection_limit, v.quantitation_limit
+FROM v_results_core v
+CROSS JOIN scope
+WHERE v.analyte = p_analyte
+  AND (p_matrix IS NULL OR v.matrix = p_matrix OR v.matrix IS NULL)
+  AND (p_matrix IS NULL OR v.matrix IS NOT NULL OR scope.no_matrix)
+  AND (p_matrices IS NULL OR list_contains(CAST(p_matrices AS VARCHAR[]), v.matrix))
+  AND (p_method_class IS NULL OR v.method_class = p_method_class OR scope.no_method)
+  AND (p_fraction IS NULL OR v.fraction = p_fraction OR v.fraction IS NULL)
+  AND (p_fraction IS NULL OR v.fraction IS NOT NULL OR scope.no_fraction)
+  AND (p_start_date IS NULL OR v.sample_date >= p_start_date)
+  AND (p_end_date IS NULL OR v.sample_date <= p_end_date)
+  AND (p_locations IS NULL
+       OR v.location_id IN (SELECT unnest(CAST(p_locations AS VARCHAR[]))))
+  AND (scope.no_sample_type
+       OR CASE WHEN p_sample_types IS NULL THEN in_normal_scope(v.sample_type)
+               ELSE in_sample_scope(v.sample_type, p_sample_types) END)
+  AND (v.reportable IS DISTINCT FROM FALSE OR NOT scope.rep_only);
+
+CREATE OR REPLACE MACRO units_by_variable(p_rows, p_caller) AS TABLE
+WITH unit_counts AS (
+    SELECT vkey, units, count(*) AS n,
+           bool_or(unit_source = 'contradicts_matrix') AS contra,
+           any_value(analyte || ' in ' || matrix || COALESCE(', ' || fraction, '')
+                     || COALESCE(', ' || meas_basis, '')
+                     || COALESCE(', method class ' || method_class, '')) AS label,
+           any_value(um) AS um
+    FROM query_table(p_rows) GROUP BY vkey, units
+)
+SELECT vkey, count(units) AS n_units,
+       count(units) > 1 OR bool_or(contra) AS conflict
+FROM unit_counts
+GROUP BY vkey
+HAVING CASE
+    WHEN any_value(um) = 'refuse' AND (count(units) > 1 OR bool_or(contra)) THEN CAST(error(
+        p_caller || ': ' || any_value(label)
+        || CASE WHEN bool_or(contra) THEN ' has a unit that contradicts its matrix ('
+                ELSE ' is in more than one unit (' END
+        || string_agg(COALESCE(units, 'no unit') || ': ' || n, ', ' ORDER BY units)
+        || '); see load_report (units) and v_unit_conflicts. Narrow the call (p_matrix, '
+        || 'p_fraction, p_method_class), curate a conversion and reload, or pass '
+        || 'p_units := ''flag''') AS BOOLEAN)
+    ELSE TRUE
+END;
 
 -- ============================================================================
 -- aggregate_points - One value per measurement point, by policy
@@ -335,52 +427,21 @@ WITH params AS (
                    || COALESCE(CAST(p_units AS VARCHAR), 'NULL')
                    || ' (units are converted at load, never here)')
     END AS um,
-    -- D6: the class the listed matrices share, or an error saying why not
-    matrix_combine_class('aggregate_points', p_matrix, p_matrices) AS combine_class,
     display_factor_check('aggregate_points', p_display_factor) AS dfac_call,
-    reportable_scope(p_reportable_only) AS rep_only,
-    source_lacks('fraction') AS no_fraction,
-    source_lacks('sample_type') AS no_sample_type,
-    source_lacks('method_code') AS no_method,
-    source_lacks('matrix') AS no_matrix,
     filters_ignored(p_matrix, p_fraction, p_sample_types, p_method_class,
                     reportable_scope(p_reportable_only)) AS ignored
 ),
 filtered AS (
     SELECT
-        v.location_id, v.x, v.y,
-        COALESCE(params.combine_class, v.matrix) AS matrix, v.matrix AS src_matrix,
-        v.unit_source, params.um,
-        COALESCE(v.top_depth, 0)    AS top_depth,
-        COALESCE(v.bottom_depth, 0) AS bottom_depth,
-        COALESCE(v.depth, 0)        AS depth,
-        v.sample_date, v.sample_datetime, v.position, v.sample_id, v.fraction, v.meas_basis,
-        v.analyte, v.anl_sm_mb, v.analyte_group, v.cas_number,
-        v.result, v.detected, v.units, v.std_units, v.result_id, v.method_code, v.date_analyzed,
-        v.method_class, v.reportable, v.test_rank,
-        v.detection_limit, v.limit_source, v.limit_type,
-        v.reporting_limit, v.method_detection_limit, v.quantitation_limit,
+        v.* EXCLUDE (project), params.um,
         nd_policy_choice(p_nd_policy, p_nd_policy_version, pr.nd_policy, pr.nd_policy_version,
                          ds.ds_policy, ds.ds_version) AS pol
-    FROM v_results_denormalized v
+    FROM point_scope('aggregate_points', p_analyte, p_matrix, p_fraction, p_start_date,
+                     p_end_date, p_sample_types, p_method_class, p_matrices, p_locations,
+                     p_reportable_only) v
     LEFT JOIN project pr ON pr.project_name = v.project
     CROSS JOIN v_nd_dataset_policy ds
     CROSS JOIN params
-    WHERE v.analyte = p_analyte
-      AND (p_matrix IS NULL OR v.matrix = p_matrix OR v.matrix IS NULL)
-      AND (p_matrix IS NULL OR v.matrix IS NOT NULL OR params.no_matrix)
-      AND (p_matrices IS NULL OR list_contains(CAST(p_matrices AS VARCHAR[]), v.matrix))
-      AND (p_method_class IS NULL OR v.method_class = p_method_class OR params.no_method)
-      AND (p_fraction IS NULL OR v.fraction = p_fraction OR v.fraction IS NULL)
-      AND (p_fraction IS NULL OR v.fraction IS NOT NULL OR params.no_fraction)
-      AND (p_start_date IS NULL OR v.sample_date >= p_start_date)
-      AND (p_end_date IS NULL OR v.sample_date <= p_end_date)
-      AND (p_locations IS NULL
-           OR v.location_id IN (SELECT unnest(CAST(p_locations AS VARCHAR[]))))
-      AND (params.no_sample_type
-           OR CASE WHEN p_sample_types IS NULL THEN in_normal_scope(v.sample_type)
-                   ELSE in_sample_scope(v.sample_type, p_sample_types) END)
-      AND (v.reportable IS DISTINCT FROM FALSE OR NOT params.rep_only)
 ),
 withpol AS (
     SELECT
@@ -419,31 +480,8 @@ withpol AS (
 ),
 -- Each variable's units across the call (D5): refused, unless flagged, when
 -- more than one, or one that contradicts the matrix.
-unit_counts AS (
-    SELECT vkey, units, count(*) AS n,
-           bool_or(unit_source = 'contradicts_matrix') AS contra,
-           any_value(analyte || ' in ' || matrix || COALESCE(', ' || fraction, '')
-                     || COALESCE(', ' || meas_basis, '')
-                     || COALESCE(', method class ' || method_class, '')) AS label,
-           any_value(um) AS um
-    FROM withpol GROUP BY vkey, units
-),
 unit_vars AS (
-    SELECT vkey, count(units) AS n_units,
-           count(units) > 1 OR bool_or(contra) AS conflict
-    FROM unit_counts
-    GROUP BY vkey
-    HAVING CASE
-        WHEN any_value(um) = 'refuse' AND (count(units) > 1 OR bool_or(contra)) THEN CAST(error(
-            'aggregate_points: ' || any_value(label)
-            || CASE WHEN bool_or(contra) THEN ' has a unit that contradicts its matrix ('
-                    ELSE ' is in more than one unit (' END
-            || string_agg(COALESCE(units, 'no unit') || ': ' || n, ', ' ORDER BY units)
-            || '); see load_report (units) and v_unit_conflicts. Narrow the call (p_matrix, '
-            || 'p_fraction, p_method_class), curate a conversion and reload, or pass '
-            || 'p_units := ''flag''') AS BOOLEAN)
-        ELSE TRUE
-    END
+    FROM units_by_variable('withpol', 'aggregate_points')
 ),
 -- What is constant per measurement identity, once: its fields, its policy,
 -- its units and its unknown detect statuses.
@@ -468,9 +506,19 @@ ident AS (
            count(*) FILTER (WHERE detected IS NULL) AS n_unknown_detect
     FROM withpol GROUP BY ikey
 ),
+-- How many results each event holds. A sample with no re-run, in an event
+-- of one sample, gives the next two stages nothing to choose among or
+-- pool: its row goes round their GROUP BYs, whose arg_min, list and
+-- count(DISTINCT) over every row took 0.23 s of a 0.54 s map at the test
+-- facility, where no sample has a re-run and under 1% of rows share an
+-- event. IS NOT DISTINCT FROM: ev_key would be NULL for an undated sample,
+-- which the schema refuses today; the join must never drop a row.
+ev_n AS (
+    SELECT ikey, ev_key, count(*) AS n_ev FROM withpol GROUP BY ikey, ev_key
+),
 -- Stage 1: reruns - the results of one sample.
 s1_items AS (
-    SELECT ikey, sample_id, sample_date, ev_key, has_time, display_factor, r_reruns,
+    SELECT w.ikey, sample_id, sample_date, w.ev_key, has_time, display_factor, r_reruns, n.n_ev,
            -- reportable first, then the declared test-type precedence, then rank_reruns
            CASE WHEN reportable THEN 0 WHEN reportable IS NULL THEN 1 ELSE 2 END AS rep_rank,
            COALESCE(test_rank, 0) AS tt_rank,
@@ -487,12 +535,14 @@ s1_items AS (
                sample_id := CAST(sample_id AS VARCHAR), depth := CAST(depth AS DOUBLE),
                units := CAST(units AS VARCHAR), std_units := CAST(std_units AS VARCHAR),
                rerun_by := CAST(NULL AS VARCHAR)) AS v
-    FROM withpol
+    FROM withpol w
+    JOIN ev_n n ON n.ikey = w.ikey AND n.ev_key IS NOT DISTINCT FROM w.ev_key
 ),
 s1 AS (
-    SELECT ikey, sample_id, sample_date, ev_key, has_time, v FROM s1_items WHERE r_reruns.est = 'pool'
+    SELECT ikey, sample_id, sample_date, ev_key, has_time, n_ev, v
+    FROM s1_items WHERE r_reruns.est = 'pool'
     UNION ALL
-    SELECT ikey, sample_id, sample_date, ev_key, has_time,
+    SELECT ikey, sample_id, sample_date, ev_key, has_time, n_ev,
            struct_update(nd_stage_value(rule.est, rule.f, rule.alln, rule.det, dfac, n_items,
                                         win, inps, lims, dets, attrs),
                          rerun_by := rerun_by) AS v
@@ -506,6 +556,7 @@ s1 AS (
             FROM (
                 SELECT ikey, sample_id, any_value(sample_date) AS sample_date,
                        any_value(ev_key) AS ev_key, bool_or(has_time) AS has_time,
+                       any_value(n_ev) AS n_ev,
                        any_value(r_reruns) AS rule, any_value(display_factor) AS dfac,
                        count(*) AS n_items,
                        CASE
@@ -521,16 +572,27 @@ s1 AS (
                            FILTER (WHERE r_reruns.est NOT IN ('select', 'refuse')) AS items,
                        struct_pack(depth := min(v.depth), units := min(v.units),
                                    std_units := min(v.std_units)) AS attrs
-                FROM s1_items WHERE r_reruns.est <> 'pool'
+                FROM s1_items WHERE r_reruns.est <> 'pool' AND n_ev > 1
                 GROUP BY ikey, sample_id
+                UNION ALL
+                -- alone in its event: what the GROUP BY makes of one row
+                SELECT ikey, sample_id, sample_date, ev_key, has_time, n_ev,
+                       r_reruns AS rule, display_factor AS dfac,
+                       CAST(1 AS BIGINT) AS n_items, CAST(NULL AS VARCHAR) AS rerun_by,
+                       v AS win,
+                       CASE WHEN r_reruns.est NOT IN ('select', 'refuse')
+                            THEN [struct_pack(inp := inp, v := v)] END AS items,
+                       struct_pack(depth := v.depth, units := v.units,
+                                   std_units := v.std_units) AS attrs
+                FROM s1_items WHERE r_reruns.est <> 'pool' AND n_ev = 1
             )
         )
     )
 ),
 -- Stage 2: same_day - the samples of one date.
 s2_items AS (
-    SELECT s1.ikey, s1.sample_date, s1.ev_key, s1.has_time, s1.v, i.r_same_day, i.display_factor,
-           i.event_grain,
+    SELECT s1.ikey, s1.sample_date, s1.ev_key, s1.has_time, s1.n_ev, s1.v, i.r_same_day,
+           i.display_factor, i.event_grain,
            rank_across_key(s1.v.detected, s1.v.result, s1.v.lim, s1.ev_key,
                            s1.sample_id, i.across_nd_limit) AS k,
            nd_input_value(s1.v.detected, s1.v.result, s1.v.lim, s1.v.computed, i.r_same_day.f) AS inp
@@ -562,8 +624,18 @@ s2 AS (
                            FILTER (WHERE r_same_day.est NOT IN ('select', 'refuse')) AS items,
                        struct_pack(depth := min(v.depth), units := min(v.units),
                                    std_units := min(v.std_units)) AS attrs
-                FROM s2_items WHERE r_same_day.est <> 'pool'
+                FROM s2_items WHERE r_same_day.est <> 'pool' AND n_ev > 1
                 GROUP BY ikey, ev_key
+                UNION ALL
+                -- alone in its event: what the GROUP BY makes of one row
+                SELECT ikey, ev_key, sample_date, has_time, event_grain AS grain,
+                       r_same_day AS rule, display_factor AS dfac,
+                       CAST(1 AS BIGINT) AS n_items, v AS win,
+                       CASE WHEN r_same_day.est NOT IN ('select', 'refuse')
+                            THEN [struct_pack(inp := inp, v := v)] END AS items,
+                       struct_pack(depth := v.depth, units := v.units,
+                                   std_units := v.std_units) AS attrs
+                FROM s2_items WHERE r_same_day.est <> 'pool' AND n_ev = 1
             )
         )
     )
@@ -892,3 +964,56 @@ FROM aggregate_points(p_analyte, p_event_agg := 'most_recent', p_matrix := p_mat
                       p_reportable_only := p_reportable_only, p_each_sample := TRUE)
 ORDER BY location_id, matrix, top_depth, bottom_depth, position, fraction, meas_basis,
          method_class, sample_date, sample_datetime, sample_id;
+
+-- ============================================================================
+-- point_counts - What a points call would map, counted
+-- ============================================================================
+-- For a footer asked on every click ("N locations, M results would map"):
+-- one row, over the rows aggregate_points reads for the same scope
+-- (point_scope) and with its unit refusal (units_by_variable), but none of
+-- its policy stages, which never drop a point:
+--   n_locations  locations with a point (aggregate_points' locations)
+--   n_points     measurement points (aggregate_points' rows)
+--   n_samples    a point's samples, each once (point_series' rows)
+--   n_results    the results those are drawn from
+-- The non-detect policy changes none of these, so it takes no policy; a
+-- policy aggregate_points would refuse is not checked here.
+
+CREATE OR REPLACE MACRO point_counts(
+    p_analyte,
+    p_matrix := NULL,
+    p_fraction := NULL,
+    p_start_date := NULL,
+    p_end_date := NULL,
+    p_sample_types := NULL,
+    p_units := 'refuse',
+    p_method_class := NULL,
+    p_matrices := NULL,
+    p_locations := NULL,
+    p_reportable_only := NULL
+) AS TABLE
+WITH params AS (
+    SELECT CASE
+        WHEN p_units IN ('refuse', 'flag') THEN p_units
+        ELSE error('point_counts: p_units must be refuse or flag, not '
+                   || COALESCE(CAST(p_units AS VARCHAR), 'NULL')
+                   || ' (units are converted at load, never here)')
+    END AS um
+),
+pc_rows AS (
+    SELECT s.location_id, s.sample_id, s.analyte, s.matrix, s.fraction, s.meas_basis,
+           s.method_class, s.units, s.unit_source, params.um,
+           hash(s.location_id, s.matrix, s.top_depth, s.bottom_depth, s.position,
+                s.fraction, s.meas_basis, s.analyte, s.method_class) AS ikey,
+           hash(s.matrix, s.fraction, s.meas_basis, s.analyte, s.method_class) AS vkey
+    FROM point_scope('point_counts', p_analyte, p_matrix, p_fraction, p_start_date,
+                     p_end_date, p_sample_types, p_method_class, p_matrices, p_locations,
+                     p_reportable_only) s
+    CROSS JOIN params
+)
+SELECT count(DISTINCT r.location_id) AS n_locations,
+       count(DISTINCT r.ikey) AS n_points,
+       count(DISTINCT (r.ikey, r.sample_id)) AS n_samples,
+       count(*) AS n_results
+FROM pc_rows r
+JOIN units_by_variable('pc_rows', 'point_counts') u USING (vkey);

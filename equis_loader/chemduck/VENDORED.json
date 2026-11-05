@@ -1,18 +1,18 @@
 {
  "note": "Written by tools/vendor_chemduck.py. Do not edit these files: re-vendor, and tools/test_chemduck_vendor.py checks them.",
  "repository": "https://github.com/IntegralEnvision/chemduck.git",
- "commit": "da0d3b54d36feb1bf5d088b25e61e97278863522",
- "subject": "km_quartiles_of: Kaplan-Meier quartiles over rows the caller hands in",
+ "commit": "daddfb6913b87520bc6227d4d971840420cba5c9",
+ "subject": "Merge pull request #13 from IntegralEnvision/collapse-bypass",
  "version": "0.2.0",
- "vendored": "2026-10-29",
+ "vendored": "2026-11-05",
  "files": {
   "__init__.py": {
    "bytes": 2852,
    "sha256": "617d3089e07505eda2ad92680de679cec467f4eaeffc77f82669164d22ddb5d3"
   },
   "arii_hybrid.py": {
-   "bytes": 29282,
-   "sha256": "f404d4a5c2e9d172d78011682c63d9a8404e042ebb64911d497e166c274d52ec"
+   "bytes": 29683,
+   "sha256": "57626d3a4e416a012d93b2aef119b0f83cd73c5bbef33558488dccc5337a1161"
   },
   "eav_helpers.py": {
    "bytes": 3740,
@@ -35,8 +35,8 @@
    "sha256": "4ad521c33e64b49b11cbb2a0f0ed4ffb5539a2b993f107917ed2fc48738fa1de"
   },
   "sql/03_views.sql": {
-   "bytes": 28379,
-   "sha256": "1a9912bf37efd9060a36eee65209570ccf8965ad03f5ca7fa306a8875168f2fe"
+   "bytes": 28871,
+   "sha256": "a92fcc2588e1a7cf88fa700679fe2ea3ef573b50a9cba6527f5f8dd23879d31e"
   },
   "sql/04_extended_tables.sql": {
    "bytes": 5529,
@@ -55,20 +55,20 @@
    "sha256": "1c0f61d5c0f44831bf15ac80aded08866b6adbfd038a866795226e67ca88b23f"
   },
   "sql/08_aggregate_points.sql": {
-   "bytes": 47020,
-   "sha256": "6288404a799097aa33bb977d059c5c36242655c18460f0b6f5299178f2d97d4b"
+   "bytes": 53347,
+   "sha256": "5f902e3b0ef4174193642e3b55f1d404f428c2900adb6714a76c481c4183c5f9"
   },
   "sql/08_aggregate_results.sql": {
-   "bytes": 17861,
-   "sha256": "11f37f28c2f3e981813493c628ef56fac7fa3decfbe19ccbf7069c59bf783236"
+   "bytes": 17845,
+   "sha256": "0c2667fe1972e26fab2497cee8fbbda271195300c3457da1efd5f42c5230ee70"
   },
   "sql/09_desurvey.sql": {
    "bytes": 19610,
    "sha256": "0b265847faf23b494cf3d87e58de545c055ef54f44e580c5833db099bc961327"
   },
   "sql/10_sample_results.sql": {
-   "bytes": 24740,
-   "sha256": "68d0db748253a382a5b601c08ddcfeb0e97da9b69506d8b59f494eac3e7c6a26"
+   "bytes": 25217,
+   "sha256": "31263b004c12625cdabe81aa6d1f10de434d6b13194cd98540b4eef51c6807cc"
   },
   "sql/optional/spatial.sql": {
    "bytes": 881,

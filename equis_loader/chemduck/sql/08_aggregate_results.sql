@@ -3,7 +3,7 @@
 -- results for an analyte+filter+aggregation configuration.
 --
 -- This file is ordered AFTER 03_views.sql because the macro references
--- v_results_denormalized in its body. DuckDB validates table references at
+-- v_results_core in its body. DuckDB validates table references at
 -- macro definition time, so the view must exist first.
 
 -- ============================================================================
@@ -154,7 +154,7 @@ WITH filtered AS (
         v.units,
         v.std_units,
         v.result_id
-    FROM v_results_denormalized v
+    FROM v_results_core v
     WHERE v.analyte = p_analyte
       AND (p_matrix IS NULL OR v.matrix = p_matrix)
       AND (p_fraction IS NULL OR v.fraction = p_fraction)

@@ -6,8 +6,13 @@
 -- ============================================================================
 -- This is the primary view for most analytical queries
 -- Excludes QA/QC sample types and rejected records by default
+--
+-- v_results_core is every column but percent_moisture. The moisture lookup
+-- reads every result (3.45M at the test facility, whatever the analyte),
+-- and DuckDB keeps an unused LEFT JOIN, so the engines read the core view;
+-- v_results_denormalized is the core view with the moisture joined back.
 
-CREATE OR REPLACE VIEW v_results_denormalized AS
+CREATE OR REPLACE VIEW v_results_core AS
 SELECT
     -- Location fields
     l.location_id,
@@ -104,7 +109,6 @@ SELECT
         END)
     END AS limit_type,
     r.report_limit,
-    moist.moisture_result AS percent_moisture,
     make_dup_id(l.location_id, s.sample_date, s.depth, r.fraction, r.meas_basis) AS dup_id,
     dv_qualifier(r.detected, r.estimated) AS dv_qual,
     EXTRACT(YEAR FROM s.sample_date) AS sample_year,
@@ -113,6 +117,18 @@ SELECT
 FROM results r
 JOIN samples s ON r.sample_id = s.sample_id
 JOIN locations l ON s.location_id = l.location_id
+WHERE
+    -- Exclude QA/QC and special sample types
+    (s.sample_type IS NULL OR s.sample_type NOT IN ('AVG', 'REAN', 'DNU', 'IDW', 'NR'))
+    -- Exclude rejected records (qualifier ending in R)
+    AND (r.qualifier IS NULL OR r.qualifier NOT LIKE '%R');
+
+CREATE OR REPLACE VIEW v_results_denormalized AS
+SELECT
+    c.* EXCLUDE (dup_id, dv_qual, sample_year, sample_month),
+    moist.moisture_result AS percent_moisture,
+    c.dup_id, c.dv_qual, c.sample_year, c.sample_month
+FROM v_results_core c
 LEFT JOIN (
     SELECT
         r_m.sample_id,
@@ -127,12 +143,7 @@ LEFT JOIN (
         PARTITION BY COALESCE(r_m.lab_sample_id, r_m.sample_id)
         ORDER BY r_m.result_id
     ) = 1
-) moist ON COALESCE(r.lab_sample_id, r.sample_id) = COALESCE(moist.lab_sample_id, moist.sample_id)
-WHERE
-    -- Exclude QA/QC and special sample types
-    (s.sample_type IS NULL OR s.sample_type NOT IN ('AVG', 'REAN', 'DNU', 'IDW', 'NR'))
-    -- Exclude rejected records (qualifier ending in R)
-    AND (r.qualifier IS NULL OR r.qualifier NOT LIKE '%R');
+) moist ON COALESCE(c.lab_sample_id, c.sample_id) = COALESCE(moist.lab_sample_id, moist.sample_id);
 
 -- ============================================================================
 -- 2.2 v_results_for_mapping - Pre-aggregated for spatial display

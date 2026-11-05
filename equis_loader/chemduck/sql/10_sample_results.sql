@@ -117,7 +117,7 @@ filtered AS (
         v.unit_source,
         nd_policy_choice(p_nd_policy, p_nd_policy_version, pr.nd_policy, pr.nd_policy_version,
                          ds.ds_policy, ds.ds_version) AS pol
-    FROM v_results_denormalized v
+    FROM v_results_core v
     LEFT JOIN project pr ON pr.project_name = v.project
     CROSS JOIN v_nd_dataset_policy ds
     WHERE (analyte_list IS NULL
@@ -142,12 +142,24 @@ scoped AS (
            OR CASE WHEN p_sample_types IS NULL THEN in_normal_scope(f.sample_type)
                    ELSE in_sample_scope(f.sample_type, p_sample_types) END)
       AND (f.reportable IS DISTINCT FROM FALSE OR NOT params.rep_only)
+),
+-- The units of each variable, grouped and joined back: as count(DISTINCT)
+-- OVER a window it took 0.11 s of a 0.35 s km_quartiles call at the test
+-- facility, a tenth of that grouped. hash() keys NULLs as the window
+-- partitioned them.
+per_unit AS (
+    SELECT hash(var_matrix, fraction, meas_basis, analyte, method_class) AS vkey, units,
+           bool_or(unit_source = 'contradicts_matrix') AS contra
+    FROM scoped GROUP BY ALL
+),
+var_units AS (
+    SELECT vkey, count(units) > 1 AS units_mixed,
+           COALESCE(bool_or(contra), FALSE) AS units_contradict
+    FROM per_unit GROUP BY vkey
 )
-SELECT f.*,
-       count(DISTINCT f.units) OVER var > 1 AS units_mixed,
-       COALESCE(bool_or(f.unit_source = 'contradicts_matrix') OVER var, FALSE) AS units_contradict
+SELECT f.*, u.units_mixed, u.units_contradict
 FROM scoped f
-WINDOW var AS (PARTITION BY f.var_matrix, f.fraction, f.meas_basis, f.analyte, f.method_class);
+JOIN var_units u ON u.vkey = hash(f.var_matrix, f.fraction, f.meas_basis, f.analyte, f.method_class);
 
 -- ============================================================================
 -- sample_results - one row per (sample, column): the long form

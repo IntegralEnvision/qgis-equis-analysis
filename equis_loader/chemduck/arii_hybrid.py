@@ -573,6 +573,11 @@ def open_consumer(con, folder, partition_files, schema=None):
     replaces what the last open made. Refuses (SchemaConflictError), creating
     nothing, if the schema holds an object of a name ChemDuck uses that
     ChemDuck did not create. Returns the parsed sidecars.json.
+
+    Turns on parquet_metadata_cache for con: every call binds the results
+    view, which reads each partition's footer, and the cache halves that
+    bind. DuckDB checks a file before reusing its footer, so a partition
+    re-exported under the same name is read fresh.
     """
     folder = Path(folder)
     sidecars = json.loads((folder / "sidecars.json").read_text(encoding="utf-8"))
@@ -593,6 +598,8 @@ def open_consumer(con, folder, partition_files, schema=None):
 
     cur = install_target(con, schema)
     check_install(cur, [s for _, s in data + sql])
+    # GLOBAL: a plain SET on cur would hold for cur's session alone.
+    cur.execute("SET GLOBAL parquet_metadata_cache = true")
     # The data first, with no retry: the bootstrap's CREATE TABLE IF NOT
     # EXISTS must find them, not make empty tables in their place.
     for source, stmt in data:
