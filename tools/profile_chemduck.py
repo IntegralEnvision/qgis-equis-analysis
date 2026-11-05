@@ -24,15 +24,20 @@ Run it under BOTH interpreters and compare. That is the open question:
   open's first statement with bound parameters. DuckDB's Python client
   imports numpy, pandas and pyarrow on its first parameter binding:
   `SELECT ?` alone took 0.84 s in plain Python and 1.93 s in QGIS, and
-  imported all three. That explains about 1-2 s. It does not explain
-  17.9 s: a standalone repeat right after took 1.9 s.
-  - Untested: a cold-disk or antivirus cost on QGIS's own pandas and
-    pyarrow binaries the first time a process loads them.
-  - Untested: whether QGIS has already imported them by the time the
-    plugin opens ChemDuck, in which case the plugin never pays this.
-  - Possible fixes not tried: on ChemDuck's side, registry inserts with
-    no parameters, or one batched insert. On the plugin's side, pay the
-    import once, early, off the main thread.
+  imported all three. ChemDuck's own measurement put the rest of the
+  17.9 s on a cold read of those packages' files, once per boot.
+- **ChemDuck 2986b3f (branch open-no-bind, 2026-11-05)**: the open binds
+  no parameter and writes its registry in two statements, 207 statements
+  become 115. Through this script in QGIS: open 0.84-0.96 s, a second
+  open 0.84-0.91 s. The import is NOT gone: the session's first bound
+  parameter pays it, and the plugin binds parameters on every map
+  (store.py's aggregate, chem.py's points). This script now names the step
+  that paid it ("first bound parameter: paid by ..."); with warm file
+  caches it was 2.17 s on the first click. Before 2026-11-05 the script
+  itself bound parameters between the open and the session, which hid it.
+  - Untested: whether real QGIS, with its usual plugins, has imported the
+    three before this plugin's first click.
+  - Not tried: the plugin importing them early, off the main thread.
 - **The calls.** They take the same time under both interpreters. At 4
   threads they are within budget, except one location's series at
   0.21-0.22 s against 0.2. The plugin's own store answers each in
@@ -238,9 +243,13 @@ def environment(con, chemduck):
              "autoinstall_known_extensions", "extension_directory",
              "parquet_metadata_cache", "temp_directory", "enable_external_access",
              "allow_unsigned_extensions", "home_directory")
+    # Literals, not bound parameters: the first parameter bound on a
+    # connection imports numpy, pandas and pyarrow (1-3 s, more cold), and
+    # this ran between the open and the session, so it paid that for the
+    # session and hid it from every step (2026-11-05).
     settings = dict(con.execute(
         "SELECT name, value FROM duckdb_settings() WHERE name IN (%s)"
-        % ", ".join("?" * len(names)), list(names)).fetchall())
+        % ", ".join("'%s'" % n for n in names)).fetchall())
     src = Path(chemduck.__file__).resolve().parent
     return {
         "python": sys.version.split()[0], "executable": sys.executable,
@@ -348,10 +357,13 @@ def session_steps(store, chem, cases, scatter):
                       lambda c=chemical, k=kw: store.count_for(c, **k),
                       sql("FROM point_counts(?, p_matrix := ?, p_fraction := ?)",
                           [chemical, matrix, fname])))
+        # Literals: a bound parameter here would pay the first bind's import
+        # before the session, out of every step's sight (see run_side).
         row = store.con.execute(
-            "SELECT location FROM v_results WHERE chemical = ? AND upper(matrix) = ? "
-            "AND upper(fraction) = ? GROUP BY 1 ORDER BY count(*) DESC LIMIT 1",
-            [chemical, matrix, fraction]).fetchone()
+            "SELECT location FROM v_results WHERE chemical = %s AND upper(matrix) = %s "
+            "AND upper(fraction) = %s GROUP BY 1 ORDER BY count(*) DESC LIMIT 1"
+            % tuple("'%s'" % str(v).replace("'", "''")
+                    for v in (chemical, matrix, fraction))).fetchone()
         if row:
             where = row[0]
             steps.append(("series at %s (most rows), %s" % (where, label), "series_one",
@@ -377,15 +389,32 @@ def session_steps(store, chem, cases, scatter):
     return steps
 
 
+BIND_IMPORTS = ("numpy", "pandas", "pyarrow")
+
+
+def bind_imports_loaded():
+    """Which of the packages DuckDB's Python client imports on the first
+    bound parameter this process has loaded so far."""
+    return [m for m in BIND_IMPORTS if m in sys.modules]
+
+
 def run_side(fn):
     if fn is None:
         return None
+    before = set(bind_imports_loaded())
     try:
         wall, cpu, answer = clock(fn)
         rows = len(answer) if hasattr(answer, "__len__") else None
-        return {"wall_s": wall, "cpu_s": cpu, "rows": rows}
+        out = {"wall_s": wall, "cpu_s": cpu, "rows": rows}
     except Exception as exc:     # noqa: BLE001 - recorded beside the others
-        return {"error": "%s: %s" % (type(exc).__name__, str(exc).splitlines()[0][:200])}
+        out = {"error": "%s: %s" % (type(exc).__name__, str(exc).splitlines()[0][:200])}
+    # The step that paid the first bind's import, named rather than left
+    # inside its cold time: since ChemDuck 2986b3f the open binds nothing,
+    # so a session's first click pays it.
+    imported = [m for m in bind_imports_loaded() if m not in before]
+    if imported:
+        out["imported"] = imported
+    return out
 
 
 def profile_step(chem, name, fn, folder):
@@ -488,6 +517,7 @@ def main():
         store, chem, opened = open_like_the_plugin(
             facility, parts, str(pub), args.threads, statements,
             out / "open.pstats" if args.cprofile else None)
+        opened["bind_imports_loaded_after_open"] = bind_imports_loaded()
         report["environment"] = environment(store.con, chemduck)
         report["open"] = opened
         with open(out / "open_statements.csv", "w", newline="", encoding="utf-8") as handle:
@@ -521,6 +551,8 @@ def main():
                                        "  [failed, retried]" if s["failed"] else ""))
         print("extensions loaded: before %s, after %s"
               % (opened["extensions_loaded_before"], opened["extensions_loaded_after"]))
+        print("loaded by the open, of %s: %s"
+              % ("/".join(BIND_IMPORTS), opened["bind_imports_loaded_after_open"] or "none"))
 
         if not args.open_only:
             cases = parse_cases(args.cases) + (top_cases(store, args.top) if args.top else [])
@@ -558,6 +590,13 @@ def main():
                     ("  " + cold["error"]) if "error" in cold else
                     ("  OVER" if entry["within_budget"] is False else "")))
             report["steps"] = results
+            for entry in results:
+                for side in ("chemduck", "plugin"):
+                    paid = (entry[side + "_cold"] or {}).get("imported")
+                    if paid:
+                        print("first bound parameter: paid by the %s side of %r, cold %s "
+                              "(imported %s)" % (side, entry["step"],
+                                                fmt(entry[side + "_cold"]), ", ".join(paid)))
 
             if args.explain:
                 folder = out / "profiles"
