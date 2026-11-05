@@ -173,14 +173,201 @@ ALL_METHODS = None
 # has, and before 2026-10-03 the date range and the QC checkbox did nothing
 # to it at all. A sediment map with Dates ticked for 2015-11-05..2026-01-01
 # drew a 2003-01-01 result.
-NO_ROW_SCOPE = (None, None, frozenset())
+#
+# Depth joined it on 2026-10-30, as a fourth part: (top, bottom, unit), or
+# None for no depth filter. It never shapes a fetch (selection_panel.py says
+# why) - but it is still a statement about which rows exist, and putting it
+# anywhere else would make it a filter some question forgets.
+#
+# Units joined it the same day, as a fifth: the result units kept, as a
+# sorted tuple, or () for every unit. A solid's matrix legitimately carries
+# a few leachate results in water's units - Facility A's sediment holds
+# 3,401 in mg/L beside 635,904 in mg/kg (2026-10-30) - and the unit guard
+# then refuses every map of those analytes. Choosing the unit is the way
+# out that keeps the guard whole: the rows go, rather than being compared.
+# The unit is the one the guard reads (the coalesced result unit), so what
+# the filter offers is exactly what the guard complains about.
+NO_ROW_SCOPE = (None, None, frozenset(), None, ())
+
+# Metres per unit of depth. A depth filter compares numbers that may be
+# written in different units within ONE matrix: Facility A's sediment carries
+# 331,986 results in cm beside 1,624 in m (measured 2026-10-30), so a bound
+# of "0 to 5" read as plain numbers takes the top 5 cm of one and the top 5 m
+# of the other, and the map looks fine.
+#
+# This is not the presentation-level unit translation CLAUDE.md rules out.
+# That rule is about concentrations, whose factors are EQuIS's to own and
+# depend on the analyte; a centimetre is a hundredth of a metre by
+# definition, and there is nothing for the pipeline to know that this does
+# not. A unit not listed here is never guessed at: its rows compare only
+# against a filter written in that same unit (see depth_factor).
+DEPTH_UNIT_METRES = {
+    "m": 1.0,
+    "cm": 0.01,
+    "mm": 0.001,
+    "ft": 0.3048,
+    "in": 0.0254,
+}
+# The spellings EQuIS's RT_UNIT and hand-made sources actually use for the
+# same units. Compared lower-cased, so "FT" and "Ft" need no entry.
+DEPTH_UNIT_ALIASES = {
+    "meter": "m", "meters": "m", "metre": "m", "metres": "m",
+    "centimeter": "cm", "centimeters": "cm", "centimetre": "cm",
+    "centimetres": "cm",
+    "millimeter": "mm", "millimeters": "mm", "millimetre": "mm",
+    "millimetres": "mm",
+    "feet": "ft", "foot": "ft",
+    "inch": "in", "inches": "in",
+}
+# Depths are compared after converting and rounding to this many places, in
+# Python and in SQL alike, so 30 cm is 0.3 m on both sides of a bound rather
+# than 0.30000000000000004 on one of them.
+DEPTH_PLACES = 9
 
 
-def row_scope(start=None, end=None, sample_types=None):
+def depth_unit(text):
+    """A depth unit as compared: trimmed, lower-cased, aliases resolved.
+
+    A blank unit stays "", which is a unit of its own: a source whose depths
+    carry no unit can still be filtered, in those numbers, but never
+    converted to or from anything.
+    """
+    text = str(text or "").strip().lower()
+    return DEPTH_UNIT_ALIASES.get(text, text)
+
+
+def depth_factor(unit, target):
+    """What a depth in `unit` is multiplied by to read in `target`, or None.
+
+    None means the two cannot be compared: one of them is a unit this module
+    does not know, and its rows are left out of the filter rather than
+    compared as though the numbers meant the same thing.
+    """
+    unit, target = depth_unit(unit), depth_unit(target)
+    if unit == target:
+        return 1.0
+    if unit in DEPTH_UNIT_METRES and target in DEPTH_UNIT_METRES:
+        return DEPTH_UNIT_METRES[unit] / DEPTH_UNIT_METRES[target]
+    return None
+
+
+def depth_interval(start, end):
+    """(top, bottom) of a sample's interval, or None when it has no depth.
+
+    A point sample (no end depth, or end equal to start) is an interval of
+    no thickness. A row with only an end depth is placed there too, and an
+    interval written bottom-first is turned round; Facility A has neither
+    (2026-10-30), so these are guards, not a measured case.
+    """
+    if start is None and end is None:
+        return None
+    top = start if start is not None else end
+    bottom = end if end is not None else start
+    return (top, bottom) if top <= bottom else (bottom, top)
+
+
+def in_depth(scope_depth, start, end, unit):
+    """Whether a row's depth interval lies wholly inside a depth filter.
+
+    WHOLLY inside, not merely overlapping: a 0-10 ft composite under a
+    "0 to 2 ft" filter is mostly material from below the range, and the
+    number it reports is not a surface number. A row with no depth is
+    outside any depth filter, as an undated row is outside any date range.
+    """
+    interval = depth_interval(start, end)
+    if interval is None:
+        return False
+    top, bottom, target = scope_depth
+    factor = depth_factor(unit, target)
+    if factor is None:
+        return False
+    if top is not None and round(interval[0] * factor, DEPTH_PLACES) < top:
+        return False
+    if bottom is not None and round(interval[1] * factor, DEPTH_PLACES) > bottom:
+        return False
+    return True
+
+
+def depth_extent_from(groups, boundaries=()):
+    """The range a depth filter can offer, from per-unit summaries.
+
+    `groups` is [(unit, rows, shallowest, deepest)], one per depth unit
+    already normalised by depth_unit(). `boundaries` is every (unit, depth)
+    at which some interval starts or ends, in the same units. Shared by
+    ReportTable and ReportStore, which each produce both their own way, so
+    the choice of unit and the conversions are made in one place.
+
+    The unit offered is the one most rows are in (ties by name), and every
+    other unit is converted into it. Rows in a unit that cannot be converted
+    are counted under `unconverted` and left out of the range, because a
+    filter on them would compare numbers that mean different things.
+    Returns None when no row has a depth.
+
+    `stops` are the boundaries in that unit, sorted and distinct: the only
+    depths at which moving a bound changes which rows are kept. A row is in
+    when its top is at or below the filter's top and its bottom at or above
+    the filter's bottom (in_depth), so between two neighbouring boundaries
+    nothing can change. A slider evenly spaced over 0-200 ft instead moved a
+    foot at a time and could not pick out a 0-0.33 ft soil interval (seen
+    2026-10-30); stops crowd where the samples do, which is the surface.
+    """
+    groups = [g for g in groups if g[1]]
+    if not groups:
+        return None
+    unit = sorted(groups, key=lambda g: (-g[1], g[0]))[0][0]
+    shallowest = deepest = None
+    rows = 0
+    unconverted = {}
+    for name, count, top, bottom in groups:
+        factor = depth_factor(name, unit)
+        if factor is None:
+            unconverted[name] = unconverted.get(name, 0) + count
+            continue
+        rows += count
+        top = round(top * factor, DEPTH_PLACES)
+        bottom = round(bottom * factor, DEPTH_PLACES)
+        shallowest = top if shallowest is None else min(shallowest, top)
+        deepest = bottom if deepest is None else max(deepest, bottom)
+    stops = set()
+    for name, depth in boundaries:
+        factor = depth_factor(name, unit)
+        if factor is not None and depth is not None:
+            stops.add(round(depth * factor, DEPTH_PLACES))
+    return {"unit": unit, "top": shallowest, "bottom": deepest,
+            "rows": rows, "unconverted": unconverted,
+            "stops": tuple(sorted(stops))}
+
+
+def matrix_key(matrix):
+    """A matrix filter as something hashable that compares as the filter does.
+
+    ALL_MATRICES and an empty collection are both "no filter", and codes
+    compare case-insensitively, so all of those meet at one key.
+    """
+    if matrix is ALL_MATRICES:
+        return None
+    if isinstance(matrix, (list, tuple, set, frozenset)):
+        codes = frozenset(str(m).upper() for m in matrix if str(m or "").strip())
+        return codes or None
+    return frozenset([str(matrix or "").upper()])
+
+
+def row_scope(start=None, end=None, sample_types=None, depth=None,
+              units=None):
     """Normalise a row scope: dates as date, sample types upper-cased.
 
     A datetime is reduced to its date: the bounds are whole days, inclusive
     at both ends, so a sample taken at 3 PM on the end date is inside.
+
+    `depth` is (top, bottom, unit) with either bound None for an open end,
+    or None for no depth filter. Bounds are inclusive and rounded as depths
+    are (DEPTH_PLACES), so a bound typed as 0.3 meets a depth stored as
+    30 cm.
+
+    `units` are result units, compared trimmed and case-SENSITIVELY, as the
+    unit guard counts them: "mg/L" and "MG/L" are two entries there, so they
+    are two here. "" is the unit of a row with none. A sorted tuple rather
+    than a set, because analysis.py and pivot.py key caches on str(scope).
     """
     def day(value):
         if isinstance(value, datetime.datetime):
@@ -188,7 +375,14 @@ def row_scope(start=None, end=None, sample_types=None):
         return value
     codes = frozenset(str(code).strip().upper() for code in sample_types or ()
                       if str(code or "").strip())
-    return (day(start), day(end), codes)
+    if depth is not None:
+        top, bottom, unit = depth
+        top = None if top is None else round(float(top), DEPTH_PLACES)
+        bottom = None if bottom is None else round(float(bottom), DEPTH_PLACES)
+        depth = (top, bottom, depth_unit(unit))
+    units = tuple(sorted({str(u if u is not None else "").strip()
+                          for u in units or ()}))
+    return (day(start), day(end), codes, depth, units)
 
 
 MOST_RECENT = "most_recent"
@@ -316,6 +510,38 @@ def missing_message(missing, subject="This report"):
     return text
 
 
+# The report columns that describe a SAMPLE, not a result: EQuIS's facility,
+# location and sample records as Analytical Results II names them. They are
+# what a pivot's point - one sample, many results - may carry (CLAUDE.md, "A
+# multivariate point is one sample"). Declared, not inferred per map: over
+# Facility A's 106,408 multi-row samples (2026-10-30) exactly these held one
+# value in every sample, while REPORTABLE_RESULT, APPROVAL_CODE and
+# VALIDATOR_QUALIFIERS did too only by coincidence - they are result facts
+# that happen to agree there - and inferring from a map's own samples let
+# qualifiers and limits in wherever its few samples agreed. Checking every
+# sample instead took 98 s. sample_fields() still drops one of these that
+# disagrees within a mapped sample, so nothing is ever shown as a sample's
+# that one of its rows contradicts.
+SAMPLE_COLUMNS = (
+    "FACILITY_ID", "FACILITY_CODE", "SYS_LOC_CODE", "LOC_NAME", "SAMPLE_ID",
+    "SYS_SAMPLE_CODE", "SAMPLE_NAME", "SAMPLE_DATE", "SAMPLEDATE",
+    "SAMPLETIME", "SAMPLE_TYPE_CODE", "START_DEPTH", "END_DEPTH",
+    "DEPTH_UNIT", "MATRIX_CODE", "TASK_CODE", "TASK_CODE_2",
+    "PARENT_SAMPLE_CODE", "FIELD_SDG", "COMPOSITE_YN", "X_COORD", "Y_COORD",
+    "Z_COORD_AVG", "ZFROM", "ZTO", "LONGITUDE", "LATITUDE",
+    "CUSTOM_FIELD_1",
+)
+# What @extra_fields adds from the sample and location tables arrives
+# table-prefixed (DT_SAMPLE_CUSTOM_FIELD_1), so the prefix says where it is from.
+SAMPLE_PREFIXES = ("DT_SAMPLE_", "DT_LOCATION_", "DT_FACILITY_")
+
+
+def is_sample_column(header):
+    """Whether a report column describes the sample rather than a result."""
+    name = str(header or "").strip().upper()
+    return name in SAMPLE_COLUMNS or name.startswith(SAMPLE_PREFIXES)
+
+
 class ReportTable:
     """Rows of one report run, indexed for the chemical workflow."""
 
@@ -355,6 +581,11 @@ class ReportTable:
         # scope: parse_date is ~5 us a row, which is seconds on a real report
         # and should be paid once, not on every change of the date range.
         self._dates = None
+        # depth_extent() per matrix. It reads `rows`, which never change, and
+        # the panel asks again on every change of chemical. units_in() the
+        # same.
+        self._depth_extents = {}
+        self._unit_offers = {}
 
     # ----------------------------------------------------------- row scope
 
@@ -362,31 +593,40 @@ class ReportTable:
     def scope(self):
         return self._scope
 
-    def set_row_scope(self, start=None, end=None, sample_types=None):
+    def set_row_scope(self, start=None, end=None, sample_types=None,
+                      depth=None, units=None):
         """Narrow every later question to rows in a date range and of a type.
 
         `start` and `end` are dates, either may be None for an open end, and
         both are inclusive. `sample_types` is a collection of codes ("N"), or
-        empty for every type. Returns True when the scope actually changed,
-        so a caller knows whether anything it showed is now out of date.
+        empty for every type. `depth` is (top, bottom, unit), or None.
+        `units` are the result units kept, or empty for every unit.
+        Returns True when the scope actually changed, so a caller knows
+        whether anything it showed is now out of date.
 
         The rules, which ReportStore.set_row_scope must match exactly and
         tools/test_store_parity.py holds it to:
 
         - A date bound excludes UNDATED rows. A row with no date cannot be
           placed inside a range, and EQuIS's own @start_date drops them too.
+        - A depth filter excludes rows with no depth, and keeps a row only
+          when its whole interval lies inside the bounds, converted into the
+          filter's unit (in_depth).
         - A filter on a column the report lacks matches everything, as for
           matrix and method: dropping every row is the worse failure.
         - Sample types compare case-insensitively; a blank type is not "N".
+        - Units compare exactly, trimmed, as cell("unit") coalesces them.
         """
-        scope = row_scope(start, end, sample_types)
+        scope = row_scope(start, end, sample_types, depth, units)
         if scope == self._scope:
             return False
         self._scope = scope
-        start, end, codes = scope
+        start, end, codes, depth, units = scope
         dated = (start is not None or end is not None) and self.column("date") >= 0
         typed = bool(codes) and self.column("sample_type") >= 0
-        if not dated and not typed:
+        deep = depth is not None and self._has_depth()
+        united = bool(units) and bool(self._unit_at)
+        if not dated and not typed and not deep and not united:
             self._view = self.rows
         else:
             if dated and self._dates is None:
@@ -406,12 +646,79 @@ class ReportTable:
                         continue
                 if typed and self.cell(row, "sample_type").upper() not in codes:
                     continue
+                if deep and not in_depth(
+                        depth, parse_number(self.cell(row, "start_depth")),
+                        parse_number(self.cell(row, "end_depth")),
+                        self.cell(row, "depth_unit")):
+                    continue
+                if united and self.cell(row, "unit") not in units:
+                    continue
                 view.append(row)
             self._view = view
         # The index holds positions into the view, so it goes with it.
         self._by_chemical = None
         self._by_chemical_location = None
         return True
+
+    def _has_depth(self):
+        return self.column("start_depth") >= 0 or self.column("end_depth") >= 0
+
+    def depth_extent(self, matrix=ALL_MATRICES):
+        """The depths a depth filter can offer: see depth_extent_from.
+
+        Over every row, NOT the scoped view: the range the slider spans must
+        not shrink as the slider narrows it, or the filter could only ever
+        be tightened. Narrowed by matrix, since sediment in cm and a well in
+        m want different ranges and different units.
+        """
+        if not self._has_depth():
+            return None
+        key = matrix_key(matrix)
+        if key not in self._depth_extents:
+            self._depth_extents[key] = self._depth_extent(matrix)
+        return self._depth_extents[key]
+
+    def _depth_extent(self, matrix):
+        groups = {}
+        boundaries = set()
+        for row in self.rows:
+            if not self._in_matrix(row, matrix):
+                continue
+            interval = depth_interval(
+                parse_number(self.cell(row, "start_depth")),
+                parse_number(self.cell(row, "end_depth")))
+            if interval is None:
+                continue
+            unit = depth_unit(self.cell(row, "depth_unit"))
+            count, top, bottom = groups.get(unit, (0, interval[0], interval[1]))
+            groups[unit] = (count + 1, min(top, interval[0]),
+                            max(bottom, interval[1]))
+            boundaries.add((unit, interval[0]))
+            boundaries.add((unit, interval[1]))
+        return depth_extent_from(
+            [(unit, n, top, bottom) for unit, (n, top, bottom) in groups.items()],
+            boundaries)
+
+    def units_in(self, matrix=ALL_MATRICES):
+        """[(unit, rows)] for a unit filter to offer, commonest first.
+
+        Over every row in the matrix, not the scoped view, for depth_extent's
+        reason: ticking a unit must not take the others off the list. Every
+        row counts, value or not - a row the filter would drop is a row it
+        should name. "" is the unit of rows with none.
+        """
+        if not self._unit_at:
+            return []
+        key = matrix_key(matrix)
+        if key not in self._unit_offers:
+            counts = {}
+            for row in self.rows:
+                if self._in_matrix(row, matrix):
+                    unit = self.cell(row, "unit")
+                    counts[unit] = counts.get(unit, 0) + 1
+            self._unit_offers[key] = sorted(
+                counts.items(), key=lambda item: (-item[1], item[0]))
+        return self._unit_offers[key]
 
     # --------------------------------------------------------------- lookup
 
@@ -494,6 +801,66 @@ class ReportTable:
     def missing_for_analysis(self):
         """Columns needed for the chemical workflow that this report lacks."""
         return missing_required(lambda key: self._index.get(key, -1) >= 0)
+
+    def report_fields(self):
+        """[(header, type)] of the report's own columns, in its own order.
+
+        What a map layer carries beside the canonical result fields, so a
+        feature holds everything the report said about its row - sample code,
+        qualifiers, limits, lab, SDG - not just the dozen columns the rules
+        read. Every column is text here: a report arrives as text, and typing
+        it would be guessing at what "<0.5" or "ND" in a numeric column
+        meant. ReportStore.report_fields() types them when the source does.
+        """
+        return [(header, "VARCHAR") for header in self.headers]
+
+    def report_cells(self, row):
+        """One row's report columns, aligned with report_fields().
+
+        An empty cell is None, because "the report said nothing" is NULL in
+        a layer's attribute table, and ReportStore's raw columns read it the
+        same way. Nothing else is touched: no stripping, no parsing, since
+        these are the report's own words.
+        """
+        width = len(self.headers)
+        cells = [None if cell in (None, "") else cell for cell in row[:width]]
+        return cells + [None] * (width - len(cells))
+
+    def sample_fields(self, samples, matrix=ALL_MATRICES):
+        """The sample's own report columns, for a pivot's points.
+
+        A scatter or ternary point is one sample, not one row: it stands for
+        every result that sample has, so only SAMPLE_COLUMNS belong on its
+        layer - never a result's value, method or qualifier, which would put
+        one analyte's beside another's.
+
+        A sample column that disagrees within any of `samples` - across its
+        in-scope rows, an empty cell counting as a value - is left off the
+        layer rather than shown with one row's value. EQuIS gives a sample
+        one value, so this is a guard, not an expectation.
+
+        Returns (report_fields() of the kept columns, {sample: cells}).
+        """
+        wanted = {str(code).strip() for code in samples or () if code}
+        listed = [index for index, header in enumerate(self.headers)
+                  if is_sample_column(header)]
+        if self.column("sample") < 0 or not wanted or not listed:
+            return [], {}
+        seen = {}
+        for row in self._view:
+            code = self.cell(row, "sample")
+            if code in wanted and self._in_matrix(row, matrix):
+                cells = self.report_cells(row)
+                seen.setdefault(code, []).append([cells[i] for i in listed])
+        if not seen:
+            return [], {}
+        kept = [n for n in range(len(listed))
+                if all(len({cells[n] for cells in rows}) <= 1
+                       for rows in seen.values())]
+        fields = self.report_fields()
+        return ([fields[listed[n]] for n in kept],
+                {code: [rows[0][n] for n in kept]
+                 for code, rows in seen.items()})
 
     def cell(self, row, key):
         if key == "unit":
@@ -739,10 +1106,14 @@ class ReportTable:
     def aggregate(self, chemical, cas_rn=None, how=MOST_RECENT,
                   detected_only=False, non_detect=ND_HALF,
                   matrix=ALL_MATRICES, fraction=ANY_FRACTION,
-                  method=ALL_METHODS):
+                  method=ALL_METHODS, fields=False):
         """Per-location summary of one analyte.
 
         Returns {location_code: {value, unit, date, detect, count, ...}}.
+        With `fields`, each entry also carries "fields": report_cells() of
+        the row that WON - the one sample the mapped number came from, so
+        its sample code, qualifiers and lab are that number's, never a mix
+        from several rows - or None where no row had a usable number.
         Rows without a usable number are counted but cannot win the aggregate.
         `matrix` restricts the rows considered: without it a maximum can be
         drawn from a soil result and plotted next to groundwater criteria.
@@ -781,6 +1152,8 @@ class ReportTable:
                     "detect_count": 0,
                 },
             )
+            if fields and "fields" not in entry:
+                entry["fields"] = None
             entry["count"] += 1
             if detect in ("Y", "YES", "TRUE", "1"):
                 entry["detect_count"] += 1
@@ -835,6 +1208,8 @@ class ReportTable:
                 entry["date"] = when
                 entry["detect"] = detect
                 entry["at_limit"] = at_limit
+                if fields:
+                    entry["fields"] = self.report_cells(row)
         return summary
 
     def units_for(self, chemical, cas_rn=None, detected_only=False,
@@ -869,7 +1244,8 @@ class ReportTable:
 
     def rows_for(self, chemical, cas_rn=None, detected_only=False,
                  non_detect=ND_HALF, matrix=ALL_MATRICES,
-                 fraction=ANY_FRACTION, method=ALL_METHODS, limit=0):
+                 fraction=ANY_FRACTION, method=ALL_METHODS, limit=0,
+                 fields=False):
         """Every result for one analyte, one dict per row.
 
         The unaggregated counterpart to aggregate(): where that collapses a
@@ -878,7 +1254,8 @@ class ReportTable:
         all, so one map feature can be one result.
 
         Returns a list of {location, value, unit, date, detect, at_limit,
-        matrix, fraction, sample_type, seq}, sorted by location then date.
+        matrix, fraction, sample_type, seq}, sorted by location then date,
+        and with `fields`, "fields": the row's report_cells().
         `seq` is the row's 0-based ordinal within its own location, which is
         what lets a caller tell the members of one stack apart.
 
@@ -911,7 +1288,7 @@ class ReportTable:
             value, at_limit = self.row_value(row, non_detect=non_detect)
             if value is None:
                 continue
-            collected.setdefault(location, []).append({
+            entry = {
                 "location": location,
                 "value": value,
                 "unit": self.cell(row, "unit"),
@@ -926,7 +1303,10 @@ class ReportTable:
                 "depth_unit": self.cell(row, "depth_unit"),
                 "custom_1": self.cell(row, "custom_1"),
                 "method": self.cell(row, "method").upper(),
-            })
+            }
+            if fields:
+                entry["fields"] = self.report_cells(row)
+            collected.setdefault(location, []).append(entry)
 
         dropped = 0
         if limit and sum(len(v) for v in collected.values()) > limit:

@@ -149,6 +149,27 @@ def encode_date(value):
     return str(value)
 
 
+def describe_depth(depth):
+    """A depth filter as words: "0 to 0.3 m", "from 2 ft", "to 15 cm"."""
+    top, bottom, unit = depth
+
+    def number(value):
+        return ("%.4f" % value).rstrip("0").rstrip(".")
+    unit = (" " + unit) if unit else ""
+    if top is not None and bottom is not None:
+        return "%s to %s%s" % (number(top), number(bottom), unit)
+    if top is not None:
+        return "from %s%s" % (number(top), unit)
+    if bottom is not None:
+        return "to %s%s" % (number(bottom), unit)
+    return "any" + unit
+
+
+def describe_unit(unit):
+    """A result unit as shown: "" is a row reported with none."""
+    return unit if unit else "(no unit)"
+
+
 class DataSelection(object):
     """The subset of a facility's chemistry to work with.
 
@@ -166,7 +187,7 @@ class DataSelection(object):
     def __init__(self, facility_id=None, analytes=None, locations=None,
                  matrices=None, fraction=None, fractions=None, methods=None,
                  sample_types=(SAMPLE_TYPE_NORMAL,), start=None, end=None,
-                 location_groups=None):
+                 location_groups=None, depth=None, units=None):
         self.facility_id = facility_id
         self.analytes = list(analytes or [])
         self.locations = list(locations or [])
@@ -189,6 +210,16 @@ class DataSelection(object):
         self.sample_types = list(sample_types or [])
         self.start = start
         self.end = end
+        # (top, bottom, unit), or None. Deliberately absent from
+        # to_parameters(), though the report has @min_start_depth and
+        # @max_end_depth: see the depth row in selection_panel.py. It
+        # reaches the rows through the row scope (report_data.row_scope),
+        # on every source.
+        self.depth = depth
+        # Result units kept, or empty for all. Local only, like depth: the
+        # report's @reporting_unit CONVERTS rather than filters, and there is
+        # no parameter that drops a unit. Through the row scope as well.
+        self.units = list(units or [])
         # Filters the last apply_to() could not set, because the report has no
         # such parameter. Empty unless a report is missing one.
         self.unsupported = []
@@ -293,6 +324,20 @@ class DataSelection(object):
                 "Quality-control samples are excluded (%s)."
                 % ", ".join(excluded).lower()
             )
+        if self.depth is not None:
+            # Water usually has no depth, so a depth filter can empty a
+            # water map without any one control looking wrong.
+            notes.append(
+                "Results with no depth are excluded while the depth filter "
+                "is on."
+            )
+        if self.units:
+            # Said, because it outlives the chemical it was chosen for: a
+            # unit ticked to clear one analyte's leachate also hides every
+            # organic reported in ug/kg.
+            notes.append(
+                "Only results in %s are kept."
+                % ", ".join(describe_unit(u) for u in self.units))
         if not self.analytes:
             notes.append(
                 "No chemicals selected, so the whole report is requested. "
@@ -322,6 +367,9 @@ class DataSelection(object):
         if self.start or self.end:
             bits.append("%s to %s" % (encode_date(self.start) or "start",
                                       encode_date(self.end) or "now"))
+        # Not depth: this says what a fetch asks EQuIS for ("Ready to fetch:
+        # ..."), and depth never reaches the request. The layer's provenance
+        # names it, from the rows' scope.
         return ", ".join(bits)
 
     # -------------------------------------------------------- client-side

@@ -1026,6 +1026,39 @@ def main():
                  for i in range(every.fields().count())]
         check("unagg: the matrix reaches the layer at last",
               "result_matrix" in names, str(names))
+
+        # --- every report column, on both layer kinds --------------------
+        # The winning row's, on the aggregate: MW-1's maximum is 12.0 from
+        # 2022, so its sample date must be 2022's - not the first row's, and
+        # not the newest row's.
+        agg_names = [aggregated.fields().at(i).name()
+                     for i in range(aggregated.fields().count())]
+        report_headers = list(panel._report_table.headers)
+
+        def absent(layer_names):
+            # A clash with the layer's own field (RESULT_UNIT beside
+            # result_unit, START_DEPTH beside start_depth) arrives renamed.
+            return [h for h in report_headers if h not in layer_names
+                    and h + "_report" not in layer_names]
+        check("fields: every report column reaches the aggregated layer",
+              not absent(agg_names), str(absent(agg_names)))
+        check("fields: and the unaggregated one", not absent(names),
+              str(absent(names)))
+        check("fields: a clash is renamed, the layer's own field kept",
+              "START_DEPTH_report" in names and "start_depth" in names,
+              str(names))
+        mw1 = [f for f in aggregated.getFeatures()
+               if str(f[dlg.LOCATION_FIELD]).upper() == "MW-1"]
+        check("fields: the aggregate's columns are the WINNING row's",
+              len(mw1) == 1 and mw1[0]["RESULT_NUMERIC"] == "12.0"
+              and mw1[0]["SAMPLE_DATE"] == "01/01/2022",
+              str([(f["RESULT_NUMERIC"], f["SAMPLE_DATE"]) for f in mw1]))
+        pairs = sorted((f["result_seq"], f["RESULT_NUMERIC"], f["SAMPLE_DATE"])
+                       for f in every.getFeatures()
+                       if str(f[dlg.LOCATION_FIELD]).upper() == "MW-1")
+        check("fields: each result carries its own row",
+              pairs == [(0, "5.0", "01/01/2020"), (1, "8.0", "01/01/2021"),
+                        (2, "12.0", "01/01/2022")], str(pairs))
         check("unagg: so does the fraction", "result_fraction" in names)
         codes = [f[dlg.LOCATION_FIELD] for f in every.getFeatures()]
         check("unagg: a location repeats, once per result",

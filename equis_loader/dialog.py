@@ -87,6 +87,8 @@ from .report_data import (
     missing_message,
 )
 from .data_selection import (
+    describe_depth,
+    describe_unit,
     FRACTION_DISSOLVED,
     FRACTION_TOTAL,
     FRACTIONS,
@@ -2444,6 +2446,25 @@ class EquisDialog(QDockWidget):
         """
         return self._report_store or self._report_table
 
+    @property
+    def _layer_source(self):
+        """What a map layer is built from: `_analysis`, unless it lacks fields.
+
+        A layer carries every column the report has (report_fields), so it
+        must be asked of something that kept them. A parquet store and the
+        table both did; the live path's background store did not - it is
+        built with_raw=False, see ReportStore.from_table - and asking it
+        would raise. The table is resident whenever that store is, and
+        tools/test_store_parity.py holds the two to the same answers, winner
+        row included, so this chooses where the columns come from and
+        nothing else. The export makes the same choice for the same reason.
+        """
+        analysis = self._analysis
+        if (analysis is not None and not analysis.report_fields()
+                and self._report_table is not None):
+            return self._report_table
+        return analysis
+
     def _apply_row_scope(self):
         """Narrow the rows in hand to the panel's dates and sample types.
 
@@ -2465,7 +2486,8 @@ class EquisDialog(QDockWidget):
         changed = False
         for holder in (self._report_table, self._report_store):
             if holder is not None and holder.set_row_scope(
-                    selection.start, selection.end, selection.sample_types):
+                    selection.start, selection.end, selection.sample_types,
+                    selection.depth, selection.units):
                 changed = True
         return changed
 
@@ -2904,7 +2926,7 @@ class EquisDialog(QDockWidget):
         return pivot
 
     def _build_scatter_map(self, stations, breaks, x_meta, y_meta, phrase=None,
-                           z_meta=None):
+                           z_meta=None, matrix=None):
         """The scatter's own map layer: one point per station, bivariate.
 
         Called by LinkedViewsController.draw_scatter with the stations and
@@ -2927,6 +2949,13 @@ class EquisDialog(QDockWidget):
         # in a project must not read as "most recent" when it is the
         # highest arsenic in 2014.
         wkid = facility.get("wkid") or self._service_wkid
+        # Each station is ONE sample, so it carries the sample's own report
+        # columns - code, date, depth, task - and no result's. One grouped
+        # query for every station; 0.3-1.4 s per matrix on Facility A.
+        source = self._layer_source
+        sample_fields = (source.sample_fields(
+            [s.get("sample") for s in stations], matrix=matrix)
+            if source is not None else None)
         if z_meta is not None:
             # A ternary: coloured by composition (ternary.py), not classes.
             name = "%s - %s : %s : %s (ternary map, %s)" % (
@@ -2936,14 +2965,15 @@ class EquisDialog(QDockWidget):
             layer, placed, unplaced = build_ternary_layer(
                 name, self._location_pages, stations,
                 [x_meta, y_meta, z_meta], fallback_wkid=wkid,
-                location_field=LOCATION_FIELD)
+                location_field=LOCATION_FIELD, sample_fields=sample_fields)
         else:
             name = "%s - %s x %s (scatter map, %s)" % (
                 facility.get("name", "EQuIS"), x_meta.get("chemical"),
                 y_meta.get("chemical"), phrase or "most recent sample")
             layer, placed, unplaced = build_bivariate_layer(
                 name, self._location_pages, stations, x_meta, y_meta, breaks,
-                fallback_wkid=wkid, location_field=LOCATION_FIELD)
+                fallback_wkid=wkid, location_field=LOCATION_FIELD,
+                sample_fields=sample_fields)
         if layer is None:
             self._set_status("The scatter map could not be built.",
                              Qgis.MessageLevel.Warning)
@@ -3565,7 +3595,7 @@ class EquisDialog(QDockWidget):
                 self._on_matrix_changed()
                 rescoped = False            # already re-counted
         if rescoped:
-            self._on_rows_rescoped("Date range or sample types")
+            self._on_rows_rescoped("Date range, depth or sample types")
         # Which methods and fractions exist is analyte-specific - a metals
         # suite and an organics suite share a report but never a result - so
         # the offers follow the chosen chemical, not just the matrix.
@@ -3642,6 +3672,15 @@ class EquisDialog(QDockWidget):
                 analyte.get("chemical"), analyte.get("cas_rn"),
                 self._matrix_mode())]
         )
+        # Depth by matrix, not by chemical: sediment in cm and wells in m
+        # want different ranges, but a slider that resized with every
+        # chemical picked would never stay where it was put.
+        self.selection_panel.set_depth_extent(
+            table.depth_extent(self._matrix_mode()))
+        # Units by matrix too, for the same reason: the stray leachate in a
+        # solid's matrix is a few rows in mg/L across every analyte, and a
+        # unit ticked to clear them should not vanish with the next chemical.
+        self.selection_panel.set_units(table.units_in(self._matrix_mode()))
 
     def _prepare_live_report(self):
         """Create this user's report for the facility and fill the pickers.
@@ -4518,7 +4557,8 @@ class EquisDialog(QDockWidget):
             # and the caller takes the preview down.
             self._set_status(
                 "Not mapped: %s is reported in more than one unit (%s). "
-                "Narrow the matrix or method, or choose 'Every result'."
+                "Choose the unit to keep under Unit, narrow the matrix or "
+                "method, or choose 'Every result'."
                 % (mixed[0][0], detail), Qgis.MessageLevel.Warning)
             return False
 
@@ -4532,7 +4572,9 @@ class EquisDialog(QDockWidget):
             "below a result of 168 ug/L." % (
                 detail, dict(AGGREGATIONS).get(how, how).lower()))
         box.setInformativeText(
-            "Narrow the matrix or method until one unit remains, or map "
+            "Tick the unit to keep under Unit in the data selection - a "
+            "solid's few leachate results in mg/L go that way - or narrow "
+            "the matrix or method until one unit remains, or map "
             "every result so each feature carries its own unit. To fix it "
             "at the source, set the report's Result/Unit parameter "
             "(@reporting_unit) so EQuIS converts before the data arrives.")
@@ -4686,18 +4728,21 @@ class EquisDialog(QDockWidget):
         built = []
         warnings = []
         empty = []
+        source = self._layer_source
+        report_fields = source.report_fields()
         try:
             for analyte in analytes:
                 summary = {}
                 results = []
                 if how == UNAGGREGATED:
-                    results, dropped = self._analysis.rows_for(
+                    results, dropped = source.rows_for(
                         analyte["chemical"], analyte["cas_rn"],
                         non_detect=self._non_detect_mode(),
                         matrix=self._matrix_mode(),
                         fraction=self._fraction_mode(),
                         method=self._method_mode(),
                         limit=UNAGGREGATED_ROW_LIMIT,
+                        fields=bool(report_fields),
                     )
                     if dropped:
                         warnings.append(
@@ -4707,12 +4752,13 @@ class EquisDialog(QDockWidget):
                                "{:,}".format(UNAGGREGATED_ROW_LIMIT), dropped,
                                "" if dropped == 1 else "s"))
                 else:
-                    summary = self._analysis.aggregate(
+                    summary = source.aggregate(
                         analyte["chemical"], analyte["cas_rn"], how=how,
                         non_detect=self._non_detect_mode(),
                         matrix=self._matrix_mode(),
                         fraction=self._fraction_mode(),
                         method=self._method_mode(),
+                        fields=bool(report_fields),
                     )
                 # The symbology is part of the name: two views of one chemical
                 # can now coexist, and two identically named layers in the
@@ -4759,6 +4805,7 @@ class EquisDialog(QDockWidget):
                         fallback_wkid=facility.get("wkid") or self._service_wkid,
                         location_field=LOCATION_FIELD, storage=storage,
                         gpkg_path=gpkg_path, table_name=table_name,
+                        report_fields=report_fields,
                     )
                 else:
                     layer, matched, unmatched, warning = build_joined_layer(
@@ -4767,6 +4814,7 @@ class EquisDialog(QDockWidget):
                         fallback_wkid=facility.get("wkid") or self._service_wkid,
                         location_field=LOCATION_FIELD, storage=storage,
                         gpkg_path=gpkg_path, table_name=table_name,
+                        report_fields=report_fields,
                     )
                 if layer is None:
                     warnings.append("%s could not be built" % analyte["chemical"])
@@ -5239,14 +5287,21 @@ class EquisDialog(QDockWidget):
         # From the rows' own scope, not the date controls: that is what the
         # build reads, and before 2026-10-03 a parquet layer was built with
         # the dates ticked and silently ignored, and nothing here said so.
-        start, end, codes = (self._analysis.scope if self._analysis is not None
-                             else NO_ROW_SCOPE)
+        start, end, codes, depth, units = (
+            self._analysis.scope if self._analysis is not None
+            else NO_ROW_SCOPE)
         if start is not None or end is not None:
             applied.append("sampled %s to %s" % (
                 start.isoformat() if start else "the first sample",
                 end.isoformat() if end else "the last"))
         if codes:
             applied.append("sample type %s" % "+".join(sorted(codes)))
+        if depth is not None:
+            applied.append("depth %s (whole interval inside)"
+                           % describe_depth(depth))
+        if units:
+            applied.append("unit %s" % "+".join(describe_unit(u)
+                                                for u in units))
         if applied:
             bits.append("filtered to " + ", ".join(applied))
         bits.append("per location: %s" % AGGREGATION_SHORT.get(

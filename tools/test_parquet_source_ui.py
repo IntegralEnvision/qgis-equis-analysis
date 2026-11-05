@@ -366,6 +366,36 @@ else:
         panel._matrix_mode, panel._fraction_mode = real_matrix, real_fraction
         panel._method_mode, panel._non_detect_mode = real_method, real_nd
 
+    # --- the scatter's map carries each station's own sample -----------------
+    # Through the panel, as LinkedViewsController calls it: a station is
+    # ONE sample, so its layer holds that sample's columns and no result's.
+    check("layers are built from the store, which kept every column",
+          panel._layer_source is panel._report_store)
+    picks = panel._report_store.con.execute("""
+        SELECT location, min(sample) FROM v_results
+        WHERE matrix = 'SE' AND coalesce(sample, '') <> '' GROUP BY 1
+        ORDER BY 1 LIMIT 50
+    """).fetchall()
+    stations = [{"location": loc, "sample": sample, "date": None, "x": 1.0,
+                 "y": 2.0, "x_detected": True, "y_detected": True,
+                 "samples_here": 1, "tied": 1} for loc, sample in picks]
+    scatter = panel._build_scatter_map(stations, {}, {"chemical": "Arsenic"},
+                                       {"chemical": "Lead"}, matrix=["SE"])
+    names = ([scatter.fields().at(i).name()
+              for i in range(scatter.fields().count())] if scatter else [])
+    check("the scatter map names each station's sample",
+          scatter is not None and "SYS_SAMPLE_CODE" in names
+          and "START_DEPTH" in names, str(names[-30:]))
+    check("and none of a result's columns",
+          not {"CHEMICAL_NAME", "RESULT_NUMERIC", "LAB_QUALIFIERS",
+               "ANALYTIC_METHOD"} & set(names), str(names[-30:]))
+    if scatter is not None:
+        wrong = [(f["code"], f["SYS_SAMPLE_CODE"]) for f in scatter.getFeatures()
+                 if dict(picks).get(f["code"]) != f["SYS_SAMPLE_CODE"]]
+        check("each station's sample is the one it was given", not wrong,
+              str(wrong[:3]))
+        QgsProject.instance().removeMapLayer(scatter.id())
+
     # --- the steps that do not apply -----------------------------------------
     check("step 3 (choose a report) is hidden",
           not panel.report_box.isVisibleTo(panel))
