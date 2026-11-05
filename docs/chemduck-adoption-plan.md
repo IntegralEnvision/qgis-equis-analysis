@@ -219,6 +219,22 @@ One is a ChemDuck defect, found by the parity test: item 5.
    report path's. It has been raised in ChemDuck's
    `docs/qgis-plugin-request-load-undated.md`, and the parity test records
    it as a known refusal that fails once the load succeeds.
+6. **No depth or unit filter on `aggregate_points`.** *Found 2026-11-05*,
+   when the plugin's row scope gained both (Facility A's sediment: depths
+   in cm beside m, and 3,401 leachate results in mg/L beside 635,904 in
+   mg/kg; CLAUDE.md has the rules). ChemDuck takes dates and sample types
+   but neither of these. The adapter holds the five-part scope and
+   refuses both by name (`Chem.points`), and the parity test checks that
+   it refuses. It can't filter its answer afterwards:
+   - **Units.** A point's winning row is chosen across every unit, so
+     dropping a unit afterwards leaves a winner the store never had.
+   - **Depth.** `depth_units` is kept but never converted, so a bound in
+     metres can't be read against points written in cm.
+
+   To raise with ChemDuck: a whole-interval depth bound in one unit,
+   converted by exact length factors, with no-depth rows out, and a list
+   of result units to keep. Both apply before selection. Needed before
+   phase 2, when the panel's map comes from ChemDuck.
 
 ## The design after adoption
 

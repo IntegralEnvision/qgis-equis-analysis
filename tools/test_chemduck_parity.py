@@ -454,6 +454,22 @@ def scope_checks(store, chem):
               not field_dup, sorted(field_dup))
         check("... and leaves the equipment blank out of both (ONLY-BLANK on neither map)",
               not any(key[3] == "ONLY-BLANK" for key in cells))
+
+        # The store's depth and unit filters (2026-10-30) have no ChemDuck
+        # parameter. The adapter must refuse them by name, never answer
+        # unfiltered beside a filtered store.
+        for label, scope, word in (
+                ("a depth filter", dict(depth=(0, 0.3, "m")), "depth"),
+                ("a unit filter", dict(units=["mg/kg"]), "unit")):
+            store.set_row_scope(**scope)
+            chem.set_row_scope(**scope)
+            try:
+                chem.points("Arsenic", matrix=("WG",), fraction=("T",))
+                refused = ""
+            except ValueError as exc:
+                refused = str(exc)
+            check("%s is refused by the adapter, naming it and open item 6" % label,
+                  word in refused and "open item 6" in refused, refused or "it answered")
     finally:
         store.set_row_scope()
         chem.set_row_scope()

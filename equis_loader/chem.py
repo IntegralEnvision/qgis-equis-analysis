@@ -70,14 +70,23 @@ class Chem(object):
         _quiet(chemduck.open_consumer, con, folder, partition_files, schema=schema)
         return cls(con, schema)
 
-    def set_row_scope(self, start=None, end=None, sample_types=None):
+    def set_row_scope(self, start=None, end=None, sample_types=None,
+                      depth=None, units=None):
         """The panel's row scope, the same tuple ReportStore keeps.
 
         A sample-type scope the panel has not set is ChemDuck's default:
         normal samples only (typed N or untyped). The plugin's default is
         every type, so a QC sample reaches the store's map and not this
-        one: the plan's decision 5, an intended difference."""
-        scope = rd.row_scope(start, end, sample_types)
+        one: the plan's decision 5, an intended difference.
+
+        Depth and units are held so the scope is the store's, but points()
+        refuses them: aggregate_points has no parameter for either (open
+        item 6 of the plan). Filtering its points afterwards is not the
+        same filter. A point's winner is chosen across every unit, so
+        dropping a unit afterwards leaves a winner the store never had.
+        ChemDuck keeps depth_units without converting, so a whole-interval
+        bound in metres can't be applied to points written in cm."""
+        scope = rd.row_scope(start, end, sample_types, depth, units)
         changed = scope != self._scope
         self._scope = scope
         return changed
@@ -99,7 +108,16 @@ class Chem(object):
         if non_detect not in DISPLAY_FACTOR:
             raise ValueError("non-detect choice %r has no ChemDuck display factor "
                              "(docs/chemduck-adoption-plan.md, decision 1)" % (non_detect,))
-        start, end, codes = self._scope
+        start, end, codes, depth, units = self._scope
+        if depth is not None or units:
+            # Refused rather than ignored: a shadow that silently drops a
+            # filter answers a different question, and the parity test
+            # would call the store's filtered map a difference.
+            raise ValueError("ChemDuck's aggregate_points has no %s filter "
+                             "(docs/chemduck-adoption-plan.md, open item 6)"
+                             % " or ".join(name for name, on in
+                                           (("depth", depth is not None), ("unit", units))
+                                           if on))
         params = {"p_event_agg": EVENT_AGG[how],
                   "p_display_factor": DISPLAY_FACTOR[non_detect],
                   "p_start_date": start, "p_end_date": end,
