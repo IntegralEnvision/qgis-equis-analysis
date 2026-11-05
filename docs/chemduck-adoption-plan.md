@@ -113,7 +113,9 @@ One is a ChemDuck defect, found by the parity test: item 5.
    4.2.1 here, has DuckDB 1.5.5, in ChemDuck's `SUPPORTED_DUCKDB` (1.5.4,
    1.5.5). `tools/test_chemduck_vendor.py` is the check, to run under every
    QGIS the plugin supports.
-2. **Interactive speed: measured, and too slow for a click.** *Measured
+2. **Interactive speed: too slow for a click on 2026-10-29; within budget
+   at 4 threads on 2026-11-05, except opening in QGIS** (re-measured
+   below). *Measured
    2026-10-29* by `tools/measure_chemduck_calls.py` on Facility A, ChemDuck
    opened on its sidecars beside the plugin's store, in QGIS 4.2.3's Python
    (DuckDB 1.5.5). Medians of three warm runs. The machine was noisy, so
@@ -177,6 +179,56 @@ One is a ChemDuck defect, found by the parity test: item 5.
 
    *Decision 8 below* takes the cap: one setting, in one place, because
    it governs every query on the connection.
+
+   **Re-measured 2026-11-05, after ChemDuck's speed work: within budget
+   at 4 threads, except the open in QGIS.** The vendored copy moved from
+   `da0d3b5` to `daddfb6`, which merges ChemDuck's PRs #12 and #13:
+   - #12: lean engine scans off the moisture lookup, `point_counts`, one
+     matrix-class read, and cached parquet footers.
+   - #13: collapse stages that skip events of one result, and a grouped
+     unit check.
+
+   The parity test is green on it, and old and new return the same row
+   counts on every call. Same laptop, plain Python 3.14.6, DuckDB 1.5.5,
+   `measure_chemduck_calls.py --skip-load`. The script now also records
+   process CPU beside wall time. Other jobs held the CPU at 0–75% and
+   moved it within runs. So the two pins ran alternately, three pairs at
+   4 threads, one pair in reverse order. In the reversed pair the new pin
+   ran under 52–75% load and the old under 4–30%, and the new was still
+   1.3–2.3× faster on wall time and 1.3–2.1× on CPU. Medians of the three
+   runs' warm medians, at 4 threads:
+
+   | Question | Budget | Plugin | ChemDuck `da0d3b5` | ChemDuck `daddfb6` |
+   | --- | --- | --- | --- | --- |
+   | Map, one analyte (3 cases, both aggregations) | 0.5 s | 0.03–0.04 s | 0.45–0.73 s | 0.26–0.35 s |
+   | Footer, through `point_counts` (new) | 0.2 s | 0.02–0.03 s | (no macro) | 0.08–0.09 s |
+   | Footer, a map call counted | | | 0.50–0.67 s | 0.27–0.33 s |
+   | One location's series | 0.2 s | 0.02–0.03 s | 0.40–0.50 s | 0.21–0.22 s |
+   | Sparklines | 1 s | 0.05–0.07 s | 0.69–1.20 s | 0.44–0.62 s |
+   | Box plot by location (`km_quartiles`) | | on the page | 0.23–0.30 s | 0.14–0.18 s |
+   | Pivot, two analytes, WS | | 0.24 s | 0.30 s | 0.15 s |
+   | Pivot, every analyte, TAILS | | 0.40 s | 1.26 s | 0.53 s |
+   | Open the source (plain Python) | 2 s | 0.06–0.10 s | 1.81–3.16 s | 1.71–1.74 s |
+
+   - **Against the budgets at 4 threads:** a map, a footer through
+     `point_counts` and sparklines are within. One location's series is
+     just over, at 0.21–0.22 s against 0.2.
+   - **The plugin is still faster:** about 7–10× on a map and on one
+     series, 3–5× on a footer.
+   - **Gains per call:** 1.3–2.4× on wall time, 1.3–1.9× on CPU.
+   - **ChemDuck's own CPU is still over its wall time:** 0.58–0.86 s of
+     CPU for a 0.26–0.35 s map at 4 threads.
+   - **Default threads (14), one pair:** the new pin's maps took
+     1.26–1.65 s, over budget. One call, the most-recent Arsenic map, was
+     slower than the old pin's (1.38 against 1.16 s), within this
+     machine's noise. The cap is still what brings calls within budget.
+   - **In QGIS 4.2.3's Python** (3.12.15, DuckDB 1.5.5; the new pin at 4
+     threads, load 35–68%), calls take about what they take in plain
+     Python: maps 0.25–0.41 s, `point_counts` 0.08–0.09 s, one series
+     0.20–0.23 s, sparklines 0.39–0.62 s.
+   - **Opening there took 18.6 s**, against 1.7 s in plain Python and
+     40.5 s on 2026-10-29. That is the one large miss left. It hasn't been
+     taken apart yet.
 
    **What this changes.** Phases 2 and 3 wait on that request; they are
    what puts these calls on a click. What moves without waiting:

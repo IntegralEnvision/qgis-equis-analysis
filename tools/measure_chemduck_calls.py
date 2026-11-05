@@ -47,17 +47,28 @@ FRACTION = {"T": "Total", "D": "Dissolved", "N": "N"}
 
 
 def timed(fn, repeat=3):
-    """(cold seconds, median of `repeat` warm seconds, rows of the answer)."""
+    """(cold seconds, median of `repeat` warm seconds, rows of the answer,
+    median warm CPU seconds).
+
+    CPU is the process's, every thread's (process_time; GetProcessTimes on
+    Windows), so DuckDB's workers are in it. It is reported beside the wall
+    time, not instead of it, because on this laptop other jobs hold the CPU
+    at 60-80% and a wall time can triple under them while the work a call
+    does hardly moves (ChemDuck's changelog, 2026-10-29). A click waits for
+    the wall time, so that is still the number a budget is held to.
+    """
     began = time.perf_counter()
     answer = fn()
     cold = time.perf_counter() - began
-    warm = []
+    warm, cpu = [], []
     for _ in range(repeat):
-        began = time.perf_counter()
+        began, began_cpu = time.perf_counter(), time.process_time()
         fn()
         warm.append(time.perf_counter() - began)
+        cpu.append(time.process_time() - began_cpu)
     rows = len(answer) if hasattr(answer, "__len__") else answer
-    return round(cold, 3), round(statistics.median(warm), 3), rows
+    return (round(cold, 3), round(statistics.median(warm), 3), rows,
+            round(statistics.median(cpu), 3))
 
 
 def quiet(fn, *args, **kwargs):
@@ -117,13 +128,15 @@ def main():
                 entry[side] = None
                 continue
             try:
-                cold, warm, rows = timed(fn)
-                entry[side] = {"cold_s": cold, "warm_s": warm, "rows": rows}
+                cold, warm, rows, cpu = timed(fn)
+                entry[side] = {"cold_s": cold, "warm_s": warm, "rows": rows,
+                               "cpu_s": cpu}
             except Exception as exc:          # noqa: BLE001 - recorded, not hidden
                 entry[side] = {"error": "%s: %s" % (type(exc).__name__, str(exc)[:200])}
         report["calls"].append(entry)
         show = lambda e: ("-" if e is None else e.get("error") or
-                          "cold %.3f  warm %.3f  rows %s" % (e["cold_s"], e["warm_s"], e["rows"]))
+                          "cold %.3f  warm %.3f  cpu %.3f  rows %s"
+                          % (e["cold_s"], e["warm_s"], e["cpu_s"], e["rows"]))
         print("%s\n    plugin   %s\n    chemduck %s" % (question, show(entry["plugin"]),
                                                        show(entry["chemduck"])))
 
@@ -144,7 +157,14 @@ def main():
                sql("SELECT count(DISTINCT location_id), sum(n_events) FROM "
                    "aggregate_points(?, p_matrix := ?, p_fraction := ?)",
                    [chemical, matrix, FRACTION[fraction]]),
-               "ChemDuck has no count; this is a map call, counted")
+               "a map call, counted: kept so pins before point_counts compare")
+        # point_counts (ChemDuck 6884aa6, 2026-10-30) is the count the
+        # plugin would ask for: the map call's scope and unit refusal, none
+        # of its policy stages. A pin without it records the error.
+        record("footer through point_counts, %s" % label,
+               lambda: [store.count_for(chemical, matrix=(matrix,), fraction=(fraction,))],
+               sql("SELECT n_locations, n_results FROM point_counts(?, p_matrix := ?, "
+                   "p_fraction := ?)", [chemical, matrix, FRACTION[fraction]]))
 
         busiest = store.con.execute(
             "SELECT location FROM v_results WHERE chemical = ? AND upper(matrix) = ? "
