@@ -1,8 +1,8 @@
 {
  "note": "Written by tools/vendor_chemduck.py. Do not edit these files: re-vendor, and tools/test_chemduck_vendor.py checks them.",
  "repository": "https://github.com/IntegralEnvision/chemduck.git",
- "commit": "daddfb6913b87520bc6227d4d971840420cba5c9",
- "subject": "Merge pull request #13 from IntegralEnvision/collapse-bypass",
+ "commit": "e7139bdad40186c675e7ab445b337bb1a80deb76",
+ "subject": "Merge pull request #14 from IntegralEnvision/open-no-bind",
  "version": "0.2.0",
  "vendored": "2026-11-05",
  "files": {
@@ -11,8 +11,8 @@
    "sha256": "617d3089e07505eda2ad92680de679cec467f4eaeffc77f82669164d22ddb5d3"
   },
   "arii_hybrid.py": {
-   "bytes": 29683,
-   "sha256": "57626d3a4e416a012d93b2aef119b0f83cd73c5bbef33558488dccc5337a1161"
+   "bytes": 29650,
+   "sha256": "4e10238387a42c6e421e4c758f5bc4baa01daa3331d83da7cc1d6e98416dfd89"
   },
   "eav_helpers.py": {
    "bytes": 3740,
@@ -23,8 +23,8 @@
    "sha256": "166b084dedffab57bbc3d9b4355e5ebbed7a2ceffc078dc5149a19dc15070b64"
   },
   "load_data.py": {
-   "bytes": 106427,
-   "sha256": "e8334576f5a75a68d0456f42fa727173a706a09483f78f37ac41d92c66da0c3b"
+   "bytes": 107496,
+   "sha256": "161c7ddba41713b47cbbdb2830a1b3562cb6977264e59da6a88974384d784d7b"
   },
   "sql/01_tables.sql": {
    "bytes": 26668,

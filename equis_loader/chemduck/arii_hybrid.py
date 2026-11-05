@@ -602,8 +602,7 @@ def open_consumer(con, folder, partition_files, schema=None):
     cur.execute("SET GLOBAL parquet_metadata_cache = true")
     # The data first, with no retry: the bootstrap's CREATE TABLE IF NOT
     # EXISTS must find them, not make empty tables in their place.
-    for source, stmt in data:
-        run_install(cur, [(source, stmt)])
+    run_install(cur, data, retry=False)
     run_install(cur, sql)
     return sidecars
 

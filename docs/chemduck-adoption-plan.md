@@ -114,8 +114,8 @@ One is a ChemDuck defect, found by the parity test: item 5.
    1.5.5). `tools/test_chemduck_vendor.py` is the check, to run under every
    QGIS the plugin supports.
 2. **Interactive speed: too slow for a click on 2026-10-29; within budget
-   at 4 threads on 2026-11-05, except opening in QGIS** (re-measured
-   below). *Measured
+   at 4 threads on 2026-11-05, open included** (re-measured below; one
+   location's series is just over). *Measured
    2026-10-29* by `tools/measure_chemduck_calls.py` on Facility A, ChemDuck
    opened on its sidecars beside the plugin's store, in QGIS 4.2.3's Python
    (DuckDB 1.5.5). Medians of three warm runs. The machine was noisy, so
@@ -181,7 +181,8 @@ One is a ChemDuck defect, found by the parity test: item 5.
    it governs every query on the connection.
 
    **Re-measured 2026-11-05, after ChemDuck's speed work: within budget
-   at 4 threads, except the open in QGIS.** The vendored copy moved from
+   at 4 threads.** The open, first measured here as the one miss, is
+   covered at the end of this block. The vendored copy moved from
    `da0d3b5` to `daddfb6`, which merges ChemDuck's PRs #12 and #13:
    - #12: lean engine scans off the moisture lookup, `point_counts`, one
      matrix-class read, and cached parquet footers.
@@ -226,9 +227,36 @@ One is a ChemDuck defect, found by the parity test: item 5.
      threads, load 35–68%), calls take about what they take in plain
      Python: maps 0.25–0.41 s, `point_counts` 0.08–0.09 s, one series
      0.20–0.23 s, sparklines 0.39–0.62 s.
-   - **Opening there took 18.6 s**, against 1.7 s in plain Python and
-     40.5 s on 2026-10-29. That is the one large miss left. It hasn't been
-     taken apart yet.
+   - **Opening there took 18.6 s** at `daddfb6`, against 1.7 s in plain
+     Python and 40.5 s on 2026-10-29.
+
+   **The open, taken apart the same day** with `tools/profile_chemduck.py`,
+   which times each install statement:
+   - **The cause.** 17.9 of the 18.9 s was one statement, the open's
+     first with a bound parameter. ChemDuck registered each object it made
+     with `INSERT OR IGNORE INTO chemduck_objects VALUES (?, ?)`. DuckDB's
+     Python client imports numpy, pandas and pyarrow on the first
+     parameter bound on a connection: `SELECT ?` alone took 1.8 s in plain
+     Python and 13.5 s in `python-qgis.bat` with them unimported, and 1 ms
+     after. ChemDuck's measurement put the rest on a cold read of those
+     packages' files, once per boot.
+   - **Fixed in ChemDuck PR #14** (`2986b3f`, merged as `e7139bd`, now
+     vendored). The open binds no parameter and writes the registry in two
+     statements; 207 statements became 115. Through the harness in
+     `python-qgis.bat`, 4 threads: the open takes 0.84–0.96 s, and a second
+     open in the same process 0.84–0.91 s.
+   - **That moves the import; it doesn't remove it.** The session's first
+     bound parameter pays it, and both the store's map and the adapter's
+     `points` bind. In `python-qgis.bat` the first `chem.points` took
+     2.86 s and the second 0.35 s, with file caches warm. Until this was
+     found, the harness hid the cost: it bound parameters itself between
+     the open and the session. It now names the step that paid.
+   - **Real QGIS doesn't pay it.** QGIS 4.2.3 started with a fresh profile
+     holding only its core plugins (MetaSearch, db_manager, grassprovider,
+     processing) had all three imported by the time the GUI was up. A
+     first `SELECT ?` there took 0.8 ms. So the 18.6 s, and probably the
+     40.5 s, belonged to the bare interpreter, not to a user of the plugin.
+     Not checked: a profile with Processing disabled.
 
    **What this changes.** Phases 2 and 3 wait on that request; they are
    what puts these calls on a click. What moves without waiting:

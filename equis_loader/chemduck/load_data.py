@@ -13,6 +13,7 @@ Usage (tools/load_data.py runs this module):
 """
 
 import argparse
+import contextlib
 import json
 import re
 import sys
@@ -75,6 +76,10 @@ class SchemaConflictError(Exception):
 
 def quote_ident(name):
     return '"' + str(name).replace('"', '""') + '"'
+
+
+def sql_literal(text):
+    return "'" + str(text).replace("'", "''") + "'"
 
 
 def schema_cursor(conn, schema=None):
@@ -150,40 +155,58 @@ def check_install(cur, statements, adopt=()):
             "install it into a schema of its own (schema='chemduck').")
     cur.execute(f"CREATE TABLE IF NOT EXISTS {REGISTRY_TABLE} "
                 "(name VARCHAR PRIMARY KEY, kind VARCHAR NOT NULL)")
-    for name in sorted((adopt & existing) - registered):
-        _register(cur, (name, "adopted"))
+    _register(cur, [(name, "adopted") for name in sorted((adopt & existing) - registered)])
 
 
-def _register(cur, obj):
-    cur.execute(f"INSERT OR IGNORE INTO {REGISTRY_TABLE} VALUES (?, ?)", list(obj))
+def _register(cur, objects):
+    """Record (name, kind) pairs in the registry: one statement, no bound
+    parameters.
+
+    The first parameter bound on a connection makes DuckDB's Python client
+    import numpy, pandas and pyarrow: 1-3 s when their files are cached,
+    18 s once in QGIS when they were not. An install is up to a hundred
+    registrations, so they are one INSERT of literals. The values are
+    ChemDuck's own identifiers."""
+    objects = list(dict.fromkeys(objects))
+    if objects:
+        cur.execute(f"INSERT OR IGNORE INTO {REGISTRY_TABLE} VALUES " + ", ".join(
+            f"({sql_literal(name)}, {sql_literal(kind)})" for name, kind in objects))
 
 
-def run_install(cur, items, log=None):
-    """Run (source, statement) pairs on cur, registering what each creates.
+def run_install(cur, items, log=None, retry=True):
+    """Run (source, statement) pairs on cur, registering what they create.
 
     DuckDB >=1.5 validates macro bodies at definition time; macros and views
     reference each other, so a statement that fails on a missing object is
-    retried after the rest. Call check_install first.
+    retried after the rest (retry=False: raised at once). Call check_install
+    first. What a failed install created before it failed is registered
+    too, so the next install may replace it.
     """
-    deferred = []
-    for retry in (False, True):
-        for source, stmt in (deferred if retry else items):
-            try:
-                cur.execute(stmt)
-            except Exception as e:
-                err = str(e)
-                if not retry and ("does not exist" in err or "not found" in err):
-                    deferred.append((source, stmt))
-                    continue
-                if log:
-                    log(f"    Error in {source}: {e}")
-                    log(f"    Statement: {stmt[:200]}...")
-                raise
-            obj = created_object(stmt)
-            if obj:
-                _register(cur, obj)
-        if not retry and deferred and log:
-            log(f"  Retrying {len(deferred)} deferred statement(s)...")
+    deferred, made = [], []
+    try:
+        for again in ((False, True) if retry else (False,)):
+            for source, stmt in (deferred if again else items):
+                try:
+                    cur.execute(stmt)
+                except Exception as e:
+                    err = str(e)
+                    if not again and retry and ("does not exist" in err or "not found" in err):
+                        deferred.append((source, stmt))
+                        continue
+                    if log:
+                        log(f"    Error in {source}: {e}")
+                        log(f"    Statement: {stmt[:200]}...")
+                    raise
+                obj = created_object(stmt)
+                if obj:
+                    made.append(obj)
+            if not again and deferred and log:
+                log(f"  Retrying {len(deferred)} deferred statement(s)...")
+    except BaseException:
+        with contextlib.suppress(Exception):
+            _register(cur, made)
+        raise
+    _register(cur, made)
 
 
 def install_target(conn, schema):
