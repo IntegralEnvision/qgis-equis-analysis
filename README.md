@@ -121,9 +121,9 @@ section that folds away as it completes and opens the next.
    matrix, dates and QC samples to ask for, and optionally **Only locations
    selected on the map**. These are saved onto your report before it runs,
    so EQuIS returns only those rows. **Pre-fetch data** runs it.
-5. **Filter / Aggregate - applied here** - narrow what was fetched by method
-   and fraction, choose how each location is summarised and how non-detects
-   are treated, then **Map chemical** (or *Map N chemicals*).
+5. **Filter / Aggregate - applied here** - narrow what was fetched by depth,
+   method, fraction and unit, choose how each location is summarised and how
+   non-detects are treated, then **Map chemical** (or *Map N chemicals*).
 6. **Symbology** - graduated circles or time-series sparklines, depth
    profiles, and rolling sparklines between chemicals.
 
@@ -499,6 +499,49 @@ parameters. Those *filter* by depth without adding a column, so before this
 change you could narrow a report to 0-2 m with nothing in the output to
 confirm it.
 
+### The depth filter
+
+**Depth · between** (step 5) keeps the samples whose **whole interval** lies
+between two depths, set with a two-handled slider or typed into the boxes
+beside it. It appears once the rows in hand carry a depth, and offers the
+range of the chosen matrix:
+- **Whole interval, not overlap.** A 0-10 ft composite is outside a 0-2 ft
+  range: most of its material came from below it, so its number is not a
+  surface number.
+- **Results with no depth are left out while it is ticked**, as undated
+  results are by a date range. Water usually has none, so ticking it at the
+  full range keeps only depth samples. The panel says so.
+- **One unit, converted exactly.** A matrix can mix depth units: Facility A's
+  sediment has 331,986 results in cm and 1,624 in m. The range is offered in
+  the unit most rows use, and m, cm, mm, ft and in are converted into it. A
+  unit the plugin does not know is never guessed at: its rows are left out,
+  and the unit's tooltip counts them.
+- **The slider stops where samples start or end.** Between two such depths
+  moving a bound changes nothing, so those are the only stops, on the slider
+  and on the boxes' arrows. They crowd where the samples do: soil with a few
+  borings to 200 ft still has a stop at 0.33 ft, where an evenly divided
+  slider moved a foot at a time. Any depth can still be typed, to nine
+  decimals, the precision depths are compared at.
+
+It filters the rows already fetched, on every source, and is not sent to
+EQuIS. Whether the report's own depth parameters convert units is untested,
+and if they compare bare numbers a 0-0.05 m range would drop 0-5 cm
+sediment before it ever reached the plugin.
+
+### The unit filter
+
+**Unit · any of** (step 5) keeps only the result units ticked; nothing ticked
+keeps them all. It lists the units of the chosen matrix with how many results
+each has, so the stray one shows itself. The usual reason to use it is a
+solid's leachate: Facility A's sediment holds 3,401 results in mg/L beside
+635,904 in mg/kg, and Arsenic alone has 98 of them, so a maximum of Arsenic in
+sediment is refused as mixed units. Ticking mg/kg leaves the leachate out of
+every view and lets the map through. Nothing is converted: units are compared
+as reported (`mg/L` and `MG/L` are two entries, as the mixed-units warning
+counts them), and converting is EQuIS's job, through `@reporting_unit`. Like
+depth, it filters the rows in hand and is not sent to EQuIS, which has no
+parameter that drops a unit.
+
 `result_value`, `result_date`, `result_detect` and the rest keep the names
 they have on the aggregated layer, so one symbology and one saved style serve
 both.
@@ -626,8 +669,41 @@ regardless.
 | `detect_count` | How many of those were detections |
 | `analyte` | Chemical the layer was built for |
 
-Locations with no result for the selected chemical stay on the map with a null
-value, so gaps in coverage remain visible. Location codes are matched
+**After those, every column the source holds**, under the report's own names
+(`SYS_SAMPLE_CODE`, `LAB_QUALIFIERS`, `LAB_SDG`, the limits, ...):
+
+- On the joined layer they are the **winning row's**. That is the one sample
+  the mapped number came from, so its sample code, qualifiers and lab belong
+  to that number and never come from several rows. A location with no usable
+  number has them all NULL.
+- On an *every result* layer they are each result's own.
+- A parquet source supplies all of its columns, typed: numbers stay numbers,
+  so `RESULT_NUMERIC` or `DILUTION_FACTOR` can drive a style or a filter.
+  On Facility A that is 71 columns.
+- A live or cached report supplies the columns it kept (above), as text.
+- A name that clashes with a field already on the layer gets `_report`
+  appended. Most often this is the report's `RESULT_UNIT` beside the layer's
+  own `result_unit`. GeoPackage compares names case-insensitively, so the two
+  can't coexist. It is a suffix, not a prefix, because EQuIS already has
+  `REPORT_*` columns.
+- An empty cell is NULL.
+
+**The scatter's and the ternary's map layers** take a narrower set. Each point
+there is one sample standing for all of its results, so it carries only the
+**sample's** columns. Those are the sample, location and facility columns as
+Analytical Results II names them: `SYS_SAMPLE_CODE`, `SAMPLE_DATE`, the
+depths, `TASK_CODE`, `FIELD_SDG`, the coordinates, and any `DT_SAMPLE_*`
+extra field. A result's value, method or qualifier never appears, because
+that would set one analyte's beside another's.
+
+- The list is declared rather than inferred. Across Facility A's 106,408
+  multi-row samples, exactly these 27 columns hold one value in every sample.
+  A few result columns did too, but only by coincidence.
+- A sample column that still disagrees within one of the mapped samples is
+  left off that layer rather than shown with one row's value.
+
+Only locations with a result row for the chemical, in the current matrix,
+fraction and method, are on the layer. Location codes are matched
 case-insensitively between the report and the feature service, since the two do
 not always agree on case.
 

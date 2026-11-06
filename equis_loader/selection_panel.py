@@ -12,13 +12,17 @@ the panel says which:
 Kept out of dialog.py, which is long enough already.
 """
 
-from qgis.PyQt.QtCore import Qt, pyqtSignal
+import bisect
+
+from qgis.gui import QgsRangeSlider
+from qgis.PyQt.QtCore import Qt, QTimer, pyqtSignal
 from qgis.PyQt.QtGui import QStandardItem, QStandardItemModel
 from qgis.PyQt.QtWidgets import (
     QAbstractItemView,
     QCheckBox,
     QComboBox,
     QDateEdit,
+    QDoubleSpinBox,
     QFormLayout,
     QHBoxLayout,
     QLabel,
@@ -35,7 +39,9 @@ from .data_selection import (
     FRACTIONS,
     QC_SAMPLE_TYPES,
     SAMPLE_TYPE_NORMAL,
+    describe_unit,
 )
+from .report_data import DEPTH_PLACES
 
 # What the panel calls the two sources, and what it explains about each.
 LIVE = "live"
@@ -83,6 +89,39 @@ METHOD_TOOLTIP = (
     "per method, so several can be compared at once."
 )
 
+DEPTH_TOOLTIP = (
+    "Keep samples whose whole depth interval lies inside this range,\n"
+    "top to bottom. A 0-10 ft composite is outside a 0-2 ft range:\n"
+    "most of its material came from below it.\n\n"
+    "While this is ticked, results with no depth are left out - so\n"
+    "ticking it alone, at the full range, keeps only depth samples.\n"
+    "Depths in other units are converted into the one shown.\n\n"
+    "The slider and the arrows stop only at depths where a sample\n"
+    "in this matrix starts or ends: between two of those, moving a\n"
+    "bound changes nothing. Any depth can still be typed."
+)
+
+UNIT_TOOLTIP = (
+    "Result unit, as reported. Tick nothing for all of them.\n\n"
+    "A solid's matrix can carry a few leachate results in water's\n"
+    "units - mg/L beside mg/kg - which is a valid record but makes\n"
+    "a map of those analytes refuse to aggregate. Ticking the unit\n"
+    "to keep leaves the others out of every view.\n\n"
+    "Nothing is converted here: that is EQuIS's to do, with the\n"
+    "report's @reporting_unit."
+)
+
+# At most this many slider positions. The slider stops at the depths
+# where a sample starts or ends (depth_extent_from's `stops`); a matrix
+# with more than this many - Facility A's surface water has 468 - keeps
+# every one for the spin boxes' arrows and an evenly ranked subset for
+# the slider, which is a few hundred pixels wide anyway.
+DEPTH_SLIDER_STEPS = 200
+# Quiet time after the last slider or spin box move before the filter is
+# applied. Each application re-scopes every row in hand and re-counts the
+# pickers; doing that per pixel of a drag would stall the panel.
+DEPTH_SETTLE_MS = 250
+
 MATRIX_TOOLTIP = (
     "Sample matrix. Aggregating across matrices compares\n"
     "concentrations that are not comparable."
@@ -99,6 +138,57 @@ MATRIX_TOOLTIP = (
 # looked like a delay. Reported 2026-10-01 from interactive mode, where a
 # matrix ticked by its box did not redraw until the next chemical was picked.
 TICKABLE_ROW = Qt.ItemFlag.ItemIsEnabled
+
+
+def depth_ticks(stops, most=DEPTH_SLIDER_STEPS):
+    """The depths the slider's positions stand for: every stop, or `most`
+    of them spread evenly by RANK, both ends kept.
+
+    By rank rather than by depth, so the thinning keeps the surface fine
+    where the samples crowd it: spread by depth, a few deep wells would
+    take most of the positions.
+    """
+    stops = list(stops)
+    if len(stops) <= most:
+        return stops
+    last = len(stops) - 1
+    return [stops[int(round(i * last / (most - 1.0)))] for i in range(most)]
+
+
+class DepthSpinBox(QDoubleSpinBox):
+    """A depth bound: exact, shown without trailing zeros, and stepped
+    from one sample boundary to the next.
+
+    DEPTH_PLACES decimals, the precision depths are compared at, because a
+    bound the box cannot hold is a sample it cannot keep: with two decimals
+    an interval ending at 0.333 ft is outside "0 to 0.33". Shown trimmed,
+    since nine decimals of zeros read as noise.
+    """
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setDecimals(DEPTH_PLACES)
+        self.stops = []
+
+    def textFromValue(self, value):
+        text = super().textFromValue(value)
+        point = self.locale().decimalPoint()
+        if point in text:
+            text = text.rstrip("0").rstrip(point)
+        return text
+
+    def stepBy(self, steps):
+        """Up and down go to the neighbouring boundary, not by a fixed step:
+        those are the only moves that change which samples are kept."""
+        if not self.stops:
+            super().stepBy(steps)
+            return
+        value = self.value()
+        at = (bisect.bisect_right(self.stops, value) if steps > 0
+              else bisect.bisect_left(self.stops, value) - 1)
+        index = at + (steps - 1 if steps > 0 else steps + 1)
+        index = max(0, min(len(self.stops) - 1, index))
+        self.setValue(self.stops[index])
 
 
 class SelectionPanel(QWidget):
@@ -271,6 +361,59 @@ class SelectionPanel(QWidget):
         self.matrix_label = QLabel("Matrix · any of:")
         prefetch_form.addRow(self.matrix_label, self.matrix_combo)
 
+        # Depth re-scopes rows in hand and never narrows a fetch, although
+        # Analytical Results II has @min_start_depth / @max_end_depth. Whether
+        # EQuIS converts units when it applies them is untested, and if it
+        # compares bare numbers a 0-0.05 m range drops Facility A's 0-5 cm
+        # sediment on the server, where nothing here can bring it back. The
+        # range offered also comes from fetched rows, so it cannot shape the
+        # fetch that produces them. A range rather than a pick list because
+        # depth is a number, and both ends because "the top 2 ft" and
+        # "below 10 m" are the same question asked from opposite sides.
+        # Hidden until the rows in hand carry a depth: water and soil at
+        # Facility A carry none (2.3 M results, 2026-10-30).
+        self.depth_check = QCheckBox("Depth · between:")
+        self.depth_check.setToolTip(DEPTH_TOOLTIP)
+        self.depth_check.toggled.connect(self._on_depth_toggled)
+        self.depth_box = QWidget()
+        depth_rows = QVBoxLayout(self.depth_box)
+        depth_rows.setContentsMargins(0, 0, 0, 0)
+        depth_rows.setSpacing(2)
+        self.depth_slider = QgsRangeSlider(Qt.Orientation.Horizontal)
+        self.depth_slider.setToolTip(DEPTH_TOOLTIP)
+        self.depth_slider.rangeChanged.connect(self._on_depth_slider)
+        depth_rows.addWidget(self.depth_slider)
+        bounds = QHBoxLayout()
+        bounds.setContentsMargins(0, 0, 0, 0)
+        self.depth_top = DepthSpinBox()
+        self.depth_bottom = DepthSpinBox()
+        for spin, tip in ((self.depth_top, "Shallowest depth kept"),
+                          (self.depth_bottom, "Deepest depth kept")):
+            spin.setToolTip(tip)
+            # Applied on Enter, focus-out or an arrow, not per keystroke:
+            # typing "12" would otherwise filter at 1 first.
+            spin.setKeyboardTracking(False)
+            spin.valueChanged.connect(self._on_depth_spin)
+            bounds.addWidget(spin, 1)
+            if spin is self.depth_top:
+                bounds.addWidget(QLabel("to"))
+        self.depth_unit_label = QLabel("")
+        bounds.addWidget(self.depth_unit_label)
+        depth_rows.addLayout(bounds)
+        form.addRow(self.depth_check, self.depth_box)
+        # The extent offered (report_data.depth_extent_from), or None when
+        # the rows in hand have no depth.
+        self._depth = None
+        # Slider position i stands for _depth_ticks[i]: QgsRangeSlider is in
+        # integers, and the spin boxes carry the exact numbers.
+        self._depth_ticks = []
+        self._depth_syncing = False
+        self._depth_timer = QTimer(self)
+        self._depth_timer.setSingleShot(True)
+        self._depth_timer.setInterval(DEPTH_SETTLE_MS)
+        self._depth_timer.timeout.connect(self._on_changed)
+        self._show_depth(False)
+
         # Multi-select for the same reason the matrix is: one sample is
         # routinely analysed by two methods, and they are two genuine
         # analyses rather than duplicate data. Ticking several draws a line
@@ -324,6 +467,25 @@ class SelectionPanel(QWidget):
         # reason the method row is - see clear_result_filters().
         self.fraction_combo.setVisible(False)
         self.fraction_label.setVisible(False)
+
+        # Result units, offered per matrix from the rows in hand with their
+        # counts, so "mg/L (87)" beside "mg/kg (40,210)" says which is the
+        # stray. Tick to keep, as for method and fraction. A row scope, like
+        # depth: it never shapes a fetch, since no report parameter drops a
+        # unit (@reporting_unit converts).
+        self.unit_combo = QComboBox()
+        self.unit_combo.setModel(QStandardItemModel(self.unit_combo))
+        self.unit_combo.setToolTip(UNIT_TOOLTIP)
+        self.unit_combo.view().pressed.connect(self._on_unit_item_pressed)
+        self.unit_combo.setEditable(True)
+        self.unit_combo.lineEdit().setReadOnly(True)
+        self.unit_combo.lineEdit().setPlaceholderText("All units")
+        self.unit_label = QLabel("Unit · any of:")
+        form.addRow(self.unit_label, self.unit_combo)
+        # [(unit, rows)] as units_in() gave it.
+        self._unit_offer = []
+        self.unit_combo.setVisible(False)
+        self.unit_label.setVisible(False)
 
         # Dates and QC are PREFETCH filters: @start_date, @end_date and
         # @sample_types are saved onto the report and decide which rows come
@@ -506,6 +668,10 @@ class SelectionPanel(QWidget):
         self._fractions_known = False
         self.fraction_combo.setVisible(False)
         self.fraction_label.setVisible(False)
+        # Depth and units too: both are properties of the rows, and a
+        # previous fetch's must not sit beside a new one's data.
+        self._forget_depth()
+        self._forget_units()
         self._on_changed()
 
     def set_fractions(self, fractions):
@@ -812,6 +978,239 @@ class SelectionPanel(QWidget):
         self._refresh_method_text()
         self._on_changed()
 
+    # ---------------------------------------------------------------- depth
+
+    def set_depth_extent(self, extent):
+        """Offer a depth range: report_data's depth_extent, or None for none.
+
+        In the same unit, a bound left at its end of the old range moves to
+        that end of the new one, so an untouched filter always spans
+        everything there is; a bound moved inside the range stays where it
+        was put, clamped into the new one. A new UNIT starts over at the
+        full range, since a bound typed in cm says nothing in m. Emits
+        changed only when the filter's meaning changed.
+        """
+        before = self._depth_scope()
+        old_unit = self._depth["unit"] if self._depth else None
+        # Read before the spin boxes are re-ranged, which would clamp them.
+        pinned = (self.depth_top.value() <= self.depth_top.minimum(),
+                  self.depth_bottom.value() >= self.depth_bottom.maximum())
+        self._depth = extent if extent and extent.get("rows") else None
+        self._show_depth(self._depth is not None)
+        if self._depth is not None:
+            same = old_unit is not None and self._depth["unit"] == old_unit
+            self._lay_out_depth(pinned if same else (True, True))
+        if self._depth_scope() != before:
+            self._on_changed()
+
+    def _show_depth(self, showing):
+        self.depth_check.setVisible(showing)
+        self.depth_box.setVisible(showing)
+        self._enable_depth()
+
+    def _enable_depth(self):
+        on = self.depth_check.isEnabled() and self.depth_check.isChecked()
+        for widget in (self.depth_slider, self.depth_top, self.depth_bottom):
+            widget.setEnabled(on)
+
+    def _lay_out_depth(self, pinned):
+        """Size the slider and spin boxes to the extent, and set the bounds.
+
+        `pinned` says, for the top and the bottom, whether that bound goes
+        to the end of the range or keeps its value (clamped into it).
+        """
+        low, high = self._depth["top"], self._depth["bottom"]
+        # The stops include both ends already; the union is for an extent
+        # made without boundaries, which still has a range to offer.
+        stops = sorted(set(self._depth.get("stops") or ()) | {low, high})
+        self._depth_ticks = depth_ticks(stops)
+        top_was, bottom_was = self.depth_top.value(), self.depth_bottom.value()
+        values = (low if pinned[0] else max(low, min(high, top_was)),
+                  high if pinned[1] else max(low, min(high, bottom_was)))
+        if (not pinned[0] and top_was > high) or (not pinned[1]
+                                                  and bottom_was < low):
+            # The kept range lies wholly outside the new one. Clamping would
+            # squeeze it to a single depth at one end, a filter nobody set;
+            # nothing of it survives, so offer everything.
+            values = (low, high)
+        self._depth_syncing = True
+        try:
+            for spin in (self.depth_top, self.depth_bottom):
+                spin.setRange(low, high)
+                spin.stops = stops
+            self.depth_top.setValue(values[0])
+            self.depth_bottom.setValue(values[1])
+            self.depth_slider.setRangeLimits(0, len(self._depth_ticks) - 1)
+            self._depth_slider_from_spins()
+        finally:
+            self._depth_syncing = False
+        unit = self._depth["unit"] or "(no unit)"
+        self.depth_unit_label.setText(unit)
+        tip = DEPTH_TOOLTIP
+        if self._depth["unconverted"]:
+            # Said where the filter is, not discovered as a row count.
+            tip += ("\n\nLeft out while this is ticked, in units that cannot "
+                    "be converted to %s: %s." % (unit, ", ".join(
+                        "%s result(s) in %s" % (format(n, ",d"), u or "no unit")
+                        for u, n in sorted(self._depth["unconverted"].items()))))
+        self.depth_unit_label.setToolTip(tip)
+
+    def _depth_tick(self, value):
+        """The slider position nearest a depth (a typed one may lie between)."""
+        ticks = self._depth_ticks
+        if not ticks:
+            return 0
+        at = bisect.bisect_left(ticks, value)
+        if at >= len(ticks):
+            return len(ticks) - 1
+        if at > 0 and value - ticks[at - 1] < ticks[at] - value:
+            return at - 1
+        return at
+
+    def _depth_value(self, tick):
+        ticks = self._depth_ticks
+        return ticks[max(0, min(len(ticks) - 1, tick))] if ticks else 0.0
+
+    def _depth_slider_from_spins(self):
+        self.depth_slider.setRange(self._depth_tick(self.depth_top.value()),
+                                   self._depth_tick(self.depth_bottom.value()))
+
+    def _on_depth_slider(self, lower, upper):
+        if self._depth_syncing:
+            return
+        self._depth_syncing = True
+        try:
+            self.depth_top.setValue(self._depth_value(lower))
+            self.depth_bottom.setValue(self._depth_value(upper))
+        finally:
+            self._depth_syncing = False
+        self._depth_timer.start()
+
+    def _on_depth_spin(self, _value):
+        if self._depth_syncing:
+            return
+        self._depth_syncing = True
+        try:
+            # A top below the bottom is a range holding nothing; the other
+            # end follows instead, as the slider's handles push each other.
+            if self.depth_top.value() > self.depth_bottom.value():
+                if self.sender() is self.depth_top:
+                    self.depth_bottom.setValue(self.depth_top.value())
+                else:
+                    self.depth_top.setValue(self.depth_bottom.value())
+            self._depth_slider_from_spins()
+        finally:
+            self._depth_syncing = False
+        self._depth_timer.start()
+
+    def _on_depth_toggled(self, _on):
+        self._enable_depth()
+        self._depth_timer.stop()
+        self._on_changed()
+
+    def _depth_scope(self):
+        """(top, bottom, unit) while the filter is on, else None."""
+        if self._depth is None or not self.depth_check.isChecked():
+            return None
+        return (self.depth_top.value(), self.depth_bottom.value(),
+                self._depth["unit"])
+
+    def _forget_depth(self):
+        """No depth to offer: the rows that had one are gone."""
+        self._depth = None
+        self._depth_timer.stop()
+        self._show_depth(False)
+
+    # ---------------------------------------------------------------- units
+
+    def set_units(self, offer):
+        """Offer these result units: [(unit, rows)], commonest first.
+
+        REPLACED, not merged as methods are: there is no facility-wide list
+        underneath, and a unit from another matrix kept on offer would be a
+        tick that matches nothing here. A ticked unit the new offer lacks is
+        unticked for the same reason - left ticked and hidden, it would
+        filter out every row with nothing on screen saying why. Emits
+        changed only when what is ticked changed.
+        """
+        before = self.selected_units()
+        self._unit_offer = [(str(unit or ""), rows) for unit, rows in offer or []]
+        offered = {unit for unit, _ in self._unit_offer}
+        kept = {unit for unit in before if unit in offered}
+        model = self.unit_combo.model()
+        self.unit_combo.blockSignals(True)
+        model.clear()
+        for unit, rows in self._unit_offer:
+            item = QStandardItem("%s  (%s)" % (describe_unit(unit),
+                                               format(rows, ",d")))
+            item.setData(unit, Qt.ItemDataRole.UserRole)
+            item.setFlags(TICKABLE_ROW)
+            item.setCheckState(Qt.CheckState.Checked if unit in kept
+                               else Qt.CheckState.Unchecked)
+            model.appendRow(item)
+        self.unit_combo.blockSignals(False)
+        # One unit is shown, disabled, naming itself, as a lone method is.
+        showing = bool(self._unit_offer)
+        self.unit_combo.setVisible(showing)
+        self.unit_label.setVisible(showing)
+        self.unit_combo.setEnabled(len(self._unit_offer) > 1
+                                   and not self._unavailable)
+        self._refresh_unit_text()
+        if self.selected_units() != before:
+            self._on_changed()
+
+    def selected_units(self):
+        """Every ticked unit, in offer order. Empty means all of them.
+        "" is a real choice here: the rows reported with no unit."""
+        model = self.unit_combo.model()
+        chosen = []
+        for row in range(model.rowCount()):
+            item = model.item(row)
+            if item is not None and item.checkState() == Qt.CheckState.Checked:
+                unit = item.data(Qt.ItemDataRole.UserRole)
+                chosen.append("" if unit is None else str(unit))
+        return chosen
+
+    def set_selected_units(self, units):
+        """Tick exactly these units, of those on offer."""
+        wanted = {str(u or "") for u in units or ()}
+        model = self.unit_combo.model()
+        for row in range(model.rowCount()):
+            item = model.item(row)
+            unit = str(item.data(Qt.ItemDataRole.UserRole) or "")
+            item.setCheckState(Qt.CheckState.Checked if unit in wanted
+                               else Qt.CheckState.Unchecked)
+        self._refresh_unit_text()
+        self._on_changed()
+
+    def _on_unit_item_pressed(self, index):
+        """Toggle rather than select-and-close, as the other combos do."""
+        item = self.unit_combo.model().itemFromIndex(index)
+        if item is None:
+            return
+        item.setCheckState(
+            Qt.CheckState.Unchecked
+            if item.checkState() == Qt.CheckState.Checked
+            else Qt.CheckState.Checked)
+        self._refresh_unit_text()
+        self._on_changed()
+
+    def _refresh_unit_text(self):
+        chosen = self.selected_units()
+        if not chosen and len(self._unit_offer) == 1:
+            text = describe_unit(self._unit_offer[0][0])
+        else:
+            text = ", ".join(describe_unit(u) for u in chosen)
+        edit = self.unit_combo.lineEdit()
+        if edit is not None:
+            edit.setText(text)
+
+    def _forget_units(self):
+        self._unit_offer = []
+        self.unit_combo.model().clear()
+        self.unit_combo.setVisible(False)
+        self.unit_label.setVisible(False)
+
     def selected_methods(self):
         """Every ticked method code. Empty means all of them."""
         model = self.method_combo.model()
@@ -1001,6 +1400,8 @@ class SelectionPanel(QWidget):
             sample_types=sample_types,
             start=start,
             end=end,
+            depth=self._depth_scope(),
+            units=self.selected_units(),
         )
 
     # -------------------------------------------------------------- display
@@ -1049,6 +1450,9 @@ class SelectionPanel(QWidget):
         self.group_combo.setEnabled(enabled and bool(self._group_offer))
         self.method_combo.setEnabled(enabled and len(self._method_offer) > 1)
         self.fraction_combo.setEnabled(enabled and self._fractions_known)
+        self.unit_combo.setEnabled(enabled and len(self._unit_offer) > 1)
+        self.depth_check.setEnabled(enabled)
+        self._enable_depth()
         if enabled:
             self.start_date.setEnabled(self.date_check.isChecked())
             self.end_date.setEnabled(self.date_check.isChecked())
@@ -1077,6 +1481,8 @@ class SelectionPanel(QWidget):
         self.set_selected_fractions([])
         self.fraction_combo.setVisible(False)
         self.fraction_label.setVisible(False)
+        self._forget_depth()
+        self._forget_units()
         self._matrix_offer = []
         self._matrix_useful = False
         self.matrix_combo.setVisible(False)

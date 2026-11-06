@@ -81,6 +81,13 @@ FIELDS = (
 
 DETECT_TRUE = ("Y", "YES", "TRUE", "1")
 
+# rd.depth_interval(), as SQL: the top and bottom of a sample's interval,
+# with a lone depth standing for both and a reversed interval turned round.
+_DEPTH_TOP = ("least(coalesce(start_depth, end_depth), "
+              "coalesce(end_depth, start_depth))")
+_DEPTH_BOTTOM = ("greatest(coalesce(start_depth, end_depth), "
+                 "coalesce(end_depth, start_depth))")
+
 # Which non-detect convention reads which column of the view.
 ND_COLUMN = {
     rd.ND_HALF: "value_half",
@@ -141,6 +148,14 @@ class ReportStore(object):
         self.has_raw = has_raw
         # See set_row_scope. A reopened store's view was written unscoped.
         self._scope = rd.NO_ROW_SCOPE
+        # depth_extent() and units_in() per matrix, read from the unscoped
+        # rows.
+        self._depth_extents = {}
+        self._unit_offers = {}
+        # report_fields(), read once; and the scope v_wide was last built
+        # for (see _wide_view), None until something asks for fields.
+        self._report_fields = None
+        self._wide_scope = None
 
     @property
     def missing_for_analysis(self):
@@ -722,6 +737,17 @@ class ReportStore(object):
         con.execute("DROP VIEW IF EXISTS raw")
         con.execute("CREATE VIEW raw AS SELECT %s AS row_id, "
                     "%s FROM %s" % (row_id, aliased, scanned))
+        # Both at once, from ONE scan, for a map layer that carries every
+        # report column (_wide_view). Joining `raw` to `results` by row_id
+        # instead reads every file whole, because a computed row_id prunes
+        # nothing: 1.2-3.0 s locally for any analyte on Facility A's 3.45
+        # million rows, and the whole facility over HTTP. Read together, the
+        # matrix and chemical filters prune as they do for every other
+        # question: Lead in TAILS with all 71 columns in 0.17 s, Arsenic in
+        # SE 0.53 s, in WS 1.18 s (2026-10-30).
+        con.execute("DROP VIEW IF EXISTS results_wide")
+        con.execute("CREATE VIEW results_wide AS SELECT %s, %s FROM %s"
+                    % (", ".join(selects), aliased, scanned))
 
         store = cls(con, present, headers, has_raw=True)
         store._create_views()
@@ -948,7 +974,7 @@ class ReportStore(object):
             table.cell(row, "lab"),
         )
 
-    def _create_views(self, source="results"):
+    def _create_views(self, source="results", name="v_results"):
         """The rules, as one view every query reads.
 
         row_value() in three columns rather than a parameter, so the view can
@@ -968,9 +994,9 @@ class ReportStore(object):
         # report carries only the latter - ReportTable resolves aliases the
         # same way, so both see the same number.
         base = "coalesce(value, reported, detect_limit)"
-        self.con.execute("DROP VIEW IF EXISTS v_results")
+        self.con.execute("DROP VIEW IF EXISTS %s" % name)
         self.con.execute("""
-            CREATE VIEW v_results AS
+            CREATE VIEW {name} AS
             SELECT *,
                 {detected} AS detected,
                 {base} AS nd_base,
@@ -994,7 +1020,106 @@ class ReportStore(object):
             FROM {source}
             WHERE {scope}
         """.format(detected=detected, base=base, source=source,
-                   scope=self._scope_clause()))
+                   scope=self._scope_clause(), name=name))
+
+    def _wide_view(self):
+        """v_results with the report's own columns beside it: "v_wide".
+
+        The same rules and the same scope - built by _create_views, the one
+        definition - over `results_wide`, which adds raw's c0, c1, ... to
+        each row. Only a layer asking for fields reads it, so nothing else
+        pays for 71 columns it never selects.
+
+        Built on first use and again after the scope moves, rather than in
+        set_row_scope: a scope change is otherwise free until queried, and
+        most sessions never ask for fields. A parquet store made
+        results_wide from its single scan in from_parquet; a store over a
+        table joins its `raw` table, which is in memory and cheap to join.
+        """
+        if not self.has_raw:
+            raise StoreError(
+                "This store was built with with_raw=False, so the report's "
+                "own columns are not available to a layer.")
+        if self._wide_scope != self._scope:
+            self.con.execute(
+                "CREATE VIEW IF NOT EXISTS results_wide AS "
+                "SELECT * FROM results JOIN raw USING (row_id)")
+            self._create_views(source="results_wide", name="v_wide")
+            self._wide_scope = self._scope
+        return "v_wide"
+
+    def report_fields(self):
+        """[(header, DuckDB type)] of the report's own columns, or [].
+
+        ReportTable.report_fields()'s twin. Typed when the source is: a
+        parquet's RESULT_NUMERIC is DOUBLE and its TEST_ID BIGINT, so a
+        layer can graduate or filter on them as numbers. A store built from
+        a report holds them as the text they arrived as. [] when the store
+        kept no report columns (with_raw=False), so a caller can tell "no
+        fields to offer" from "a report with no columns".
+        """
+        if not self.has_raw:
+            return []
+        if self._report_fields is None:
+            described = self.con.execute(
+                "DESCRIBE SELECT * EXCLUDE (row_id) FROM raw").fetchall()
+            self._report_fields = [(header, row[1]) for header, row
+                                   in zip(self.headers, described)]
+        return list(self._report_fields)
+
+    def sample_fields(self, samples, matrix=rd.ALL_MATRICES):
+        """ReportTable.sample_fields(), as one grouped query.
+
+        One statement over the mapped samples' rows - asked once for all of
+        them, never per sample or per column - and only over SAMPLE_COLUMNS.
+        "One value in the sample" is min = max over the non-empty cells,
+        with either none or all of them filled: the same as the table's set
+        of report_cells(), NULL counted as a value. count(DISTINCT) over
+        every column said the same thing in 34 s for 400 surface-water
+        samples (2026-10-30). `matrix` lets a parquet store skip the other
+        matrices' files.
+        """
+        wanted = sorted({str(code).strip() for code in samples or () if code})
+        fields = self.report_fields()
+        listed = [i for i, (header, _kind) in enumerate(fields)
+                  if rd.is_sample_column(header)]
+        if "sample" not in self.present or not wanted or not listed:
+            return [], {}
+        view = self._wide_view()
+        where, params = self._where(matrix=matrix)
+
+        def cell(i):
+            # '' is no value, as report_cells() has it; only text can be ''.
+            return ("nullif(c%d, '')" % i if fields[i][1] == "VARCHAR"
+                    else "c%d" % i)
+        uniform = ", ".join(
+            "(count({c}) = 0 OR (count({c}) = count(*) AND min({c}) = max({c})))"
+            .format(c=cell(i)) for i in listed)
+        values = ", ".join("min(%s)" % cell(i) for i in listed)
+        rows = self.con.execute("""
+            SELECT trim(sample), %(uniform)s, %(values)s
+            FROM %(view)s
+            WHERE (%(where)s) AND trim(sample) IN (SELECT unnest(?))
+            GROUP BY 1
+        """ % {"uniform": uniform, "values": values, "view": view,
+               "where": where}, params + [wanted]).fetchall()
+        if not rows:
+            return [], {}
+        width = len(listed)
+        kept = [n for n in range(width) if all(r[1 + n] for r in rows)]
+        return ([fields[listed[n]] for n in kept],
+                {r[0]: self._report_cells([r[1 + width + n] for n in kept])
+                 for r in rows})
+
+    def _raw_columns(self, prefix=""):
+        """`c0, c1, ...` for every report column, for a SELECT."""
+        return "".join(", %sc%d" % (prefix, index)
+                       for index in range(len(self.headers)))
+
+    @staticmethod
+    def _report_cells(values):
+        """Raw cells as ReportTable.report_cells() gives them: '' is None."""
+        return [None if value == "" else value for value in values]
 
     # ----------------------------------------------------------- row scope
 
@@ -1002,7 +1127,8 @@ class ReportStore(object):
     def scope(self):
         return self._scope
 
-    def set_row_scope(self, start=None, end=None, sample_types=None):
+    def set_row_scope(self, start=None, end=None, sample_types=None,
+                      depth=None, units=None):
         """ReportTable.set_row_scope, as the WHERE of the one view.
 
         In the view rather than in _where() because every question reads
@@ -1014,19 +1140,136 @@ class ReportStore(object):
         nothing until the next query, which pays only the extra predicate.
         A thread_view() shares the catalogue, so it follows too.
         """
-        scope = rd.row_scope(start, end, sample_types)
+        scope = rd.row_scope(start, end, sample_types, depth, units)
         if scope == self._scope:
             return False
         self._scope = scope
         self._create_views()
         return True
 
+    def _has_depth(self):
+        return "start_depth" in self.present or "end_depth" in self.present
+
+    @staticmethod
+    def _depth_lookup(pairs, keep_unit=False):
+        """`depth_unit`, trimmed and lower-cased, looked up in (key, value)
+        pairs: the value as SQL, or when the key is absent NULL - or the
+        unit itself, with `keep_unit`.
+
+        A list lookup and not `CASE unit WHEN ...`. DuckDB expands a simple
+        CASE into one comparison per branch, each repeating the expression
+        it compares - so the trimming and lower-casing ran once per branch,
+        and once more per branch of the CASE wrapped around it. With the
+        factor CASE built on the alias CASE, a 0-5 cm filter took
+        analytes("SE") on Facility A from 0.037 s to 0.725 s; this takes it
+        to 0.047 s, the same 43,686 rows (measured 2026-10-30, DuckDB 1.5.5,
+        this laptop).
+        """
+        unit = "lower(trim(coalesce(depth_unit, '')))"
+        keys = ", ".join("'%s'" % key.replace("'", "''") for key, _ in pairs)
+        values = ", ".join(value for _, value in pairs)
+        return "coalesce(([%s])[list_position([%s], %s)], %s)" % (
+            values, keys, unit, unit if keep_unit else "NULL")
+
+    @classmethod
+    def _depth_unit_sql(cls):
+        """rd.depth_unit(), as SQL: trimmed, lower-cased, aliases resolved."""
+        return cls._depth_lookup(
+            [(alias, "'%s'" % name)
+             for alias, name in sorted(rd.DEPTH_UNIT_ALIASES.items())],
+            keep_unit=True)
+
+    def _depth_clause(self, depth):
+        """rd.in_depth(), as SQL over the store's columns.
+
+        The factor for every spelling a row's unit can have, written out from
+        rd.depth_factor so the two cannot disagree; a unit outside them reads
+        NULL, and a NULL comparison drops the row, as in_depth does.
+        """
+        top, bottom, target = depth
+        spellings = dict((name, name) for name in rd.DEPTH_UNIT_METRES)
+        spellings.update(rd.DEPTH_UNIT_ALIASES)
+        spellings[target] = target
+        factor = self._depth_lookup([
+            (spelling, "CAST('%r' AS DOUBLE)" % rd.depth_factor(name, target))
+            for spelling, name in sorted(spellings.items())
+            if rd.depth_factor(name, target) is not None])
+        clauses = ["coalesce(start_depth, end_depth) IS NOT NULL",
+                   "%s IS NOT NULL" % factor]
+        if top is not None:
+            clauses.append("round(%s * %s, %d) >= CAST('%r' AS DOUBLE)"
+                           % (_DEPTH_TOP, factor, rd.DEPTH_PLACES, top))
+        if bottom is not None:
+            clauses.append("round(%s * %s, %d) <= CAST('%r' AS DOUBLE)"
+                           % (_DEPTH_BOTTOM, factor, rd.DEPTH_PLACES, bottom))
+        return " AND ".join(clauses)
+
+    def depth_extent(self, matrix=rd.ALL_MATRICES):
+        """ReportTable.depth_extent: over every row, not the scoped view.
+
+        `results`, not v_results, for the reason the table reads `rows`:
+        the slider's range must not shrink as the slider narrows it. On a
+        parquet source that is a scan of the facility, so it is asked once
+        per matrix and kept.
+        """
+        if not self._has_depth():
+            return None
+        key = rd.matrix_key(matrix)
+        if key in self._depth_extents:
+            return self._depth_extents[key]
+        where, params = self._where(matrix=matrix)
+        groups = self.con.execute("""
+            SELECT %s AS unit, count(*), min(%s), max(%s)
+            FROM results
+            WHERE (%s) AND coalesce(start_depth, end_depth) IS NOT NULL
+            GROUP BY 1
+        """ % (self._depth_unit_sql(), _DEPTH_TOP, _DEPTH_BOTTOM, where),
+            params).fetchall()
+        # Distinct before Python sees them: Facility A's surface water has
+        # 468 distinct boundaries, its sediment 30 (2026-10-30).
+        boundaries = self.con.execute("""
+            WITH deep AS (
+                SELECT %s AS unit, %s AS top, %s AS bottom
+                FROM results
+                WHERE (%s) AND coalesce(start_depth, end_depth) IS NOT NULL)
+            SELECT unit, top FROM deep UNION SELECT unit, bottom FROM deep
+        """ % (self._depth_unit_sql(), _DEPTH_TOP, _DEPTH_BOTTOM, where),
+            params).fetchall()
+        self._depth_extents[key] = rd.depth_extent_from(groups, boundaries)
+        return self._depth_extents[key]
+
+    def units_in(self, matrix=rd.ALL_MATRICES):
+        """ReportTable.units_in: [(unit, rows)] over every row in the matrix.
+
+        `results`, unscoped, so ticking a unit leaves the others on offer;
+        the unit as units_for and the scope compare it.
+        """
+        if "unit" not in self.present:
+            return []
+        key = rd.matrix_key(matrix)
+        if key not in self._unit_offers:
+            where, params = self._where(matrix=matrix)
+            self._unit_offers[key] = [tuple(row) for row in self.con.execute("""
+                SELECT coalesce(trim(unit), '') AS u, count(*) AS n
+                FROM results WHERE (%s)
+                GROUP BY 1 ORDER BY n DESC, u
+            """ % where, params).fetchall()]
+        return self._unit_offers[key]
+
     def _scope_clause(self):
         """The row scope as SQL, inlined because DuckDB refuses a prepared
         parameter in CREATE VIEW. Dates are date objects and the codes are
         quoted with the only escaping a SQL string literal needs."""
-        start, end, codes = self._scope
+        start, end, codes, depth, units = self._scope
         clauses = []
+        if depth is not None and self._has_depth():
+            clauses.append(self._depth_clause(depth))
+        if units and "unit" in self.present:
+            # The expression units_for groups by, so a unit the guard named
+            # is a unit this matches.
+            clauses.append("coalesce(trim(unit), '') IN (%s)"
+                           % ", ".join("'%s'" % u.replace("'", "''")
+                                       for u in units))
         if (start is not None or end is not None) and "date" in self.present:
             # Undated rows are out whenever a bound is set: a NULL compared
             # to a date is NULL, which WHERE drops, but say it outright.
@@ -1193,8 +1436,12 @@ class ReportStore(object):
     def aggregate(self, chemical, cas_rn=None, how=rd.MOST_RECENT,
                   detected_only=False, non_detect=rd.ND_HALF,
                   matrix=rd.ALL_MATRICES, fraction=rd.ANY_FRACTION,
-                  method=rd.ALL_METHODS):
+                  method=rd.ALL_METHODS, fields=False):
         """Per-location summary, matching ReportTable.aggregate().
+
+        `fields` adds the winning row's report columns, as the table does;
+        the winner is the row ranked first below, so they are that one
+        sample's, never a mix of several.
 
         Two subtleties carried over from the loop it replaces. Rows with no
         usable number are COUNTED but cannot win, so the counts come from a
@@ -1228,9 +1475,11 @@ class ReportStore(object):
             # LAST says: a dated row always precedes an undated one.
             order = "sample_date DESC NULLS LAST, row_id ASC"
 
+        view = self._wide_view() if fields else "v_results"
+        raw = self._raw_columns() if fields else ""
         sql = """
             WITH matched AS (
-                SELECT * FROM v_results
+                SELECT * FROM %(view)s
                 WHERE (%(where)s) AND coalesce(location, '') <> ''
             ),
             counts AS (
@@ -1240,20 +1489,21 @@ class ReportStore(object):
             ),
             ranked AS (
                 SELECT location, %(col)s AS val, unit, sample_date, detect,
-                       at_limit,
+                       at_limit%(raw)s,
                        row_number() OVER (PARTITION BY location
                                           ORDER BY %(order)s) AS rn
                 FROM matched WHERE %(col)s IS NOT NULL
             )
             SELECT c.location, c.n, c.detects,
-                   r.val, r.unit, r.sample_date, r.detect, r.at_limit
+                   r.val, r.unit, r.sample_date, r.detect, r.at_limit%(rraw)s
             FROM counts c
             LEFT JOIN ranked r ON r.location = c.location AND r.rn = 1
-        """ % {"where": where, "col": column, "order": order}
+        """ % {"where": where, "col": column, "order": order, "view": view,
+               "raw": raw, "rraw": self._raw_columns("r.") if fields else ""}
 
         summary = {}
         for row in self.con.execute(sql, params).fetchall():
-            location, count, detects, value, unit, when, detect, at_limit = row
+            location, count, detects, value, unit, when, detect, at_limit = row[:8]
             summary[location] = {
                 "location": location,
                 "value": value,
@@ -1264,6 +1514,11 @@ class ReportStore(object):
                 "count": int(count),
                 "detect_count": int(detects or 0),
             }
+            if fields:
+                # No winner, no row to describe: the LEFT JOIN's NULLs are
+                # not a row whose every cell was empty.
+                summary[location]["fields"] = (
+                    self._report_cells(row[8:]) if value is not None else None)
         return summary
 
     def series(self, location, chemical, cas_rn=None,
@@ -1439,8 +1694,11 @@ class ReportStore(object):
 
     def rows_for(self, chemical, cas_rn=None, detected_only=False,
                  non_detect=rd.ND_HALF, matrix=rd.ALL_MATRICES,
-                 fraction=rd.ANY_FRACTION, method=rd.ALL_METHODS, limit=0):
+                 fraction=rd.ANY_FRACTION, method=rd.ALL_METHODS, limit=0,
+                 fields=False):
         """Every result for one analyte, one dict per row. Returns (rows, dropped).
+
+        `fields` adds each row's report columns, as ReportTable.rows_for().
 
         The unaggregated counterpart to aggregate(), and what "every result"
         mode maps. Rows with no usable number are dropped, not carried as
@@ -1492,22 +1750,25 @@ class ReportStore(object):
         rows = self.con.execute("""
             SELECT location, %(col)s AS val, unit, sample_date, detect,
                    at_limit, matrix, fraction, sample_type, start_depth,
-                   end_depth, depth_unit, custom_1, method,
+                   end_depth, depth_unit, custom_1, method%(raw)s,
                    row_number() OVER (
                        PARTITION BY location
                        -- Undated rows sort last and keep their arrival order
                        -- among themselves, as the Python's stable sort does.
                        ORDER BY sample_date ASC NULLS LAST, row_id ASC
                    ) - 1 AS seq
-            FROM v_results
+            FROM %(view)s
             WHERE %(where)s
             ORDER BY location, sample_date ASC NULLS LAST, row_id ASC
-        """ % {"col": column, "where": " AND ".join(clauses)},
+        """ % {"col": column, "where": " AND ".join(clauses),
+               "view": self._wide_view() if fields else "v_results",
+               "raw": self._raw_columns() if fields else ""},
             values).fetchall()
 
+        width = len(self.headers) if fields else 0
         out = []
         for r in rows:
-            out.append({
+            entry = {
                 "location": r[0], "value": r[1], "unit": r[2] or "",
                 "date": r[3], "detect": (r[4] or "").upper(),
                 "at_limit": bool(r[5]),
@@ -1517,8 +1778,11 @@ class ReportStore(object):
                 "start_depth": r[9], "end_depth": r[10],
                 "depth_unit": r[11] or "", "custom_1": r[12] or "",
                 "method": (r[13] or "").upper(),
-                "seq": int(r[14]),
-            })
+                "seq": int(r[14 + width]),
+            }
+            if fields:
+                entry["fields"] = self._report_cells(r[14:14 + width])
+            out.append(entry)
         return out, dropped
 
     def filtered_rows(self, analytes=None, matrix=rd.ALL_MATRICES,

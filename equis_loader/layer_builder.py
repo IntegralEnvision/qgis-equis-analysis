@@ -109,6 +109,99 @@ def _qgs_fields(esri_fields):
     return fields
 
 
+# DuckDB type -> Qt type for a report column carried on a layer. A parquet
+# source is typed (RESULT_NUMERIC DOUBLE, TEST_ID BIGINT) and a layer keeps
+# that so the column graduates and filters as a number; anything unlisted -
+# VARCHAR, a report's text, TIME, DATE - is text, which always displays.
+REPORT_TYPES = {
+    "BIGINT": QMetaType.Type.LongLong,
+    "HUGEINT": QMetaType.Type.LongLong,
+    "UBIGINT": QMetaType.Type.LongLong,
+    "UINTEGER": QMetaType.Type.LongLong,
+    "INTEGER": QMetaType.Type.Int,
+    "SMALLINT": QMetaType.Type.Int,
+    "TINYINT": QMetaType.Type.Int,
+    "USMALLINT": QMetaType.Type.Int,
+    "UTINYINT": QMetaType.Type.Int,
+    "DOUBLE": QMetaType.Type.Double,
+    "FLOAT": QMetaType.Type.Double,
+    "REAL": QMetaType.Type.Double,
+    "BOOLEAN": QMetaType.Type.Bool,
+}
+
+
+def _report_qtype(kind):
+    kind = str(kind or "").upper()
+    if kind.startswith("DECIMAL"):
+        return QMetaType.Type.Double
+    return REPORT_TYPES.get(kind, QMetaType.Type.QString)
+
+
+def _report_field_names(report_fields, taken):
+    """A layer name for each report column, clear of the fields before it.
+
+    The report's own spelling where it is free, so SYS_SAMPLE_CODE reads as
+    the report wrote it. Compared CASE-INSENSITIVELY, because GeoPackage
+    column names are: a location service's `name` and a report's NAME are
+    one column to SQLite, and the write fails. The commonest clash is the
+    layer's own result_unit with the report's RESULT_UNIT. `fid` is always
+    taken - it is the GeoPackage's own key.
+
+    A clash takes a SUFFIX, RESULT_UNIT_report, not a prefix: EQuIS has
+    columns of its own called REPORT_*, and report_RESULT_UNIT landed on
+    REPORT_RESULT_UNIT on Facility A's 71 columns (2026-10-30).
+    """
+    used = {str(name).lower() for name in taken} | {"fid"}
+    names = []
+    for header, _kind in report_fields:
+        base = str(header).strip() or "column"
+        name = base
+        if name.lower() in used:
+            name = "%s_report" % base
+            suffix = 2
+            while name.lower() in used:
+                name = "%s_report_%d" % (base, suffix)
+                suffix += 1
+        used.add(name.lower())
+        names.append(name)
+    return names
+
+
+def _report_qgs_fields(report_fields, taken):
+    """QgsFields for the report's columns, and a converter for each value."""
+    names = _report_field_names(report_fields, taken)
+    fields, converters = [], []
+    for name, (_header, kind) in zip(names, report_fields):
+        qtype = _report_qtype(kind)
+        fields.append(QgsField(name, qtype))
+        if qtype == QMetaType.Type.Double:
+            converters.append(float)
+        elif qtype in (QMetaType.Type.LongLong, QMetaType.Type.Int):
+            converters.append(int)
+        elif qtype == QMetaType.Type.Bool:
+            converters.append(bool)
+        else:
+            # str() of a TIME or a timestamp is its ISO form, which is what
+            # the attribute table should show; a str passes untouched.
+            converters.append(str)
+    return fields, converters
+
+
+def _report_values(cells, converters):
+    """One row's report cells as layer values; NULL where there are none.
+
+    `cells` is None for a location with no winning row, and then every
+    column is NULL: there is no sample to describe, which is different from
+    a sample whose cells were empty only by coincidence of the result.
+    """
+    if not converters:
+        return []
+    if cells is None:
+        return [None] * len(converters)
+    return [None if cell is None else convert(cell)
+            for cell, convert in zip(cells, converters)]
+
+
 def _point(geom):
     x, y = geom.get("x"), geom.get("y")
     if x is None or y is None:
@@ -286,8 +379,14 @@ def build_feature_layer(layer_name, feature_sets, geometry_type=None, fallback_w
 def build_joined_layer(layer_name, feature_sets, summary, chemical, unit_hint="",
                        fallback_wkid=0, location_field="code",
                        storage=MEMORY, gpkg_path=None, spark_field="spark_svg",
-                       table_name=None):
+                       table_name=None, report_fields=None):
     """Location points carrying one analyte's aggregated result.
+
+    `report_fields` is the source's report_fields(), and when given each
+    summary entry's "fields" - the WINNING row's report columns - are
+    carried after the result fields: the sample the mapped number came
+    from, its qualifiers, limits, lab and SDG. A location whose number came
+    from no row (sampled, nothing usable) has them all NULL.
 
     `summary` is ReportTable.aggregate() output keyed by location code, and
     only locations IN it become features. An entry means the location has a
@@ -345,9 +444,12 @@ def build_joined_layer(layer_name, feature_sets, summary, chemical, unit_hint=""
     # once here keeps both storage modes on the same schema.
     if spark_field and spark_field not in source_names:
         result_fields.append(QgsField(spark_field, QMetaType.Type.QString))
+    extra, converters = _report_qgs_fields(
+        report_fields or [],
+        source_names + [field.name() for field in result_fields])
 
     provider = layer.dataProvider()
-    provider.addAttributes(source_fields.toList() + result_fields)
+    provider.addAttributes(source_fields.toList() + result_fields + extra)
     layer.updateFields()
 
     # Match location codes case-insensitively; the report and the feature
@@ -410,6 +512,7 @@ def build_joined_layer(layer_name, feature_sets, summary, chemical, unit_hint=""
             if spark_field and spark_field not in source_names:
                 # Filled in later by style_with_sparklines, if asked for.
                 values.append(None)
+            values.extend(_report_values(entry.get("fields"), converters))
 
             feature.setAttributes(values)
             geom = esri_geometry(item.get("geometry"))
@@ -487,8 +590,13 @@ def enable_temporal(layer, field=SAMPLE_TIME_FIELD):
 
 def build_result_layer(layer_name, feature_sets, results, chemical,
                        unit_hint="", fallback_wkid=0, location_field="code",
-                       storage=MEMORY, gpkg_path=None, table_name=None):
+                       storage=MEMORY, gpkg_path=None, table_name=None,
+                       report_fields=None):
     """One point per RESULT, rather than one per location.
+
+    `report_fields` is the source's report_fields(); when given, each
+    result's own report columns follow the result fields, so a feature
+    holds everything the report said about that one row.
 
     `results` is ReportTable.rows_for() output: a flat list with one dict per
     result row, several of which share a location. build_joined_layer cannot
@@ -568,9 +676,12 @@ def build_result_layer(layer_name, feature_sets, results, chemical,
         # sample look like duplicate rows without it.
         QgsField("method", QMetaType.Type.QString),
     ]
+    extra, converters = _report_qgs_fields(
+        report_fields or [],
+        source_names + [field.name() for field in result_fields])
 
     provider = layer.dataProvider()
-    provider.addAttributes(source_fields.toList() + result_fields)
+    provider.addAttributes(source_fields.toList() + result_fields + extra)
     layer.updateFields()
 
     # Location geometry and attributes, keyed the same case-insensitive way
@@ -636,6 +747,7 @@ def build_result_layer(layer_name, feature_sets, results, chemical,
             entry.get("custom_1") or None,
             entry.get("method") or None,
         ])
+        values.extend(_report_values(entry.get("fields"), converters))
         feature.setAttributes(values)
         feature.setGeometry(QgsGeometry(geom))
         buffer.append(feature)
@@ -1356,7 +1468,8 @@ _BIVARIATE_SHAPES = {"both": "circle", "x_only": "triangle",
 
 
 def build_bivariate_layer(layer_name, feature_sets, stations, x_meta, y_meta,
-                          breaks, fallback_wkid=0, location_field="code"):
+                          breaks, fallback_wkid=0, location_field="code",
+                          sample_fields=None):
     """One point per station, coloured by a two-analyte class (US-24).
 
     `stations` is bivariate.stations(): one real sample per location, its
@@ -1365,6 +1478,11 @@ def build_bivariate_layer(layer_name, feature_sets, stations, x_meta, y_meta,
     non-detect are grey, in the scatter's symbol for that class, so the map
     and the chart share one key (decided 2026-10-09). Palette, breaks and
     keys all come from bivariate.py - nothing here decides a class.
+
+    `sample_fields` is a source's sample_fields() answer, (fields, {sample:
+    cells}): the report columns that are the sample's own, carried after
+    the bv_ fields so a station says which sample it is in the report's
+    terms - its date, depth, task - and never one analyte's result columns.
 
     Returns (layer, placed, unplaced): stations matched to a location point,
     and codes that had no point to draw on.
@@ -1399,8 +1517,10 @@ def build_bivariate_layer(layer_name, feature_sets, stations, x_meta, y_meta,
         # pick among them was by sample code, i.e. arbitrary (replicates).
         QgsField("bv_tied", QMetaType.Type.Int),
     ]
+    report, converters, cells = _sample_columns(
+        sample_fields, source_names + [field.name() for field in extra])
     provider = layer.dataProvider()
-    provider.addAttributes(source_fields.toList() + extra)
+    provider.addAttributes(source_fields.toList() + extra + report)
     layer.updateFields()
 
     xb = (breaks.get("x") or {}).get("breaks") or []
@@ -1430,7 +1550,7 @@ def build_bivariate_layer(layer_name, feature_sets, stations, x_meta, y_meta,
                 y_meta.get("chemical"), station["y"], int(station["y_detected"]),
                 station.get("y_qualifier"), station.get("samples_here"),
                 station.get("tied") or 1,
-            ])
+            ] + _report_values(_cells_for(cells, station), converters))
             geom = esri_geometry(item.get("geometry"))
             if geom is not None:
                 feature.setGeometry(geom)
@@ -1441,6 +1561,18 @@ def build_bivariate_layer(layer_name, feature_sets, stations, x_meta, y_meta,
     layer.setRenderer(_bivariate_renderer(x_meta, y_meta, xb, yb))
     unplaced = sorted(s["location"] for c, s in by_code.items() if c not in seen)
     return layer, placed, unplaced
+
+
+def _sample_columns(sample_fields, taken):
+    """(QgsFields, converters, {sample: cells}) from a sample_fields() answer."""
+    fields, cells = sample_fields or ([], {})
+    report, converters = _report_qgs_fields(fields or [], taken)
+    return report, converters, cells or {}
+
+
+def _cells_for(cells, station):
+    """A station's sample columns, or None (all NULL) for an unknown sample."""
+    return cells.get(str(station.get("sample") or "").strip())
 
 
 def _bivariate_renderer(x_meta, y_meta, xb, yb):
@@ -1484,7 +1616,8 @@ def _bivariate_renderer(x_meta, y_meta, xb, yb):
 
 
 def build_ternary_layer(layer_name, feature_sets, stations, metas,
-                        fallback_wkid=0, location_field="code"):
+                        fallback_wkid=0, location_field="code",
+                        sample_fields=None):
     """One point per station, coloured by a three-analyte composition.
 
     `stations` is ternary.stations(): one real sample per location (the
@@ -1493,7 +1626,7 @@ def build_ternary_layer(layer_name, feature_sets, stations, metas,
     here and its point in the triangle are one colour. A station with any
     non-detect is grey and hollow, as in the triangle (decided 2026-10-12).
 
-    Returns (layer, placed, unplaced), as build_bivariate_layer does.
+    `sample_fields` and the return value are as build_bivariate_layer's.
     """
     if not feature_sets:
         return None, 0, []
@@ -1517,8 +1650,10 @@ def build_ternary_layer(layer_name, feature_sets, stations, metas,
                   QgsField("tn_%s_detected" % tag, QMetaType.Type.Int)]
     extra += [QgsField("tn_samples_here", QMetaType.Type.Int),
               QgsField("tn_tied", QMetaType.Type.Int)]
+    report, converters, cells = _sample_columns(
+        sample_fields, source_names + [field.name() for field in extra])
     provider = layer.dataProvider()
-    provider.addAttributes(source_fields.toList() + extra)
+    provider.addAttributes(source_fields.toList() + extra + report)
     layer.updateFields()
 
     by_code = {str(s["location"]).strip().lower(): s for s in stations}
@@ -1541,6 +1676,7 @@ def build_ternary_layer(layer_name, feature_sets, stations, metas,
                     station["detected"]):
                 values += [meta.get("chemical"), value, share, int(detected)]
             values += [station.get("samples_here"), station.get("tied") or 1]
+            values += _report_values(_cells_for(cells, station), converters)
             feature = QgsFeature(layer.fields())
             feature.setAttributes(values)
             geom = esri_geometry(item.get("geometry"))

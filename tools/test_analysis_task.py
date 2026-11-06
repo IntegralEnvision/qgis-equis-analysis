@@ -104,10 +104,10 @@ def main():
     controller = LinkedViewsController(
         connection_for=lambda: store.con, layer_for=lambda: None,
         on_status=statuses.append, store_for=lambda: store,
-        on_scatter_map=lambda stations, breaks, x, y, *rest: maps.append(
+        on_scatter_map=lambda stations, breaks, x, y, *rest, **kw: maps.append(
             (len(stations), x["chemical"], y["chemical"],
              threading.get_ident(), stations,
-             rest[1] if len(rest) > 1 else None)),
+             rest[1] if len(rest) > 1 else None, kw.get("matrix"))),
         locations_for=lambda: None, matrix_for=lambda: "WS")
     views = controller.views = Views()
 
@@ -148,6 +148,8 @@ def main():
     check("the map was built for each drawn pair, on the main thread",
           [m[2] for m in maps] == ["Zinc", "Lead"]
           and all(m[3] == views.main for m in maps), maps)
+    check("and told the matrix, so its sample columns skip the others' files",
+          all(m[6] == ["WS"] for m in maps), [m[6] for m in maps])
     last = [p for n, p in views.calls if n == "scatter"][-1]
     check("the last scatter reads a pair table", last["pivot"].startswith("pp_"),
           last["pivot"])

@@ -137,6 +137,15 @@ def awkward_rows():
             "mg/kg", "N", matrix="SO", fraction="N", method="ICM14B"),
         row("MW-05", "Nickel", "7440-02-0", "07/07/2020", "0.02", "0.02",
             "0.01", "mg/kg", "Y", matrix="SO", fraction="N", method="ICM40B"),
+        # A TIE ON THE MAXIMUM between two methods on one sample: the same
+        # detected number, so the value, unit, date and detect all agree and
+        # only the row's own columns say which won. The first to arrive
+        # must, in both. A store breaking ties on row_id DESC passed every
+        # check until aggregate(fields=True) compared the winner's cells.
+        row("MW-12", "Benzene", "71-43-2", "03/03/2021", "15.0", "15.0", "0.5",
+            "ug/L", "Y", method="M1", custom="first"),
+        row("MW-12", "Benzene", "71-43-2", "03/03/2021", "15.0", "15.0", "0.5",
+            "ug/L", "Y", method="ICM40B", custom="second"),
         # Dissolved and total for one sample, an order of magnitude apart.
         row("MW-06", "Iron", "7439-89-6", "08/08/2020", "0.4", "0.4", "0.05",
             "mg/L", "Y", matrix="WG", fraction="D"),
@@ -169,22 +178,94 @@ def awkward_rows():
         # And a lowercase one, which is "N" compared case-insensitively.
         row("MW-11", "Benzene", "71-43-2", "07/07/2020", "0.3", "0.3", "0.5",
             "ug/L", "Y", stype="n"),
+    ] + depth_rows()
+
+
+def depth_rows():
+    """Sediment cores for the depth filter. Every water row above has no
+    depth, so each depth scope also checks those are left out.
+
+    Mostly cm with one m and one ft core, as Facility A's sediment mixes cm
+    and m: a filter compared as bare numbers passes these tests only if it
+    gets every unit wrong the same way, and the direct checks below rule
+    that out.
+    """
+    def core(loc, value, d0, d1, dunit):
+        return row(loc, "Lead", "7439-92-1", "06/15/2020", value, value, "0.5",
+                   "mg/kg", "Y", matrix="SE", d0=d0, d1=d1, dunit=dunit)
+    return [
+        core("SD-01", "11.0", "0", "2", "cm"),
+        # Its bottom is 0.3 m only after conversion and rounding: 30 * 0.01
+        # is 0.3 in floating point, but the bound must not depend on luck.
+        core("SD-01", "12.0", "2", "30", "cm"),
+        # A metre core, starting where a 0 to 0.3 m filter ends.
+        core("SD-01", "13.0", "0.3", "0.5", "m"),
+        # A start depth alone is a point; an end depth alone is one too.
+        core("SD-02", "21.0", "10", "", "CM"),
+        core("SD-02", "22.0", "", "15", "cm"),
+        # Written bottom first: 20 to 40 cm.
+        core("SD-02", "23.0", "40", "20", "cm"),
+        # Feet, by a spelling the alias table resolves: 30.48 to 60.96 cm.
+        core("SD-03", "31.0", "1", "2", "feet"),
+        # A unit nobody can convert, and no unit at all. Each is filtered
+        # only in its own terms, never compared with the others.
+        core("SD-03", "32.0", "1", "2", "fathom"),
+        core("SD-03", "33.0", "5", "6", ""),
+        # A unit and no depth: outside every depth filter.
+        core("SD-04", "41.0", "", "", "cm"),
+    ] + leachate_rows()
+
+
+def leachate_rows():
+    """A solid's stray leachate, for the unit filter: Lead in the sediment
+    matrix reported in water's units, as Facility A's sediment holds 3,401
+    results in mg/L beside 635,904 in mg/kg (2026-10-30). No depth, so the
+    depth checks above are untouched by them.
+    """
+    def stray(value, unit):
+        return row("SD-05", "Lead", "7439-92-1", "06/15/2020", value, value,
+                   "0.001", unit, "Y", matrix="SE")
+    return [
+        stray("0.004", "mg/L"),
+        # Padded: compared trimmed, so it is mg/L too.
+        stray("0.005", " mg/L "),
+        # A different spelling is a different unit, as the guard counts it.
+        stray("9.0", "MG/KG"),
+        # No unit at all: "" is a unit the filter can keep or drop.
+        stray("8.0", ""),
     ]
 
 
-# Row scopes the whole comparison is repeated under: (start, end, types).
-# Every question must agree under each, AND removing the scope must give
-# back the unscoped answers, which the final NO_ROW_SCOPE pass checks.
+# Row scopes the whole comparison is repeated under: (start, end, types,
+# depth, units). Every question must agree under each, AND removing the scope must
+# give back the unscoped answers, which the final NO_ROW_SCOPE pass checks.
 SCOPES = [
     ("dates 2020-01-01..2021-01-05",
-     (datetime.date(2020, 1, 1), datetime.date(2021, 1, 5), None)),
-    ("open start ..2020-12-31", (None, datetime.date(2020, 12, 31), None)),
-    ("open end 2021-01-01..", (datetime.date(2021, 1, 1), None, None)),
-    ("normal samples only", (None, None, ["N"])),
+     (datetime.date(2020, 1, 1), datetime.date(2021, 1, 5), None, None)),
+    ("open start ..2020-12-31",
+     (None, datetime.date(2020, 12, 31), None, None)),
+    ("open end 2021-01-01..", (datetime.date(2021, 1, 1), None, None, None)),
+    ("normal samples only", (None, None, ["N"], None)),
     ("dates and types", (datetime.date(2019, 1, 1),
-                         datetime.date(2021, 12, 31), ["n", "EB"])),
+                         datetime.date(2021, 12, 31), ["n", "EB"], None)),
     ("a range holding nothing", (datetime.date(2030, 1, 1),
-                                 datetime.date(2031, 1, 1), None)),
+                                 datetime.date(2031, 1, 1), None, None)),
+    ("depth 0..0.3 m", (None, None, None, (0, 0.3, "m"))),
+    ("depth 30..100 cm", (None, None, None, (30, 100, "cm"))),
+    ("depth open top ..12 CM", (None, None, None, (None, 12, "CM"))),
+    ("depth in fathoms", (None, None, None, (0, 5, "fathom"))),
+    ("depth with no unit", (None, None, None, (0, 10, ""))),
+    ("depth, dates and types", (datetime.date(2019, 1, 1), None, ["N"],
+                                (0, 1, "metres"))),
+    ("unit mg/kg", (None, None, None, None, ["mg/kg"])),
+    ("unit the leachate's", (None, None, None, None, ["mg/L"])),
+    ("units several, one of them none", (None, None, None, None,
+                                         ["ug/L", ""])),
+    ("unit a spelling only one row uses", (None, None, None, None,
+                                           ["MG/KG"])),
+    ("unit nothing has", (None, None, None, None, ["Mg/l"])),
+    ("unit, depth, dates and types", (datetime.date(2019, 1, 1), None, ["N"],
+                                      (0, 1, "m"), [" mg/kg "])),
     ("unscoped again", rd.NO_ROW_SCOPE),
 ]
 
@@ -195,10 +276,9 @@ def scoped(label, table, store):
     Parity alone cannot catch a rule both implementations break the same
     way, so the boundary cases are also asserted outright.
     """
-    for name, (start, end, types) in SCOPES:
+    for name, scope in SCOPES:
         print("")
-        changed = (table.set_row_scope(start, end, types),
-                   store.set_row_scope(start, end, types))
+        changed = (table.set_row_scope(*scope), store.set_row_scope(*scope))
         check("%s/%s: both report the scope changed" % (label, name),
               changed == (True, True), repr(changed))
         compare_all("%s/%s" % (label, name), table, store)
@@ -237,11 +317,117 @@ def direct_scope_checks():
     bare_rows = [[r[0], r[1], r[4], r[8]] for r in awkward_rows()]
     bare_table, bare_store = build(bare_headers, bare_rows)
     before = (bare_table.analytes(), bare_store.analytes())
-    bare_table.set_row_scope(datetime.date(2030, 1, 1), None, ["N"])
-    bare_store.set_row_scope(datetime.date(2030, 1, 1), None, ["N"])
+    bare_table.set_row_scope(datetime.date(2030, 1, 1), None, ["N"],
+                             (0, 1, "m"), ["mg/L"])
+    bare_store.set_row_scope(datetime.date(2030, 1, 1), None, ["N"],
+                             (0, 1, "m"), ["mg/L"])
     check("bare: a scope on columns the report lacks matches everything",
           (bare_table.analytes(), bare_store.analytes()) == before
           and before[0])
+    check("bare: no depth columns, no depth to offer",
+          (bare_table.depth_extent(), bare_store.depth_extent())
+          == (None, None))
+    check("bare: no unit column, no units to offer",
+          (bare_table.units_in(), bare_store.units_in()) == ([], []))
+    depth_checks()
+
+
+def depth_checks():
+    """The depth filter's rules, against known answers (depth_rows)."""
+    print("")
+    table, store = build(FULL_HEADERS, awkward_rows())
+
+    def lead(source):
+        rows, _ = source.rows_for("Lead", "7439-92-1")
+        return sorted(r["value"] for r in rows)
+
+    cases = [
+        # 0-2 cm and 2-30 cm are inside; 30-50 cm (the m core) and
+        # 20-40 cm (written backwards) reach below; the points at 10 and 15
+        # cm are inside. Bare numbers would let the m core in (0.3 to 0.5
+        # read against 0 to 0.3 in cm is "0.3 to 0.5 cm") and keep the cm
+        # rows out.
+        ((0, 0.3, "m"), [11.0, 12.0, 21.0, 22.0],
+         "metres: cm rows converted, the 30 cm bottom on the bound kept"),
+        # Containment, not overlap: 20-40 cm crosses 30 and stays out.
+        ((30, 100, "cm"), [13.0, 31.0],
+         "cm: the m and ft cores are in, the core crossing 30 cm is not"),
+        ((None, 12, "CM"), [11.0, 21.0],
+         "an open top, and the unit compared case-insensitively"),
+        ((0, 5, "fathom"), [32.0], "a unit nobody converts meets only itself"),
+        ((0, 10, ""), [33.0], "no unit meets only no unit"),
+        ((0, 1000, "km"), [], "an unknown filter unit converts nothing"),
+    ]
+    for source, name in ((table, "python"), (store, "sql")):
+        for depth, want, why in cases:
+            source.set_row_scope(None, None, None, depth)
+            check("depth/%s: %s" % (name, why), lead(source) == want,
+                  repr(lead(source)))
+            check("depth/%s: no undepthed row survives %r" % (name, depth),
+                  not source.rows_for("Benzene", "71-43-2")[0])
+        source.set_row_scope()
+        # cm is most rows (5), so the range is offered in cm: the metre core
+        # reaches 50 cm and the feet core 60.96 cm. Fathoms and the blank
+        # unit cannot be placed on it, and say so.
+        # The stops are every top and bottom, converted: the m core's 30
+        # and 50, the feet core's 30.48 and 60.96, the points once each.
+        want = {"unit": "cm", "top": 0.0, "bottom": 60.96, "rows": 7,
+                "unconverted": {"fathom": 1, "": 1},
+                "stops": (0.0, 2.0, 10.0, 15.0, 20.0, 30.0, 30.48, 40.0,
+                          50.0, 60.96)}
+        check("depth/%s: the extent of the sediment" % name,
+              source.depth_extent("SE") == want, repr(source.depth_extent("SE")))
+        check("depth/%s: water has no depth to offer" % name,
+              source.depth_extent("WG") is None,
+              repr(source.depth_extent("WG")))
+        # The extent ignores the scope, or the slider would shrink under
+        # its own handles.
+        source.set_row_scope(None, None, None, (0, 2, "cm"))
+        check("depth/%s: the extent is the same under a depth filter" % name,
+              source.depth_extent("SE") == want)
+        source.set_row_scope()
+    unit_checks()
+
+
+def unit_checks():
+    """The unit filter's rules, against known answers (leachate_rows)."""
+    print("")
+    table, store = build(FULL_HEADERS, awkward_rows())
+
+    def lead(source):
+        rows, _ = source.rows_for("Lead", "7439-92-1", matrix="SE")
+        return sorted(r["value"] for r in rows)
+
+    cases = [
+        (["mg/kg"], [11.0, 12.0, 13.0, 21.0, 22.0, 23.0, 31.0, 32.0, 33.0,
+                     41.0], "the solid's own unit keeps the cores"),
+        (["mg/L"], [0.004, 0.005], "the leachate, padded spelling and all"),
+        (["MG/KG"], [9.0], "a spelling is its own unit, as the guard says"),
+        ([""], [8.0], "no unit is a unit that can be kept"),
+        (["Mg/l"], [], "a unit nothing has keeps nothing"),
+    ]
+    # Commonest first, ties by name: what the guard counts, every row.
+    offer = [("mg/kg", 10), ("mg/L", 2), ("", 1), ("MG/KG", 1)]
+    for source, name in ((table, "python"), (store, "sql")):
+        for units, want, why in cases:
+            source.set_row_scope(None, None, None, None, units)
+            check("unit/%s: %s" % (name, why), lead(source) == want,
+                  repr(lead(source)))
+            guard = source.units_for("Lead", "7439-92-1", matrix="SE")
+            check("unit/%s: the guard sees only %r" % (name, units),
+                  [u for u, _ in guard] == ([] if not want else
+                                            [units[0].strip()]),
+                  repr(guard))
+            # The offer ignores the scope, or ticking one unit would take
+            # the others off the list.
+            check("unit/%s: the offer is whole under %r" % (name, units),
+                  source.units_in("SE") == offer, repr(source.units_in("SE")))
+        source.set_row_scope()
+        check("unit/%s: the sediment's units, commonest first" % name,
+              source.units_in("SE") == offer, repr(source.units_in("SE")))
+        check("unit/%s: water's are its own" % name,
+              source.units_in("WG") == [("ug/L", 25), ("mg/L", 3)],
+              repr(source.units_in("WG")))
 
 
 def unit_column_checks():
@@ -312,6 +498,115 @@ def unit_column_checks():
               lead is not None and sorted(u for u, _ in lead) == ["mg/L", "ug/L"],
               repr(lead))
 
+    # Fields over PARQUET: from results_wide's single scan rather than a
+    # join, so it is a second way to the same cells and must agree.
+    expected, _ = table.rows_for("Arsenic", None, non_detect=rd.ND_FULL,
+                                 fields=True)
+    for name, source in sources[1:]:
+        got, _ = source.rows_for("Arsenic", None, non_detect=rd.ND_FULL,
+                                 fields=True)
+        same("fields/%s: rows_for(fields=True)" % name, expected, got)
+        same("fields/%s: aggregate(fields=True)" % name,
+             table.aggregate("Lead", how=rd.MAXIMUM, fields=True),
+             source.aggregate("Lead", how=rd.MAXIMUM, fields=True))
+        same("fields/%s: report_fields names the report's columns" % name,
+             [h for h, _ in source.report_fields()], list(headers))
+    blank = [x["fields"] for x in expected if x["location"] == "MW-02"][0]
+    check("fields: an empty report cell is None, whitespace is kept",
+          blank[headers.index("RESULT_NUMERIC")] is None
+          and [x["fields"] for x in expected if x["location"] == "MW-03"][0][
+              headers.index("RESULT_UNIT")] == "  ", repr(blank))
+    check("fields: a store without the report's columns offers none",
+          st.ReportStore.from_table(table).report_fields() == [])
+    try:
+        st.ReportStore.from_table(table).rows_for("Arsenic", fields=True)
+        refused = False
+    except st.StoreError:
+        refused = True
+    check("fields: and refuses to invent them", refused)
+
+
+def sample_field_checks():
+    """sample_fields(): a pivot point's columns are its SAMPLE'S, in all three.
+
+    Only SAMPLE_COLUMNS, and only those holding one value across every
+    mapped sample's rows - a sample column that disagrees anywhere is left
+    off rather than shown with one row's value.
+    """
+    headers = ["SYS_SAMPLE_CODE", "SYS_LOC_CODE", "SAMPLE_DATE",
+               "CHEMICAL_NAME", "RESULT_NUMERIC", "DETECT_FLAG",
+               "MATRIX_CODE", "START_DEPTH", "TASK_CODE", "LAB_QUALIFIERS",
+               "SAMPLE_TYPE_CODE", "LOC_NAME"]
+
+    def r(sample, chem, task="T1", depth="0.5", qual="", matrix="WG",
+          loc="MW-1", name="Well 1"):
+        return [sample, loc, "01/05/2020", chem, "1.0", "Y", matrix, depth,
+                task, qual, "N", name]
+
+    rows = [
+        # Two results, one sample: the qualifiers differ, as results' do.
+        r("S-1", "Lead", qual="J"), r("S-1", "Zinc", qual=""),
+        r("S-2", "Lead", loc="MW-2", name="Well 2"),
+        r("S-2", "Zinc", loc="MW-2", name="Well 2"),
+        # A sample whose TASK_CODE disagrees between its rows.
+        r("S-3", "Lead", task="T1"), r("S-3", "Zinc", task="T2"),
+        # A sample with its depth on one row and blank on the other.
+        r("S-4", "Lead", depth="0.5"), r("S-4", "Zinc", depth=""),
+        # Whitespace is a value, not a blank: " " and "" differ.
+        r("S-5", "Lead", name=" "), r("S-5", "Zinc", name=""),
+        # Another matrix.
+        r("S-6", "Lead", matrix="SO"), r("S-6", "Zinc", matrix="SO"),
+    ]
+    table, store = build(headers, rows)
+    import tempfile
+    folder = tempfile.mkdtemp(prefix="parity_samples_")
+    path = os.path.join(folder, "samples.parquet").replace("\\", "/")
+    con = st.duckdb_module().connect()
+    con.execute("CREATE TABLE t (%s)" % ", ".join('"%s" VARCHAR' % h for h in headers))
+    con.executemany("INSERT INTO t VALUES (%s)" % ", ".join("?" * len(headers)),
+                    [[cell if cell != "" else None for cell in rw] for rw in rows])
+    con.execute("COPY t TO '%s' (FORMAT PARQUET)" % path)
+    con.close()
+    parquet = st.ReportStore.from_parquet(path, hive=False)
+
+    def names(answer):
+        return [h for h, _ in answer[0]]
+
+    asks = (("two clean samples", ["S-1", "S-2"], rd.ALL_MATRICES),
+            ("one disagrees on its task", ["S-1", "S-3"], rd.ALL_MATRICES),
+            ("one has a half-blank depth", ["S-1", "S-4"], rd.ALL_MATRICES),
+            ("whitespace against blank", ["S-5"], rd.ALL_MATRICES),
+            ("the matrix narrows", ["S-1", "S-6"], "WG"),
+            ("a code nothing has", ["S-1", "NOPE"], rd.ALL_MATRICES),
+            ("nothing at all", ["NOPE"], rd.ALL_MATRICES),
+            ("codes with spaces", [" S-1 ", "S-2"], rd.ALL_MATRICES))
+    for label, samples, matrix in asks:
+        expected = table.sample_fields(samples, matrix=matrix)
+        for name, source in (("sql from the table", store),
+                             ("sql over parquet", parquet)):
+            same("samples/%s: %s" % (name, label), expected,
+                 source.sample_fields(samples, matrix=matrix))
+
+    clean = table.sample_fields(["S-1", "S-2"])
+    check("samples: only the sample's columns, never a result's",
+          names(clean) == ["SYS_SAMPLE_CODE", "SYS_LOC_CODE", "SAMPLE_DATE",
+                           "MATRIX_CODE", "START_DEPTH", "TASK_CODE",
+                           "SAMPLE_TYPE_CODE", "LOC_NAME"], repr(names(clean)))
+    check("samples: each sample its own values",
+          clean[1]["S-2"][names(clean).index("LOC_NAME")] == "Well 2"
+          and clean[1]["S-1"][names(clean).index("SYS_SAMPLE_CODE")] == "S-1",
+          repr(clean[1]))
+    check("samples: a task that disagrees within a sample is left off",
+          "TASK_CODE" not in names(table.sample_fields(["S-1", "S-3"]))
+          and "SAMPLE_DATE" in names(table.sample_fields(["S-1", "S-3"])))
+    check("samples: so is a depth filled on only some rows",
+          "START_DEPTH" not in names(table.sample_fields(["S-1", "S-4"])))
+    check("samples: another matrix's sample is not asked about",
+          set(table.sample_fields(["S-1", "S-6"], matrix="WG")[1]) == {"S-1"})
+    check("samples: no sample column, no fields",
+          rd.ReportTable(["CHEMICAL_NAME", "RESULT_NUMERIC"],
+                         [["Lead", "1"]]).sample_fields(["S-1"]) == ([], {}))
+
 
 def build(headers, rows):
     table = rd.ReportTable(headers, rows)
@@ -332,6 +627,11 @@ def compare_all(label, table, store):
     same("%s: locations" % label, table.locations(), store.locations())
 
     matrices = [rd.ALL_MATRICES, "WG", "SO", ["WG", "SO"], [], "wg"]
+    for matrix in matrices + ["SE", "se", ["SE", "WG"]]:
+        same("%s: depth_extent(matrix=%r)" % (label, matrix),
+             table.depth_extent(matrix), store.depth_extent(matrix))
+        same("%s: units_in(matrix=%r)" % (label, matrix),
+             table.units_in(matrix), store.units_in(matrix))
     for matrix in matrices:
         same("%s: analytes(matrix=%r)" % (label, matrix),
              table.analytes(matrix=matrix), store.analytes(matrix=matrix))
@@ -374,6 +674,29 @@ def compare_all(label, table, store):
         if left != right:
             mismatched.append((chemical, how, nd, matrix, fraction, method,
                                only, left, right))
+    # The same combinations with fields: the WINNING ROW'S report columns.
+    # Equal values do not prove the same row won - two methods on one
+    # sample can report one number - and a layer naming the wrong sample's
+    # qualifiers and lab beside a right number is the plausible-number
+    # failure in another column.
+    fields_bad = []
+    for (chemical, cas), how, nd, matrix, fraction, method, only in itertools.product(
+            analytes[:4], (rd.MOST_RECENT, rd.MAXIMUM),
+            (rd.ND_HALF, rd.ND_FULL, rd.ND_EXCLUDE), (rd.ALL_MATRICES, "WG", "SO"),
+            (rd.ANY_FRACTION, "D", ["D", "T"]), (rd.ALL_METHODS, "M1"),
+            (False, True)):
+        ask = dict(how=how, detected_only=only, non_detect=nd, matrix=matrix,
+                   fraction=fraction, method=method, fields=True)
+        left = table.aggregate(chemical, cas, **ask)
+        right = store.aggregate(chemical, cas, **ask)
+        if left != right:
+            fields_bad.append(((chemical, how, nd, matrix, fraction, method,
+                                only), left, right))
+    check("%s: aggregate(fields=True) names the same winning row" % label,
+          not fields_bad,
+          "" if not fields_bad else
+          "\n      first mismatch: %r\n      python: %r\n      sql   : %r"
+          % fields_bad[0])
     check("%s: aggregate over %d filter combinations" % (label, checked),
           not mismatched,
           "" if not mismatched else
@@ -437,6 +760,16 @@ def compare_all(label, table, store):
                     rows_checked += 1
                     if left != right:
                         rows_bad.append((chemical, nd, only, cap, left, right))
+    for (chemical, cas) in analytes[:4]:
+        for nd in (rd.ND_HALF, rd.ND_EXCLUDE):
+            for cap in (0, 3):
+                left = table.rows_for(chemical, cas, non_detect=nd, limit=cap,
+                                      fields=True)
+                right = store.rows_for(chemical, cas, non_detect=nd, limit=cap,
+                                       fields=True)
+                rows_checked += 1
+                if left != right:
+                    rows_bad.append((chemical, nd, "fields", cap, left, right))
     check("%s: rows_for over %d combinations (including 7 row caps)"
           % (label, rows_checked), not rows_bad,
           "" if not rows_bad else
@@ -541,6 +874,7 @@ def main():
 
     direct_scope_checks()
     unit_column_checks()
+    sample_field_checks()
 
     # WHICH COLUMNS A SOURCE CANNOT BE VALUED WITHOUT. Both implementations
     # read rd.REQUIRED_FOR_ANALYSIS, and must agree on every case: the panel

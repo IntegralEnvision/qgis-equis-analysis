@@ -42,6 +42,9 @@ tools/test_offline.py   tools/test_storage.py   tools/test_roll.py
 tools/test_phase0.py    tools/test_webengine.py
 tools/test_interactive.py   tools/test_parquet_source_ui.py
 tools/test_tickable_combos.py   tools/test_bivariate_layer.py
+tools/test_depth_filter.py   (the depth and unit rows: slider dragged, spin boxes, through the dialog)
+tools/test_layer_fields.py   (every report column on the layers: names, types, GeoPackage;
+                              EQUIS_PARQUET=<facility glob> adds the real facility, timed)
 tools/test_analysis_task.py   (the Analysis chooser's worker, in the task manager)
 tools/try_scatter.py   tools/try_analysis_tab.py   (console probes: US-24, the Analysis tab)
 tools/try_overlay.py   (NOT a console probe: run by `qgis --code` in a throwaway
@@ -122,7 +125,11 @@ produces a *plausible number* rather than an error.
   allowed only as ONE REAL SAMPLE per location by a stated rank - most
   recent, or highest on one chosen axis with detected ranked first
   (`bivariate.picks_sql`, decided 2026-10-12) - never X's maximum beside
-  Y's from another sample.
+  Y's from another sample. The same holds for the report columns such a
+  point carries: only `SAMPLE_COLUMNS` (`report_data.py`), and one that
+  disagrees within a mapped sample is dropped, never shown with one row's
+  value (`sample_fields`, 2026-10-30). A single-row layer carries every
+  column; an aggregate carries its WINNING row's (`fields=True`).
 - **Two methods on one sample are real data, not duplicates.** At Facility A, 162
   of 172 intervals carry exactly two, disagreeing about detection.
 - **A filter on a column the report lacks matches everything.** Dropping
@@ -133,6 +140,21 @@ produces a *plausible number* rather than an error.
   result (found 2026-10-03). They are now a row scope, set in one place
   (`_apply_row_scope`) on `ReportTable` and `ReportStore` alike. A date bound
   excludes undated rows and is whole days, inclusive.
+- **A depth filter compares depths in one unit.** Facility A's sediment holds
+  331,986 results in cm beside 1,624 in m (2026-10-30), so bare numbers take
+  the top 5 cm of one and the top 5 m of the other. Rows convert into the
+  filter's unit by exact length factors (`DEPTH_UNIT_METRES`; this is not the
+  concentration conversion ruled out below, which needs EQuIS's factors). An
+  unknown unit is never guessed at; it meets only a filter in that same unit.
+  A row is in when its WHOLE interval is, and a row with no depth is out, as
+  an undated row is. Part of the row scope, so every question sees it.
+- **A unit filter compares units as the unit guard counts them**: the
+  coalesced result unit, trimmed, case-sensitive, "" for none. It exists
+  so a solid's stray leachate (Facility A's sediment: 3,401 results in mg/L
+  beside 635,904 in mg/kg) can be dropped rather than refused; it never
+  converts. Part of the row scope, and the offer (`units_in`) and the depth
+  slider's stops (`depth_extent`) are both read from UNSCOPED rows by
+  matrix, so a tick or a handle never shrinks its own list.
 - **Cached/offline data is marked everywhere it appears** — banner, layer
   name, message bar, report combo. A stale map that looks live is the one
   outcome worth engineering against.

@@ -237,10 +237,15 @@ class LinkedViewsController(object):
         if self._on_scatter_map is not None and stations is not None:
             # A ternary's third analyte goes too: its map is coloured by
             # composition (ternary.py), not by the scatter's 3x3 classes.
+            # The matrix lets the layer's sample columns skip the other
+            # matrices' files; options carry it as "WS+SE".
+            matrix = [code for code in (options.get("matrix") or "").split("+")
+                      if code] or None
             self._on_scatter_map(stations, breaks, column_meta(first),
                                  column_meta(second),
                                  (options.get("points") or {}).get("map"),
-                                 column_meta(third) if third else None)
+                                 column_meta(third) if third else None,
+                                 matrix=matrix)
         if self.views is not None:
             names = [c["chemical"] for c in (first, second, third) if c]
             self.views.busy(
