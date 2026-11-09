@@ -252,6 +252,7 @@ the exporter follows.
 | [docs/chemduck-adoption-plan.md](docs/chemduck-adoption-plan.md) | Making ChemDuck the one authority for the chemistry rules: phases, upstream requests, decisions |
 | [docs/overlay-shell.md](docs/overlay-shell.md) | Branch `overlay-shell`: the plugin as panels on the map - plan, rules, status |
 | [docs/chemduck-parity.md](docs/chemduck-parity.md) | This plugin vs ChemDuck/Chemrooms on one facility: where they differ, why, and the rules to agree |
+| [docs/chemduck-speed-plan.md](docs/chemduck-speed-plan.md) | Making ChemDuck fast enough for a click: the per-call floor, the thread cap, and what Facility A must show |
 | [docs/chemduck-spike.md](docs/chemduck-spike.md) | Chemrooms' data code on a plugin page through the bridge, no SQLRooms UI: works, and what it needs |
 | [docs/chemduck-changes-for-qgis.md](docs/chemduck-changes-for-qgis.md) | What ChemDuck would change to serve this plugin: detection, no `spatial`, schemas, shared rules |
 | [docs/phase3-next-steps.md](docs/phase3-next-steps.md) | The linked views' current sequence: what has been seen working, and what is next |
