@@ -114,6 +114,57 @@ three cases, plugin / ChemDuck:
   it has to answer is now 2 against 4. Both are clearly better than 14,
   and 6 isn't better than 4 in either half.
 
+**Swept again 2026-11-09, quiet machine.** Same command and machine, an
+Intel Core Ultra 7 265U: a hybrid laptop part with 12 cores and 14
+threads, only 2 of the cores performance cores. It was on mains power,
+Balanced plan. Before the sweep, CIM load was 2-12% (one 49% sample) and
+no other process was busy. The load sampled during the runs (median
+34-92%) includes the sweep itself, so it doesn't measure competition.
+The machine's stability shows instead in the two halves agreeing: each
+pair at one thread count is within about 25%, where the first sweep
+drifted 2x. Order 4, 2, 6, 14, 14, 6, 2, 4. Warm medians, ranges over
+the three cases, plugin / ChemDuck:
+
+| Threads (both runs) | Map | Footer, `point_counts` | One series | Sparklines | Pivot, TAILS |
+| --- | --- | --- | --- | --- | --- |
+| 2 | 0.03-0.07 / 0.26-0.47 s | 0.01-0.02 / 0.06-0.11 s | 0.01-0.03 / 0.16-0.28 s | 0.07-0.18 / 0.58-1.61 s | 0.31-0.33 / 0.62-0.64 s |
+| 4 | 0.03-0.05 / 0.38-0.69 s | 0.01-0.02 / 0.07-0.11 s | 0.01-0.02 / 0.28-0.38 s | 0.05-0.15 / 0.93-2.55 s | 0.29-0.30 / 0.89-0.94 s |
+| 6 | 0.04-0.07 / 0.60-1.17 s | 0.01-0.02 / 0.10-0.17 s | 0.02 / 0.41-0.60 s | 0.06-0.17 / 1.19-3.10 s | 0.34-0.38 / 1.05-1.23 s |
+| 14 | 0.06-0.10 / 1.43-2.56 s | 0.02-0.03 / 0.19-0.23 s | 0.02-0.03 / 1.01-1.33 s | 0.07-0.17 / 2.25-4.83 s | 0.55-0.58 / 1.72-2.00 s |
+
+Each call's time divided by its time at 4 threads in the same half,
+median (range):
+
+| Threads | Plugin | ChemDuck |
+| --- | --- | --- |
+| 2 | 1.17 (0.89-1.81) | **0.78** (0.50-2.00) |
+| 6 | 1.23 (0.88-1.50) | 1.60 (1.00-2.23) |
+| 14 | 1.59 (0.94-2.41) | 3.36 (1.00-4.57) |
+
+- **On this machine 2 threads is best for ChemDuck,** about 1.3x faster
+  than 4 at the median. It is the only count where every ChemDuck map is
+  inside 0.5 s. The store is a little slower at 2 (median 1.17x), but
+  that is 0.03-0.07 s maps, so far inside its budgets that it doesn't
+  matter.
+- **Some calls are over budget at any thread count.** At 2 threads, the
+  water series take 0.22-0.28 s against 0.2 s, and the water sparklines
+  1.25-1.61 s against 1 s. The sediment series and sparklines are inside.
+  Section 4 has to fix these; threads can't.
+- **A likely reason 2 wins here (a hypothesis, untested):** two
+  performance cores. At 4 or more threads the work spills onto efficiency
+  cores, and each of ChemDuck's ~30 pipeline breaks waits for its slowest
+  thread (ChemDuck's `docs/duckdb-thread-cap.md`). So the best count is
+  probably the machine's performance-core count, not a constant. Check on
+  a second machine, ideally a desktop, before hard-coding 2.
+- **Unexplained: slower than 2026-11-05.** At 4 threads, maps took
+  0.38-0.69 s here against 0.26-0.35 s that day, and sparklines
+  0.93-2.55 s against 0.44-0.62 s. The script is unchanged since then
+  (`dd800c5`). Between `daddfb6` and `e7139bd` ChemDuck changed only the
+  open (`load_data.py`, `arii_hybrid.py`) and no SQL. The sidecars were
+  republished today in 18.6 s, against 57.7 s for Facility A on
+  2026-11-05. So the sidecars or the machine's thermal state differ, and
+  neither has been checked.
+
 ## 3. Pay the fixed cost once per analyte, not once per question (plugin)
 
 The floor is per statement, so the repo's own rule applies: ask once for
@@ -232,8 +283,12 @@ because it holds four fifths of the time. 3 last: it saves the floor, about
 0.06 s a click, and costs an invalidation rule.
 
 *2026-11-09:* 5 is done. The pan is not this plan's problem until phase 2
-maps ChemDuck's points, and then depth decides it. Section 2 was swept but
-needs an idle machine to settle 2 against 4 threads. Section 4 is next.
+maps ChemDuck's points, and then depth decides it. Section 2 was swept
+twice. On this laptop 2 threads beats 4 for ChemDuck and costs the store
+nothing that matters. Before decision 8 is taken, two things are owed: a
+second machine, and why the calls are slower than on 2026-11-05. Section 4
+is next, starting with the water series and sparklines, which no thread
+count brings inside budget.
 
 ## What this needs
 
