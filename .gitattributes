@@ -12,3 +12,9 @@ equis_loader/web/** -text
 web/src/** text eol=lf
 web/*.mjs text eol=lf
 web/*.json text eol=lf
+
+# The vendored ChemDuck (tools/vendor_chemduck.py) is its commit's bytes,
+# hashed in equis_loader/chemduck/VENDORED.json and checked by
+# tools/test_chemduck_vendor.py. CRLF conversion on checkout would change
+# every hash, as it did the web bundle's.
+equis_loader/chemduck/** -text

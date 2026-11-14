@@ -19,7 +19,11 @@ python tools/test_bivariate.py         # Jenks breaks, classes and colours for t
 python tools/test_analysis.py          # the Analysis tab's chooser: catalogue, pairs, choices
 python tools/test_ternary.py           # ternary shares/colours, one-unit rule, page SQL held to ternary.py
 python tools/test_censored.py          # box plots' Kaplan-Meier quartiles vs an independent KM (node, duckdb)
+python tools/test_histogram_sql.py     # the histogram's real SQL vs the store: values, aggregation, every filter (node)
+python tools/test_chemduck_parity.py   # the adapter's map vs the store's: every difference listed (fixture)
+python tools/test_chemduck_parity.py --manifest <dir>/manifest.json --pub <dir>   # the same on a real facility
 python tools/analysis_preview.py       # the Analysis tab in a browser, no QGIS (--shots DIR: screenshots)
+python tools/profile_chemduck.py --manifest <facility>/manifest.json --out <dir>   # ChemDuck through a plugin session: the open per statement, every click, DuckDB profiles (--explain); run under plain Python AND QGIS
 
 # The parquet export pipeline: plain Python + pyarrow, imports no plugin code
 python pipeline/test_slice_pipeline.py  # pipeline bookkeeping (pyarrow)
@@ -30,6 +34,8 @@ python tools/test_arcgis_parity.py      # that export's non-detect columns vs Re
 python pipeline/run_nightly.py --root data/<facility>   # one facility's check: arm on new data, rebuild what ran
 
 python tools/vendor_deps.py --target win --python 312   # build a dep bundle
+python tools/vendor_chemduck.py --commit <sha>          # vendor ChemDuck (committed; default: re-vendor the pin)
+python tools/test_chemduck_vendor.py                    # that copy: hashes, version, DuckDB tested, installs, ships
 python tools/package.py                                 # plain plugin zip
 python tools/package.py --bundle win_amd64-cp312        # zip with duckdb in it
 python tools/install.py                                 # copy into the QGIS profile
@@ -45,6 +51,7 @@ tools/test_tickable_combos.py   tools/test_bivariate_layer.py
 tools/test_depth_filter.py   (the depth and unit rows: slider dragged, spin boxes, through the dialog)
 tools/test_layer_fields.py   (every report column on the layers: names, types, GeoPackage;
                               EQUIS_PARQUET=<facility glob> adds the real facility, timed)
+tools/test_import_smoke.py   (imports, and the export reading the table when there is one)
 tools/test_analysis_task.py   (the Analysis chooser's worker, in the task manager)
 tools/try_scatter.py   tools/try_analysis_tab.py   (console probes: US-24, the Analysis tab)
 tools/try_overlay.py   (NOT a console probe: run by `qgis --code` in a throwaway
@@ -61,9 +68,10 @@ shipped unbundled plugin, which does run on 3.34).
 
 ## The one structural rule
 
-**`equis_api.py`, `report_data.py`, `sparkline.py`, `cache.py` and `store.py`
-import no QGIS.** That is why 1,500+ lines of tests run under a plain
-interpreter, and it is the reason most of this codebase can be verified
+**`equis_api.py`, `report_data.py`, `sparkline.py`, `cache.py`, `store.py`,
+`chem.py` and the vendored `chemduck/` import no QGIS.** That is why
+1,500+ lines of tests run under a plain interpreter, and it is the reason
+most of this codebase can be verified
 without a GUI. Anything needing a path takes it from the caller, as
 `cache.py` does. Do not import `qgis.*` into these modules to save a few
 lines elsewhere.
@@ -241,7 +249,11 @@ the exporter follows.
 | | |
 |---|---|
 | [docs/implementation-plan.md](docs/implementation-plan.md) | **What to do next**, in order, with acceptance criteria |
+| [docs/chemduck-adoption-plan.md](docs/chemduck-adoption-plan.md) | Making ChemDuck the one authority for the chemistry rules: phases, upstream requests, decisions |
 | [docs/overlay-shell.md](docs/overlay-shell.md) | Branch `overlay-shell`: the plugin as panels on the map - plan, rules, status |
+| [docs/chemduck-parity.md](docs/chemduck-parity.md) | This plugin vs ChemDuck/Chemrooms on one facility: where they differ, why, and the rules to agree |
+| [docs/chemduck-spike.md](docs/chemduck-spike.md) | Chemrooms' data code on a plugin page through the bridge, no SQLRooms UI: works, and what it needs |
+| [docs/chemduck-changes-for-qgis.md](docs/chemduck-changes-for-qgis.md) | What ChemDuck would change to serve this plugin: detection, no `spatial`, schemas, shared rules |
 | [docs/phase3-next-steps.md](docs/phase3-next-steps.md) | The linked views' current sequence: what has been seen working, and what is next |
 | [docs/pivot-design.md](docs/pivot-design.md) | One row per sample for multivariate views: the rules every cell needs, measured |
 | [docs/vision-linked-views.md](docs/vision-linked-views.md) | The user stories (US-1…US-24) and recommendations (R1…R10) |
