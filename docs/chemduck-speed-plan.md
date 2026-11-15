@@ -315,15 +315,58 @@ A/B against the code before it, with identical rows on every call:
 
   A quiet-machine run is owed before calling any of this inside or over.
 
+**Partition pruning, done 2026-11-15** on ChemDuck branch
+`partition-pruning` (`e5355a1`, stacked on `series-speed`; local, not
+pushed).
+- **Why every file was read:** the consumer's matrix comes from the
+  `samples` sidecar through a join, and its fraction from a CASE over
+  `FRACTION`. Neither could rule out a file while DuckDB planned. The
+  files' own hive keys were no help: the repacked files carry a `fraction`
+  column that collides with `FRACTION`, so DuckDB renames it `fraction_1`.
+- **How it works now:**
+  - `publish` labels each file with the one matrix and fraction all its
+    rows share, read from the rows and checked against the manifest's
+    `matrix`/`fraction` (a disagreement is refused).
+  - The view carries the label as a per-file constant, looked up by the
+    file's place in the list.
+  - `point_scope`, `aggregate_results` and `sample_results` repeat their
+    filters on it, and DuckDB skips files while it plans.
+- **Facility A:** all 19 files labelled, every label agreeing with the
+  manifest. One matrix and fraction now reads 1 file of 19.
+- **What it bought on local disk** (83% load, alternated 3x against
+  `1440b79`, medians, rows identical on all 7 calls):
+
+  | Call | Scan operator, s | Query CPU, s |
+  | --- | --- | --- |
+  | map most_recent, Arsenic MWS/T | 0.106 -> 0.058 | 0.853 -> 0.753 |
+  | map maximum, Arsenic WS/T | 0.092 -> 0.016 | 0.376 -> 0.303 |
+  | map, Arsenic SE/N | 0.135 -> 0.018 | 0.582 -> 0.465 |
+  | footer point_counts, Arsenic MWS/T | 0.056 -> 0.035 | 0.254 -> 0.245 |
+  | sparklines, Arsenic MWS/T | 0.106 -> 0.049 | 2.208 -> 1.968 |
+  | series at LJP-03, Arsenic WS/T | 0.064 -> 0.013 | 0.116 -> 0.072 |
+  | sample_results Mn+Pb WS/D | 0.072 -> 0.017 | 0.399 -> 0.306 |
+
+- **Smaller than expected here.** On local disk the 18 skipped files
+  were already cheap: row groups prune by analyte, and footers are
+  cached. Wall time moved 0.03-0.2 s, inside the noise on some calls.
+  Over http, where each file costs requests, it should matter more; that
+  is not measured.
+- **Tests:** ChemDuck's `tests/run_all.py` passes all five suites,
+  with a new partitions test in `test_arii_hybrid` (`ac9e860` brings
+  `test_domain_rules` up to date). With `e5355a1` vendored temporarily,
+  `test_chemduck_vendor` and the parity fixture are green.
+  `test_chemduck_parity.py` on Facility A passes (12 analytes, 4,112 s,
+  a different load from the 7,083 s run, so not a speed number). Its
+  tallies match the `e7139bd` and `1440b79` runs, count for count.
+- **The plugin needs no change.** `open_consumer` runs the published
+  folder's own SQL, so a folder published before this keeps working, and
+  gains pruning when republished.
+
 **What is left for section 4, in order of expected gain:**
-1. **Partition pruning in the consumer** (ChemDuck). Expose the
-   partition's matrix and raw fraction code, and let `point_scope`
-   filter on them so `hive_partitioning` can skip files. Every call
-   gains, and the store already shows the size of it.
-2. **The `withpol` stage's per-row expressions** (ChemDuck). The
+1. **The `withpol` stage's per-row expressions** (ChemDuck). The
    `results` view computes every column of every row, 0.3 s for 51,030
    rows. Columns a stage doesn't read could be left uncomputed.
-3. **Planning** (ChemDuck). The plan has 232-236 operators; the optimizer
+2. **Planning** (ChemDuck). The plan has 232-236 operators; the optimizer
    cost is mostly the expression rewriter and join ordering. The six
    `chemduck_settings` subqueries in `point_scope`'s scope are the next
    candidates, as `matrix_combine_class` already found for
