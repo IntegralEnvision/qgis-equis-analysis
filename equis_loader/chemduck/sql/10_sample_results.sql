@@ -125,6 +125,12 @@ filtered AS (
       AND (p_matrix IS NULL OR v.matrix = p_matrix OR v.matrix IS NULL)
       AND (p_matrices IS NULL OR list_contains(CAST(p_matrices AS VARCHAR[]), v.matrix))
       AND (p_fraction IS NULL OR v.fraction = p_fraction OR v.fraction IS NULL)
+      -- the three above on the row's partition file, so DuckDB skips files
+      -- (point_scope in 08_aggregate_points.sql)
+      AND (p_matrix IS NULL OR v.partition_matrix IS NULL OR v.partition_matrix = p_matrix)
+      AND (p_matrices IS NULL OR v.partition_matrix IS NULL
+           OR list_contains(CAST(p_matrices AS VARCHAR[]), v.partition_matrix))
+      AND (p_fraction IS NULL OR v.partition_fraction IS NULL OR v.partition_fraction = p_fraction)
       AND (p_start_date IS NULL OR v.sample_date >= p_start_date)
       AND (p_end_date IS NULL OR v.sample_date <= p_end_date)
       AND (p_locations IS NULL

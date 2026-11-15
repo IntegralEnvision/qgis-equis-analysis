@@ -127,7 +127,29 @@ def row_id_sql(files_sql):
             f" + file_row_number + 1)")
 
 
-def results_view_select(mapping, columns, files_sql, method_class_map=None, unit_plan=None):
+def labels_literal(values):
+    """A DuckDB VARCHAR[] literal, NULL kept: one label per file, in manifest order."""
+    return ("CAST([" + ", ".join("NULL" if v is None else "'%s'" % str(v).replace("'", "''")
+                                 for v in values) + "] AS VARCHAR[])")
+
+
+def partition_column_sql(files_sql, labels):
+    """A file's label, looked up by the row's file: a constant per file.
+
+    DuckDB evaluates a filter on it against each file's name while it
+    plans, and skips the files it rules out (measured on Facility A, DuckDB
+    1.5.5: 1 of 19 files read for one matrix and fraction). It is keyed on
+    the file's place in the list, as row_id_sql is, so it holds whatever
+    names the consumer registers the files under. No labels, or no label
+    for this file: NULL, which rules nothing out.
+    """
+    if not labels or all(v is None for v in labels):
+        return "CAST(NULL AS VARCHAR)"
+    return f"{labels_literal(labels)}[list_position({files_sql}, filename)]"
+
+
+def results_view_select(mapping, columns, files_sql, method_class_map=None, unit_plan=None,
+                        partitions=None):
     """The SELECT behind the hybrid `results` view.
 
     The ChemDuck columns come from results_select_sql, unchanged. The
@@ -137,7 +159,9 @@ def results_view_select(mapping, columns, files_sql, method_class_map=None, unit
     projection pushdown means an unused column is never read.
 
     method_class_map and unit_plan are what classify_methods and plan_units
-    decided at publish, frozen into the view.
+    decided at publish, frozen into the view. partitions, also decided at
+    publish (partition_labels), is each file's (matrix, fraction) in
+    manifest order: partition_matrix and partition_fraction.
     """
     exprs = build_sql_exprs(mapping, columns, method_class_map)
     exprs['unit_lookup'] = unit_lookup_sql(unit_plan, exprs, mapping)
@@ -147,14 +171,81 @@ def results_view_select(mapping, columns, files_sql, method_class_map=None, unit
         actual = lower.get(attr.lower())
         if actual:
             extras.append((attr.lower(), f'"{actual}"'))
+    partitions = partitions or []
+    extras.append(("partition_matrix",
+                   partition_column_sql(files_sql, [p[0] for p in partitions])))
+    extras.append(("partition_fraction",
+                   partition_column_sql(files_sql, [p[1] for p in partitions])))
     return results_select_sql(
         mapping, exprs, row_id_sql(files_sql), source_relation(files_sql), extras)
 
 
 def results_view_sql(mapping, columns, files_sql=FILES_TOKEN, method_class_map=None,
-                     unit_plan=None):
+                     unit_plan=None, partitions=None):
     return ("CREATE OR REPLACE VIEW results AS"
-            + results_view_select(mapping, columns, files_sql, method_class_map, unit_plan) + ";\n")
+            + results_view_select(mapping, columns, files_sql, method_class_map, unit_plan,
+                                  partitions) + ";\n")
+
+
+def _expected_fraction(mapping, code):
+    """The view's fraction for a manifest's raw fraction code, as the
+    mapping's transform makes it (load_data's fraction_expr): mapped codes
+    become their name, others pass through trimmed, '' becomes NULL."""
+    if code is None:
+        return None
+    code = str(code)
+    table = (mapping.get("transforms") or {}).get("fraction") or {}
+    if code in table:
+        return table[code]
+    return code.strip() or None
+
+
+def partition_labels(con, mapping, manifest_parts):
+    """Each file's (matrix, fraction) label, in manifest order, from the rows.
+
+    A label is the ONE value every row of the file has: the matrix of the
+    row's sample (what v_results_core filters on) and the row's fraction,
+    both as the view makes them. A file whose rows differ, or have none,
+    gets NULL, which rules nothing out. So a filter on the labels drops
+    only files no row of which a matrix or fraction filter would keep.
+
+    The manifest says what each file should hold (our ARII export writes
+    "matrix" and the raw "fraction" code per partition). When it says, the
+    rows must agree, or the publish is refused: a layout that disagrees
+    with its own rows is a bug upstream, and a label taken from it instead
+    of the rows would drop real results without an error.
+
+    The file is recovered from result_id (row_id_sql: its place in the
+    list times FILE_SPAN), so this reads the view as consumers will.
+    """
+    found = {i: (m, f) for i, m, f in con.execute(f"""
+        SELECT (r.result_id - 1) // {FILE_SPAN} AS i,
+               CASE WHEN count(DISTINCT s.matrix) = 1 AND count(s.matrix) = count(*)
+                    THEN any_value(s.matrix) END,
+               CASE WHEN count(DISTINCT r.fraction) = 1 AND count(r.fraction) = count(*)
+                    THEN any_value(r.fraction) END
+        FROM results r JOIN samples s ON s.sample_id = r.sample_id
+        GROUP BY 1
+    """).fetchall()}
+    labels, problems = [], []
+    for i, part in enumerate(manifest_parts):
+        matrix, fraction = found.get(i, (None, None))
+        has_rows = i in found
+        if has_rows and "matrix" in part and matrix != part["matrix"]:
+            problems.append(f"{part['path']}: the manifest says matrix {part['matrix']!r}, "
+                            f"its rows say {matrix if matrix is not None else 'several, or none'}")
+        if has_rows and "fraction" in part:
+            want = _expected_fraction(mapping, part["fraction"])
+            if fraction != want:
+                problems.append(
+                    f"{part['path']}: the manifest says fraction {part['fraction']!r} "
+                    f"({want!r} after the mapping), its rows say "
+                    f"{fraction if fraction is not None else 'several, or none'}")
+        labels.append((matrix, fraction))
+    if problems:
+        raise SourceRefused("The manifest's partitions disagree with their rows:\n  "
+                            + "\n  ".join(problems))
+    return labels
 
 
 def _split_statements(sql):
@@ -437,6 +528,12 @@ def publish(manifest_path, out_dir, mapping_path=DEFAULT_MAPPING, x_col=None,
     con.execute("DROP TABLE IF EXISTS result_attributes")
     con.execute("DROP TABLE results")
     con.execute(results_view_sql(mapping, columns, lit, method_class_map, unit_plan))
+    # Each file's matrix and fraction, from its rows, checked against the
+    # manifest; then the view again, carrying them so filters skip files.
+    partitions = partition_labels(con, mapping, manifest["partitions"])
+    con.execute(results_view_sql(mapping, columns, lit, method_class_map, unit_plan, partitions))
+    n_labelled = sum(1 for m, f in partitions if m is not None or f is not None)
+    log(f"  Partitions: {n_labelled} of {len(partitions)} file(s) labelled by matrix/fraction")
     n_results = _count(con, "SELECT count(*) FROM results")
     log(f"  Results view: {n_results:,} rows ({rows - n_results:,} source rows without "
         f"a sample id or analyte)")
@@ -491,7 +588,8 @@ def publish(manifest_path, out_dir, mapping_path=DEFAULT_MAPPING, x_col=None,
         f"{Path(mapping_path).name}. Do not edit: republish.\n"
         f"-- Replace {FILES_TOKEN} with the list of registered partition names,\n"
         "-- in manifest order (sidecars.json source_manifest.partitions).\n"
-        + results_view_sql(mapping, columns, FILES_TOKEN, method_class_map, unit_plan),
+        + results_view_sql(mapping, columns, FILES_TOKEN, method_class_map, unit_plan,
+                           partitions),
         encoding="utf-8")
 
     sidecars = {
@@ -505,8 +603,11 @@ def publish(manifest_path, out_dir, mapping_path=DEFAULT_MAPPING, x_col=None,
             "facility": manifest.get("facility"),
             "rows": rows,
             "partitions": [
-                {"path": rel, "rows": part.get("rows"), "as_of": part.get("as_of")}
-                for rel, part in zip(rel_paths, manifest["partitions"])
+                # matrix/fraction: the labels the view filters files on
+                # (partition_labels), as the view spells them; null: none
+                {"path": rel, "rows": part.get("rows"), "as_of": part.get("as_of"),
+                 "matrix": label[0], "fraction": label[1]}
+                for rel, part, label in zip(rel_paths, manifest["partitions"], partitions)
             ],
         },
         "coordinates": {"x": mapping["locations"]["x"], "y": mapping["locations"]["y"],
