@@ -1,4 +1,4 @@
-# Making ChemDuck fast enough for a click
+﻿# Making ChemDuck fast enough for a click
 
 ChemDuck answers the plugin's interactive questions 3-10x slower than the
 plugin's own `ReportStore`. This is the plan for closing that gap before
@@ -8,7 +8,7 @@ ChemDuck's macros on a click. It is a plan: nothing here has been built.
 **Scope.** "Map interactivity" here means the clicks that ask ChemDuck a
 question: choosing an analyte (the map), the footer count, a location's
 series, the sparklines. Panning and zooming never query ChemDuck. Their cost
-is drawing, ~15.5 µs a point (`tools/mosaic_poc/README.md`), and the same
+is drawing, ~15.5 Âµs a point (`tools/mosaic_poc/README.md`), and the same
 whichever source answered. If a pan is what felt slow, that is section 5,
 not sections 2-4.
 
@@ -156,14 +156,41 @@ median (range):
   thread (ChemDuck's `docs/duckdb-thread-cap.md`). So the best count is
   probably the machine's performance-core count, not a constant. Check on
   a second machine, ideally a desktop, before hard-coding 2.
-- **Unexplained: slower than 2026-11-05.** At 4 threads, maps took
-  0.38-0.69 s here against 0.26-0.35 s that day, and sparklines
-  0.93-2.55 s against 0.44-0.62 s. The script is unchanged since then
-  (`dd800c5`). Between `daddfb6` and `e7139bd` ChemDuck changed only the
-  open (`load_data.py`, `arii_hybrid.py`) and no SQL. The sidecars were
-  republished today in 18.6 s, against 57.7 s for Facility A on
-  2026-11-05. So the sidecars or the machine's thermal state differ, and
-  neither has been checked.
+- **Slower than 2026-11-05 because these sweeps used a different copy of
+  Facility A** (found 2026-11-10). There are two copies on this machine:
+  - **09-25:** `equis_qgis/data/fundao`, 3,452,146 rows. Both sweeps
+    above used this one.
+  - **10-23:** `CF5209/pipeline`, 3,515,468 rows. The 2026-11-05
+    timings used this one, as their raw files show.
+
+  The 10-23 export codes most water `MWS`, which the 09-25 copy holds
+  under `WS`. So the same click is a much bigger question on the older
+  copy:
+
+  | Case | 09-25 copy | 10-23 copy |
+  | --- | --- | --- |
+  | Arsenic WS/T | 62,967 results at 219 locations | 11,937 at 170 (plus 51,030 under `MWS`) |
+  | Iron WS/D | 72,132 at 397 | 17,507 at 294 |
+  | Arsenic SE/N | 23,096 at 443 | 18,367 at 368 |
+
+  On the 10-23 copy today, at 4 threads, the calls are back in
+  2026-11-05's range. Two things were ruled out:
+  - **The machine.** Maps took 0.30-0.48 s and sparklines 0.45-1.41 s,
+    against 0.23-0.55 s and 0.37-0.87 s across 2026-11-05's three runs.
+  - **The sidecars.** That day's sidecars and freshly published ones
+    are the same files, apart from a few bytes in `analyte_summary` and
+    `load_report`. Over 4 and 3 alternated runs, the fresh ones were a
+    median 1.11x the old (0.91-1.91), with the same row counts on every
+    call.
+
+  2 threads beat 4 on this copy too, in one run: maps 0.23-0.39 s
+  against 0.30-0.48 s.
+
+  **Which copy section 4 should profile is a choice to make.** The 10-23
+  copy is the current export. On the 09-25 copy, with water pooled, the
+  water sparklines and series stay over budget at any thread count. That
+  copy is the better stress case for a facility monitored that heavily,
+  or for a map that pools `WS` and `MWS`.
 
 ## 3. Pay the fixed cost once per analyte, not once per question (plugin)
 
@@ -217,6 +244,133 @@ not in the vendored copy, which is never edited (`VENDORED.json`).
 
 Acceptance: every call inside budget at the chosen thread count on Facility
 A, in QGIS's Python, with the parity gate green.
+
+**Profiled 2026-11-14.** The 10-23 copy (`CF5209/pipeline`), 2 threads,
+plain Python 3.14.6, DuckDB 1.5.5, ChemDuck `e7139bd`. Arsenic MWS/T was
+added to the three cases, because on this copy it is the pooled-water
+question the 09-25 copy asks under `WS`: 51,030 results at 49 locations.
+The machine was at 87-98% load from other work all day, and every time
+here is about 3x a quiet day's, the store's too (a map takes 0.11 s
+against 0.03 s). So each change below was measured as an A/B against the
+code before it. Two runs of each were alternated, CPU was recorded beside
+wall time, and row counts were compared on every call.
+
+Where a call's time goes:
+
+- **Planning is a fixed cost of about 0.25 s per call under this load.**
+  Binding the macro takes 0.11 s and the optimizers 0.12-0.14 s, the same
+  for a 248-row series and a 51,030-row one. That is about 40% of a
+  one-location series. A prepared statement doesn't save it: `PREPARE`
+  once and `EXECUTE` per call took the same time as a fresh call (series
+  0.640 against 0.636 s, map 0.706 against 0.725 s, identical answers).
+  DuckDB re-plans each `EXECUTE` with its values. So section 3's per-click
+  table is still the only way for the plugin to pay this once.
+- **The parquet scan reads every partition.** All 19 files are read, 7.0M
+  rows touched, for any matrix and fraction. The matrix filter is on the
+  samples sidecar, and `p_fraction` meets a `CASE` mapping T/D to
+  Total/Dissolved that DuckDB can't invert, so `matrix=`/`fraction=`
+  prunes nothing. The store reads the same files with
+  `hive_partitioning` and opens one partition. The scan costs 0.07-0.14 s
+  of CPU per call: smaller than planning, but on every call.
+- **In series mode the `resolved` stage computed the over-time statistic
+  for every row.** No most-recent, maximum or series call reads it.
+- **What DuckDB's profile attributes can mislead.** It charged 1.15 s of
+  a sparkline call to `ident`'s `GROUP BY`. Run alone on the same 51,030
+  real rows, that `GROUP BY` takes 21 ms. The time was the `withpol` CTE
+  it reads, materialised: 0.6 s, half of it the `results` view's per-row
+  expressions. Cumulative timing, cutting the macro after each stage, is
+  the way to localise a cost here.
+- **A harness pitfall.** `--chemduck-src` needs its own `--pub`, because
+  the published bundle carries the SQL. One A/B that shared a `--pub`
+  compared identical code, and its runs differed by 0.7-0.8x on every
+  call: the load drift on this machine.
+
+Changed on ChemDuck branch `series-speed` (`1440b79`; local, not pushed), each
+A/B against the code before it, with identical rows on every call:
+
+| Change | Calls it moves | New / old, wall (CPU) |
+| --- | --- | --- |
+| `resolved` computes `s`, `any_detected`, `all_detected`, `km_lim` only for `p_event_agg := 'statistic'`; `ident`'s `list(DISTINCT .. ORDER BY ..)` and `string_agg(DISTINCT .. ORDER BY ..)` become a plain list made distinct and sorted, NULLs kept as before | sparklines | 0.86-0.95 (0.84-0.87) |
+| `point_scope` filters `p_locations` with `list_contains`, not `IN (SELECT unnest(..))` | one location's series | 0.64-0.86 (0.64-0.75) |
+
+- **With `list_contains`, the location reaches the parquet scan** through
+  DuckDB's dynamic join filter. A one-location series' scan emits 248
+  rows, not 12,067, and its operators' CPU fell from 0.278 to 0.179 s.
+  The scan still touches 7.0M rows, and planning is unchanged.
+- **Every other call is within noise of the code before.**
+- **The answers did not move.** `1440b79` vendored temporarily:
+  - `test_chemduck_vendor` and the parity fixture: green.
+  - `test_chemduck_parity.py` on Facility A (12 analytes, 7,083 s at
+    this load): PASS. Its tallies match the `e7139bd` run, count for
+    count:
+    - most_recent: 9,618 agree, 8,914 differ.
+    - maximum: 11,949 agree, 6,583 differ.
+    - Both: 18,532 cells, 3,854 points.
+  - ChemDuck's own `tests/run_all.py`: all five suites pass.
+- **Still over budget on Facility A:**
+  - Arsenic MWS/T sparklines: 3.2-3.6 s under this load, against the
+    store's 0.4-0.5 s.
+  - Every map and footer at this load, though they were inside budget on
+    quieter days.
+
+  A quiet-machine run is owed before calling any of this inside or over.
+
+**Partition pruning, done 2026-11-15** on ChemDuck branch
+`partition-pruning` (`e5355a1`, stacked on `series-speed`; local, not
+pushed).
+- **Why every file was read:** the consumer's matrix comes from the
+  `samples` sidecar through a join, and its fraction from a CASE over
+  `FRACTION`. Neither could rule out a file while DuckDB planned. The
+  files' own hive keys were no help: the repacked files carry a `fraction`
+  column that collides with `FRACTION`, so DuckDB renames it `fraction_1`.
+- **How it works now:**
+  - `publish` labels each file with the one matrix and fraction all its
+    rows share, read from the rows and checked against the manifest's
+    `matrix`/`fraction` (a disagreement is refused).
+  - The view carries the label as a per-file constant, looked up by the
+    file's place in the list.
+  - `point_scope`, `aggregate_results` and `sample_results` repeat their
+    filters on it, and DuckDB skips files while it plans.
+- **Facility A:** all 19 files labelled, every label agreeing with the
+  manifest. One matrix and fraction now reads 1 file of 19.
+- **What it bought on local disk** (83% load, alternated 3x against
+  `1440b79`, medians, rows identical on all 7 calls):
+
+  | Call | Scan operator, s | Query CPU, s |
+  | --- | --- | --- |
+  | map most_recent, Arsenic MWS/T | 0.106 -> 0.058 | 0.853 -> 0.753 |
+  | map maximum, Arsenic WS/T | 0.092 -> 0.016 | 0.376 -> 0.303 |
+  | map, Arsenic SE/N | 0.135 -> 0.018 | 0.582 -> 0.465 |
+  | footer point_counts, Arsenic MWS/T | 0.056 -> 0.035 | 0.254 -> 0.245 |
+  | sparklines, Arsenic MWS/T | 0.106 -> 0.049 | 2.208 -> 1.968 |
+  | series at LJP-03, Arsenic WS/T | 0.064 -> 0.013 | 0.116 -> 0.072 |
+  | sample_results Mn+Pb WS/D | 0.072 -> 0.017 | 0.399 -> 0.306 |
+
+- **Smaller than expected here.** On local disk the 18 skipped files
+  were already cheap: row groups prune by analyte, and footers are
+  cached. Wall time moved 0.03-0.2 s, inside the noise on some calls.
+  Over http, where each file costs requests, it should matter more; that
+  is not measured.
+- **Tests:** ChemDuck's `tests/run_all.py` passes all five suites,
+  with a new partitions test in `test_arii_hybrid` (`ac9e860` brings
+  `test_domain_rules` up to date). With `e5355a1` vendored temporarily,
+  `test_chemduck_vendor` and the parity fixture are green.
+  `test_chemduck_parity.py` on Facility A passes (12 analytes, 4,112 s,
+  a different load from the 7,083 s run, so not a speed number). Its
+  tallies match the `e7139bd` and `1440b79` runs, count for count.
+- **The plugin needs no change.** `open_consumer` runs the published
+  folder's own SQL, so a folder published before this keeps working, and
+  gains pruning when republished.
+
+**What is left for section 4, in order of expected gain:**
+1. **The `withpol` stage's per-row expressions** (ChemDuck). The
+   `results` view computes every column of every row, 0.3 s for 51,030
+   rows. Columns a stage doesn't read could be left uncomputed.
+2. **Planning** (ChemDuck). The plan has 232-236 operators; the optimizer
+   cost is mostly the expression rewriter and join ordering. The six
+   `chemduck_settings` subqueries in `point_scope`'s scope are the next
+   candidates, as `matrix_combine_class` already found for
+   `matrix_classes`.
 
 ## 5. If it was the pan
 
@@ -285,10 +439,16 @@ because it holds four fifths of the time. 3 last: it saves the floor, about
 *2026-11-09:* 5 is done. The pan is not this plan's problem until phase 2
 maps ChemDuck's points, and then depth decides it. Section 2 was swept
 twice. On this laptop 2 threads beats 4 for ChemDuck and costs the store
-nothing that matters. Before decision 8 is taken, two things are owed: a
-second machine, and why the calls are slower than on 2026-11-05. Section 4
-is next, starting with the water series and sparklines, which no thread
-count brings inside budget.
+nothing that matters. Before decision 8 is taken, a second machine is
+owed. *2026-11-10:* the apparent slowdown since 2026-11-05 was a different
+copy of Facility A (see section 2), not a regression. Section 4 is next,
+starting with the water series and sparklines on the pooled-water copy,
+where no thread count brings them inside budget. *2026-11-14:* section 4
+profiled, on a loaded machine. Two ChemDuck changes are measured on a
+local branch: one location's series 0.64-0.86x, sparklines 0.84-0.87x
+CPU. Section 4 lists what is left: partition pruning first, then the
+`results` view's per-row work, then planning. Section 3 also matters
+more now, because planning can't be prepared away.
 
 ## What this needs
 
