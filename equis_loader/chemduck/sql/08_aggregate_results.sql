@@ -158,6 +158,10 @@ WITH filtered AS (
     WHERE v.analyte = p_analyte
       AND (p_matrix IS NULL OR v.matrix = p_matrix)
       AND (p_fraction IS NULL OR v.fraction = p_fraction)
+      -- the two above on the row's partition file, so DuckDB skips files
+      -- (point_scope in 08_aggregate_points.sql)
+      AND (p_matrix IS NULL OR v.partition_matrix IS NULL OR v.partition_matrix = p_matrix)
+      AND (p_fraction IS NULL OR v.partition_fraction IS NULL OR v.partition_fraction = p_fraction)
       AND (p_start_date IS NULL OR v.sample_date >= p_start_date)
       AND (p_end_date IS NULL OR v.sample_date <= p_end_date)
       AND in_sample_scope(v.sample_type, p_sample_types)

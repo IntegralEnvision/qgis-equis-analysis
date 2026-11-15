@@ -109,6 +109,9 @@ SELECT
         END)
     END AS limit_type,
     r.report_limit,
+    -- a filter's file-skipping twin; see results in 01_tables.sql
+    r.partition_matrix,
+    r.partition_fraction,
     make_dup_id(l.location_id, s.sample_date, s.depth, r.fraction, r.meas_basis) AS dup_id,
     dv_qualifier(r.detected, r.estimated) AS dv_qual,
     EXTRACT(YEAR FROM s.sample_date) AS sample_year,
@@ -125,7 +128,9 @@ WHERE
 
 CREATE OR REPLACE VIEW v_results_denormalized AS
 SELECT
-    c.* EXCLUDE (dup_id, dv_qual, sample_year, sample_month),
+    -- the partition labels are for filters to skip files with, not data
+    c.* EXCLUDE (dup_id, dv_qual, sample_year, sample_month,
+                 partition_matrix, partition_fraction),
     moist.moisture_result AS percent_moisture,
     c.dup_id, c.dv_qual, c.sample_year, c.sample_month
 FROM v_results_core c

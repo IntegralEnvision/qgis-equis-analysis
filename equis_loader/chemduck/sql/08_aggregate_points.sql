@@ -275,10 +275,23 @@ WHERE v.analyte = p_analyte
   AND (p_method_class IS NULL OR v.method_class = p_method_class OR scope.no_method)
   AND (p_fraction IS NULL OR v.fraction = p_fraction OR v.fraction IS NULL)
   AND (p_fraction IS NULL OR v.fraction IS NOT NULL OR scope.no_fraction)
+  -- The same filters on the row's partition file: implied by the three
+  -- above, but on a per-file constant, so DuckDB skips the other matrices'
+  -- and fractions' files when it plans instead of reading every one
+  -- (results in 01_tables.sql). NULL: the file cannot be ruled out.
+  AND (p_matrix IS NULL OR v.partition_matrix IS NULL OR v.partition_matrix = p_matrix)
+  AND (p_matrices IS NULL OR v.partition_matrix IS NULL
+       OR list_contains(CAST(p_matrices AS VARCHAR[]), v.partition_matrix))
+  AND (p_fraction IS NULL OR v.partition_fraction IS NULL OR v.partition_fraction = p_fraction)
   AND (p_start_date IS NULL OR v.sample_date >= p_start_date)
   AND (p_end_date IS NULL OR v.sample_date <= p_end_date)
+  -- list_contains, not IN (SELECT unnest(..)): the subquery is a join the
+  -- optimizer orders on every call, p_locations given or not, and its
+  -- filter stays above the joins, so every row of the analyte reached
+  -- them for a one-location series (12,067 for 248, Arsenic WS/T at
+  -- Facility A). Either drops a NULL location and a list's NULL alike.
   AND (p_locations IS NULL
-       OR v.location_id IN (SELECT unnest(CAST(p_locations AS VARCHAR[]))))
+       OR list_contains(CAST(p_locations AS VARCHAR[]), v.location_id))
   AND (scope.no_sample_type
        OR CASE WHEN p_sample_types IS NULL THEN in_normal_scope(v.sample_type)
                ELSE in_sample_scope(v.sample_type, p_sample_types) END)
@@ -501,8 +514,18 @@ ident AS (
            min(anl_sm_mb) AS anl_sm_mb, min(analyte_group) AS analyte_group,
            min(cas_number) AS cas_number,
            any_value(vkey) AS vkey,
-           list(DISTINCT src_matrix ORDER BY src_matrix) AS matrices,
-           string_agg(DISTINCT unit_source, ', ' ORDER BY unit_source) AS unit_source,
+           -- A plain list, made distinct and sorted afterwards: DISTINCT and
+           -- ORDER BY inside an aggregate keep a sorted set per group, and
+           -- point_series has a group per sample (51,030 for Arsenic MWS/T
+           -- at Facility A). The NULL cases keep what the ordered aggregates
+           -- returned: a NULL matrix as the list's last element, and NULL,
+           -- not '', for a point with no unit_source.
+           list_concat(list_sort(list_distinct(list(src_matrix))),
+                       CASE WHEN count(src_matrix) < count(*) THEN [CAST(NULL AS VARCHAR)]
+                            ELSE CAST([] AS VARCHAR[]) END) AS matrices,
+           CASE WHEN count(unit_source) > 0
+                THEN array_to_string(list_sort(list_distinct(list(unit_source))), ', ')
+           END AS unit_source,
            count(*) FILTER (WHERE detected IS NULL) AS n_unknown_detect
     FROM withpol GROUP BY ikey
 ),
@@ -733,13 +756,24 @@ resolved AS (
     SELECT i.*, uv.n_units, uv.conflict AS units_conflict, a.ea, a.n_events, a.n_detects, a.first_sample_date, a.last_sample_date,
            a.w.v AS w, a.w.sample_date AS w_date, a.w.sample_datetime AS w_datetime,
            a.w.tie AS w_tie,
-           nd_stage_value(i.r_over_time.est, i.r_over_time.f, i.r_over_time.alln,
-                          i.r_over_time.det, i.display_factor, a.n_items, a.w_max.v,
-                          a.inps, a.lims, a.dets, a.attrs) AS s,
+           -- The over_time rule's value, for 'statistic' only: nothing else
+           -- reads s (the SELECT below takes it only when is_stat), and it
+           -- is a CASE over list aggregates that cost every row about 27 us
+           -- whether read or not - 1.4-1.9 s of point_series for Arsenic
+           -- MWS/T at Facility A (51,030 rows; 2026-11-14). Not narrowed
+           -- to is_stat: under 'statistic' a 'refuse' rule must still raise.
+           CASE WHEN a.ea = 'statistic' THEN
+               nd_stage_value(i.r_over_time.est, i.r_over_time.f, i.r_over_time.alln,
+                              i.r_over_time.det, i.display_factor, a.n_items, a.w_max.v,
+                              a.inps, a.lims, a.dets, a.attrs)
+           END AS s,
+           -- Read only for a Kaplan-Meier statistic (is_km), and per-row list
+           -- aggregates like s above: NULL for any other call.
            len(a.dets) AS n_known,
-           COALESCE(list_aggregate(a.dets, 'bool_or'), FALSE) AS any_detected,
-           list_aggregate(a.dets, 'bool_and') AS all_detected,
-           nd_rep_limit(i.r_over_time.alln, a.lims) AS km_lim,
+           CASE WHEN a.ea = 'statistic' THEN
+               COALESCE(list_aggregate(a.dets, 'bool_or'), FALSE) END AS any_detected,
+           CASE WHEN a.ea = 'statistic' THEN list_aggregate(a.dets, 'bool_and') END AS all_detected,
+           CASE WHEN a.ea = 'statistic' THEN nd_rep_limit(i.r_over_time.alln, a.lims) END AS km_lim,
            k.mass, k.lowest, k.f0, k.q50,
            a.ea = 'statistic' AND i.r_over_time.est NOT IN ('select', 'refuse') AS is_stat,
            a.ea = 'statistic' AND i.r_over_time.est IN ('km_mean', 'km_median') AS is_km,

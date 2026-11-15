@@ -266,7 +266,16 @@ CREATE TABLE IF NOT EXISTS results (
     -- factor known) or 'contradicts_matrix' (never converted)
     reported_units VARCHAR,
     unit_factor DOUBLE,
-    unit_source VARCHAR
+    unit_source VARCHAR,
+    -- The matrix (of the row's sample) and fraction that EVERY row of this
+    -- row's source file has, or NULL when its rows differ or nothing says.
+    -- Only the hybrid view fills them (arii_hybrid.publish, from the data and
+    -- checked against the manifest), as a constant per partition file, so a
+    -- filter on them lets DuckDB skip whole files when it plans. They narrow
+    -- nothing a matrix or fraction filter would not: a loaded database leaves
+    -- them NULL, and NULL means "cannot rule this file out".
+    partition_matrix VARCHAR,
+    partition_fraction VARCHAR
 );
 ALTER TABLE results ADD COLUMN IF NOT EXISTS reported_units VARCHAR;
 ALTER TABLE results ADD COLUMN IF NOT EXISTS unit_factor DOUBLE;
@@ -278,6 +287,8 @@ ALTER TABLE results ADD COLUMN IF NOT EXISTS method_class VARCHAR;
 ALTER TABLE results ADD COLUMN IF NOT EXISTS reportable BOOLEAN;
 ALTER TABLE results ADD COLUMN IF NOT EXISTS test_type VARCHAR;
 ALTER TABLE results ADD COLUMN IF NOT EXISTS test_rank INTEGER;
+ALTER TABLE results ADD COLUMN IF NOT EXISTS partition_matrix VARCHAR;
+ALTER TABLE results ADD COLUMN IF NOT EXISTS partition_fraction VARCHAR;
 
 -- ============================================================================
 -- method_classes - What a method code measures (shared rules D3)

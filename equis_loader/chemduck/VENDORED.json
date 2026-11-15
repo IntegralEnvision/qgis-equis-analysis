@@ -1,18 +1,18 @@
 {
  "note": "Written by tools/vendor_chemduck.py. Do not edit these files: re-vendor, and tools/test_chemduck_vendor.py checks them.",
  "repository": "https://github.com/IntegralEnvision/chemduck.git",
- "commit": "e7139bdad40186c675e7ab445b337bb1a80deb76",
- "subject": "Merge pull request #14 from IntegralEnvision/open-no-bind",
+ "commit": "a06ad5adb10a5f36b90ebae97b737cf656badd94",
+ "subject": "Merge pull request #15 from IntegralEnvision/partition-pruning",
  "version": "0.2.0",
- "vendored": "2026-11-05",
+ "vendored": "2026-11-15",
  "files": {
   "__init__.py": {
    "bytes": 2852,
    "sha256": "617d3089e07505eda2ad92680de679cec467f4eaeffc77f82669164d22ddb5d3"
   },
   "arii_hybrid.py": {
-   "bytes": 29650,
-   "sha256": "4e10238387a42c6e421e4c758f5bc4baa01daa3331d83da7cc1d6e98416dfd89"
+   "bytes": 34957,
+   "sha256": "0c0cb6e193596d43aa6410bb59b97a2f317955b024014dcb18146c5663874b01"
   },
   "eav_helpers.py": {
    "bytes": 3740,
@@ -27,16 +27,16 @@
    "sha256": "161c7ddba41713b47cbbdb2830a1b3562cb6977264e59da6a88974384d784d7b"
   },
   "sql/01_tables.sql": {
-   "bytes": 26668,
-   "sha256": "6c4ac1a4ddc26929358ff974d6df86f492f1c291ebbd769ecd84b2fa4b66ab85"
+   "bytes": 27401,
+   "sha256": "d405dba1577dfe961bd0469c5b09d86918b7bb6911b7e410c65e3e73c73cefc7"
   },
   "sql/02_macros.sql": {
    "bytes": 35780,
    "sha256": "4ad521c33e64b49b11cbb2a0f0ed4ffb5539a2b993f107917ed2fc48738fa1de"
   },
   "sql/03_views.sql": {
-   "bytes": 28871,
-   "sha256": "a92fcc2588e1a7cf88fa700679fe2ea3ef573b50a9cba6527f5f8dd23879d31e"
+   "bytes": 29116,
+   "sha256": "d6ef26412ae16abc0c4d934b82bf9f6670ae1a9ef4c2eb913442023b2830ca6a"
   },
   "sql/04_extended_tables.sql": {
    "bytes": 5529,
@@ -55,20 +55,20 @@
    "sha256": "1c0f61d5c0f44831bf15ac80aded08866b6adbfd038a866795226e67ca88b23f"
   },
   "sql/08_aggregate_points.sql": {
-   "bytes": 53347,
-   "sha256": "5f902e3b0ef4174193642e3b55f1d404f428c2900adb6714a76c481c4183c5f9"
+   "bytes": 55779,
+   "sha256": "dc6ceadaf8ff67f4130984a41990d0d02be130417b33ebd10a5e740b87da1e5e"
   },
   "sql/08_aggregate_results.sql": {
-   "bytes": 17845,
-   "sha256": "0c2667fe1972e26fab2497cee8fbbda271195300c3457da1efd5f42c5230ee70"
+   "bytes": 18161,
+   "sha256": "94421c75bd89b72a3de718699c337e3d1d6d75b302c63ce97d08b646f11d5f60"
   },
   "sql/09_desurvey.sql": {
    "bytes": 19610,
    "sha256": "0b265847faf23b494cf3d87e58de545c055ef54f44e580c5833db099bc961327"
   },
   "sql/10_sample_results.sql": {
-   "bytes": 25217,
-   "sha256": "31263b004c12625cdabe81aa6d1f10de434d6b13194cd98540b4eef51c6807cc"
+   "bytes": 25675,
+   "sha256": "e8d0aaaf52f28e6c6640467e5956bd85b9bbf00abde9e91b401c9043dcf9ef8b"
   },
   "sql/optional/spatial.sql": {
    "bytes": 881,

@@ -285,8 +285,8 @@ Where a call's time goes:
   compared identical code, and its runs differed by 0.7-0.8x on every
   call: the load drift on this machine.
 
-Changed on ChemDuck branch `series-speed` (`1440b79`; local, not pushed), each
-A/B against the code before it, with identical rows on every call:
+Changed in ChemDuck `1440b79` (merged in PR #15 as `a06ad5a`, now vendored),
+each A/B against the code before it, with identical rows on every call:
 
 | Change | Calls it moves | New / old, wall (CPU) |
 | --- | --- | --- |
@@ -315,9 +315,8 @@ A/B against the code before it, with identical rows on every call:
 
   A quiet-machine run is owed before calling any of this inside or over.
 
-**Partition pruning, done 2026-11-15** on ChemDuck branch
-`partition-pruning` (`e5355a1`, stacked on `series-speed`; local, not
-pushed).
+**Partition pruning, done 2026-11-15** in ChemDuck `e5355a1` (merged in
+PR #15 as `a06ad5a`, now vendored).
 - **Why every file was read:** the consumer's matrix comes from the
   `samples` sidecar through a join, and its fraction from a CASE over
   `FRACTION`. Neither could rule out a file while DuckDB planned. The
@@ -358,6 +357,9 @@ pushed).
   `test_chemduck_parity.py` on Facility A passes (12 analytes, 4,112 s,
   a different load from the 7,083 s run, so not a speed number). Its
   tallies match the `e7139bd` and `1440b79` runs, count for count.
+  `a06ad5a`'s tree is `ac9e860`'s, which differs from `e5355a1` only in
+  ChemDuck's tests, so that run stands for the vendored copy; with it
+  vendored, `test_chemduck_vendor` and the parity fixture are green.
 - **The plugin needs no change.** `open_consumer` runs the published
   folder's own SQL, so a folder published before this keeps working, and
   gains pruning when republished.
