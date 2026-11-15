@@ -203,6 +203,16 @@ is rebuilt after ANY change. `SOURCE_LAYER = 'WS_D'` on it is exactly
 `WS_D.parquet`. It is concatenated from the cell files as written, never
 re-derived from the partitions, and rebuilt only when the cell files'
 fingerprints change; the parity gate holds each shape to the store on its
-own. It doubles the output on disk and in the upload (not yet measured on
-Facility A).
+own. It doubles the output on disk and in the upload. Facility A (the
+10-23 copy, 3,515,468 rows), measured 2026-11-15 on this laptop:
+
+- **On disk:** `ALL_RESULTS` is 119.6 MB with 3,427,520 placed rows, plus
+  3.0 MB unplaced. The cell files total 124.5 MB, so the output roughly
+  doubles.
+- **Time:** a full export with both shapes took 175.6 s. Rebuilding
+  `ALL_RESULTS` alone took 63.3 s, against 8.2 s for a run where nothing
+  changed, so writing it costs about 55 s.
+- **Parity:** `tools/test_arcgis_parity.py`'s real-facility comparison
+  found both shapes equal to the store on every row: 0 rows only in the
+  export, 0 only in the store.
 
