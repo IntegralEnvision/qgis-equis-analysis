@@ -162,6 +162,8 @@ the plugin repository's `docs/arcgis-pro-geoparquet-brief.md`):
 arcgis/
   <MATRIX>_<FRACTION>.parquet           one point per result      GeoParquet 1.1, WKB, zstd
   <MATRIX>_<FRACTION>_unplaced.parquet  rows with no coordinates  a table; only if any
+  ALL_RESULTS.parquet                   every cell's layer in one  + SOURCE_LAYER = the cell
+  ALL_RESULTS_unplaced.parquet          every cell's unplaced      a table; only if any
   locations.parquet                     one point per location    most common coordinate
   manifest.json                         files, rows, settings, as_of
   README.txt                            for the Pro user
@@ -191,4 +193,16 @@ changed; `--force` rewrites all. Measured 2026-10-14 on about 3.45M rows:
 22.5 s for all ten cells from scratch, and `tools/test_arcgis_parity.py`
 (plugin repository) found every row's detection, value, limit flag, unit
 and date identical to the plugin's store.
+
+**Both shapes, because each fails where the other is good.** A cell file
+cannot mix dissolved with total or mg/kg with ug/L, and a load that touches
+one matrix rebuilds only that file's cache. `ALL_RESULTS` is one file to
+find and to query across matrices, but mixes fractions and units until it
+is filtered, and every user's cache of it - the whole facility, on disk -
+is rebuilt after ANY change. `SOURCE_LAYER = 'WS_D'` on it is exactly
+`WS_D.parquet`. It is concatenated from the cell files as written, never
+re-derived from the partitions, and rebuilt only when the cell files'
+fingerprints change; the parity gate holds each shape to the store on its
+own. It doubles the output on disk and in the upload (not yet measured on
+Facility A).
 

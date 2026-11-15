@@ -272,7 +272,8 @@ The column reaches the parquet with each slice's next stored output; run
 ## Optional: GeoParquet for ArcGIS Pro 3.6+
 
 `arcgis_export.py --root data/<name>` writes `data/<name>/arcgis/`, one
-GeoParquet layer per cell; Pro cannot use the partitions themselves.
+GeoParquet layer per cell, plus `ALL_RESULTS.parquet` holding every cell
+with a `SOURCE_LAYER` column; Pro cannot use the partitions themselves.
 Coordinates default to LONGITUDE/LATITUDE as WGS84. EQuIS stores whatever
 datum it was given, so set the real one in `data/<name>/arcgis.json`
 (`{"x":..., "y":..., "crs": "EPSG:<code>"}`). Its existence turns the step
