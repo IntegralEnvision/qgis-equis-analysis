@@ -107,7 +107,8 @@ def main():
     manifest = ax.export(root, **QUIET)
     names = sorted(os.listdir(out))
     check("one layer per cell, an unplaced table, locations",
-          names == ["README.txt", "SE_N.parquet", "WS_D.parquet",
+          names == ["ALL_RESULTS.parquet", "ALL_RESULTS_unplaced.parquet",
+                    "README.txt", "SE_N.parquet", "WS_D.parquet",
                     "WS_D_unplaced.parquet", "locations.parquet", "manifest.json"],
           str(names))
     check("every row accounted for", manifest["rows"] == 20,
@@ -156,24 +157,65 @@ def main():
     check("the manifest records the settings and where they came from",
           manifest["crs"] == "EPSG:4326" and manifest["settings_from"]["crs"] == "default")
 
+    # ------------------------------------------------- the combined file
+    combined = pq.read_table(os.path.join(out, "ALL_RESULTS.parquet"))
+    layer = combined.column("SOURCE_LAYER").to_pylist()
+    check("ALL_RESULTS holds every placed row, each naming its cell",
+          combined.num_rows == ws.num_rows + se.num_rows
+          and layer.count("WS_D") == ws.num_rows and layer.count("SE_N") == se.num_rows)
+    for cell, table in (("WS_D", ws), ("SE_N", se)):
+        part = combined.filter(pa.compute.equal(combined.column("SOURCE_LAYER"), cell))
+        check("SOURCE_LAYER = '%s' is exactly %s.parquet" % (cell, cell),
+              part.drop_columns(["SOURCE_LAYER"]).equals(table))
+    cgeo = json.loads(combined.schema.metadata[b"geo"])["columns"]["geometry"]
+    sgeo = json.loads(se.schema.metadata[b"geo"])["columns"]["geometry"]
+    check("its bbox is the union of the cells'",
+          cgeo["bbox"] == [min(column["bbox"][0], sgeo["bbox"][0]),
+                           min(column["bbox"][1], sgeo["bbox"][1]),
+                           max(column["bbox"][2], sgeo["bbox"][2]),
+                           max(column["bbox"][3], sgeo["bbox"][3])])
+    cun = pq.read_table(os.path.join(out, "ALL_RESULTS_unplaced.parquet"))
+    check("ALL_RESULTS_unplaced holds the unplaced rows, as a table",
+          cun.num_rows == 1 and cun.column("SOURCE_LAYER").to_pylist() == ["WS_D"]
+          and b"geo" not in (cun.schema.metadata or {}))
+    check("the manifest lists it, and rows still count each result once",
+          manifest["combined"]["rows"] == 19 and manifest["combined"]["unplaced_rows"] == 1
+          and manifest["rows"] == 20)
+
     # ------------------------------------------------- unchanged, changed
     before = os.stat(os.path.join(out, "WS_D.parquet")).st_mtime_ns
+    before_all = os.stat(os.path.join(out, "ALL_RESULTS.parquet")).st_mtime_ns
     lines = []
     ax.export(root, say=lines.append)
     check("an unchanged cell is not rewritten (Pro's cache survives)",
           os.stat(os.path.join(out, "WS_D.parquet")).st_mtime_ns == before
-          and sum("unchanged" in l for l in lines) == 2)
+          and sum("unchanged" in l for l in lines) == 3)
+    check("nor is ALL_RESULTS when no cell changed",
+          os.stat(os.path.join(out, "ALL_RESULTS.parquet")).st_mtime_ns == before_all)
 
     write_cell(root, "WS", "D", 12, unplaced=())
     ax.export(root, **QUIET)
     check("a cell that changed is rewritten, and an emptied unplaced table goes",
           not os.path.exists(os.path.join(out, "WS_D_unplaced.parquet"))
           and pq.read_metadata(os.path.join(out, "WS_D.parquet")).num_rows == 12)
+    check("...and ALL_RESULTS follows it, its unplaced table gone too",
+          pq.read_metadata(os.path.join(out, "ALL_RESULTS.parquet")).num_rows == 20
+          and not os.path.exists(os.path.join(out, "ALL_RESULTS_unplaced.parquet")))
+
+    # A run that died after the cells but before ALL_RESULTS: the cells
+    # are current, so nothing marks a change - the stamp must catch it.
+    os.remove(os.path.join(out, "ALL_RESULTS.parquet"))
+    ax.export(root, **QUIET)
+    check("a missing ALL_RESULTS is rebuilt though no cell changed",
+          os.path.exists(os.path.join(out, "ALL_RESULTS.parquet")))
 
     shutil.rmtree(os.path.join(root, "matrix=SE"))
     ax.export(root, **QUIET)
     check("a partition that is gone takes its layer with it",
           not os.path.exists(os.path.join(out, "SE_N.parquet")))
+    check("...and its rows leave ALL_RESULTS",
+          set(pq.read_table(os.path.join(out, "ALL_RESULTS.parquet"))
+              .column("SOURCE_LAYER").to_pylist()) == {"WS_D"})
     shutil.rmtree(root)
 
     # ---------------------------------------------------------- settings
@@ -228,6 +270,16 @@ def main():
                    os.path.join(root, "matrix=WS", "fraction=D", "part-0000.parquet"))
     refused("a source already holding an added column is refused",
             lambda: ax.export(root, **QUIET), "already has")
+    pq.write_table(table.append_column("SOURCE_LAYER", pa.array(["x"] * 4)),
+                   os.path.join(root, "matrix=WS", "fraction=D", "part-0000.parquet"))
+    refused("a source already holding SOURCE_LAYER is refused",
+            lambda: ax.export(root, **QUIET), "already has")
+    shutil.rmtree(root)
+
+    root = tempfile.mkdtemp(prefix="arcgis_test_")
+    write_cell(root, "ALL", "RESULTS", 4)
+    refused("a cell that would be named ALL_RESULTS is refused",
+            lambda: ax.export(root, **QUIET), "ALL_RESULTS")
     shutil.rmtree(root)
 
     # -------------------------------------------- the validator itself

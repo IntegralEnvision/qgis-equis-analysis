@@ -15,8 +15,23 @@ Run after the nightly repack. Writes data/<name>/arcgis/:
                                         it sits (tested in Pro 2026-10-14), while
                                         small files load - so a cell would stop
                                         loading the night it grew past 500k.
+  ALL_RESULTS.parquet                   every cell's layer in one, with
+  ALL_RESULTS_unplaced.parquet          SOURCE_LAYER naming the cell each
+                                        row came from (see below)
   locations.parquet                     one point per location
   manifest.json, README.txt
+
+BOTH SHAPES, EACH FOR WHAT IT IS GOOD AT. A cell's file is the safe layer:
+it cannot mix dissolved with total, or mg/kg with ug/L, and when a load
+touches one matrix only that file's date changes, so only that file's Pro
+cache (on disk at >= 500k rows, ~12x the file in Esri's example) is
+rebuilt. ALL_RESULTS is one file to find and to query across matrices, at
+the price of a whole-facility cache rebuilt after ANY change, and of a
+symbology over VALUE_OR_LIMIT that mixes fractions and units unless the
+user filters first. `SOURCE_LAYER = 'WS_D'` gives back exactly WS_D.parquet.
+It is built from the cell files as written, not from the partitions, so the
+two cannot disagree about a row, and it is rewritten only when the set of
+cell files changed.
 
 A SEPARATE TARGET, NOT A CHANGE TO THE PARTITIONS. Pro reads one file as one
 layer and ignores Hive paths, and the partitions fail its rules as they
@@ -80,6 +95,9 @@ SETTINGS_NAME = "arcgis.json"
 MANIFEST_NAME = "manifest.json"
 PARTITION_FILE = "part-0000.parquet"
 LOCATIONS_FILE = "locations.parquet"
+COMBINED = "ALL_RESULTS"
+# The combined file's one extra column: the cell file a row is also in.
+LAYER_COLUMN = "SOURCE_LAYER"
 DEFAULTS = {"x": "LONGITUDE", "y": "LATITUDE", "crs": "EPSG:4326"}
 # Bumped whenever what is written changes, so every cell is rewritten.
 FORMAT_VERSION = 1
@@ -226,6 +244,8 @@ def source_cells(root):
                           % (PARTITION_FILE, root))
     names = [c[0] for c in cells]
     clash = {n for n in names if names.count(n) > 1}
+    if COMBINED in names:
+        clash.add(COMBINED + " (the combined file's name)")
     if clash:
         raise ExportError("matrix/fraction codes collide as file names: %s"
                           % sorted(clash))
@@ -280,7 +300,7 @@ def survey(cells, settings):
             elif not pa.types.is_null(kind) and fields[field.name] != kind:
                 raise ExportError("%s is %s in one partition and %s in another"
                                   % (field.name, fields[field.name], kind))
-    taken = [c for c in ADDED_COLUMNS + (GEOMETRY,) if c in fields]
+    taken = [c for c in ADDED_COLUMNS + (LAYER_COLUMN, GEOMETRY) if c in fields]
     if taken:
         raise ExportError("the source already has %s, which the export adds"
                           % taken)
@@ -361,7 +381,7 @@ def survey(cells, settings):
                pa.field("VALUE_OR_LIMIT", pa.float64()),
                pa.field("VALUE_IS_LIMIT", pa.bool_()),
                pa.field("VALUE_UNIT", pa.string())]
-    check_names([f.name for f in schema] + [GEOMETRY])
+    check_names([f.name for f in schema] + [LAYER_COLUMN, GEOMETRY])
     return {"schema": pa.schema(schema), "dates": parsed, "unparsed": unparsed,
             "bounds": bounds, "locations": locations}
 
@@ -603,6 +623,62 @@ def write_locations(out, plan, settings, projjson):
     return len(codes), sum(1 for v in variants if v > 1)
 
 
+def write_combined(out_dir, files, plan, projjson):
+    """ALL_RESULTS and ALL_RESULTS_unplaced, concatenated from the cell
+    files already written - never re-derived from the partitions, so a row
+    here is byte for byte the row in its cell's file. Returns (placed,
+    unplaced) row counts."""
+    options = dict(compression="zstd", compression_level=9,
+                   use_dictionary=True, write_statistics=True)
+    layer_field = pa.field(LAYER_COLUMN, pa.string())
+    table_schema = plan["schema"].append(layer_field)
+    # The union of the cells' extents, read back from their footers.
+    boxes = [json.loads(pq.read_schema(os.path.join(out_dir, f["path"]))
+                        .metadata[b"geo"])["columns"][GEOMETRY]["bbox"]
+             for f in files if f["rows"]]
+    bbox = ([min(b[0] for b in boxes), min(b[1] for b in boxes),
+             max(b[2] for b in boxes), max(b[3] for b in boxes)]
+            if boxes else [0.0, 0.0, 0.0, 0.0])
+    spatial_schema = table_schema.append(
+        pa.field(GEOMETRY, pa.binary(), nullable=False)).with_metadata(
+        {b"geo": geo_metadata(projjson, bbox)})
+
+    counts = []
+    for suffix, schema, key, rows_key, spatial in (
+            ("", spatial_schema, "path", "rows", True),
+            ("_unplaced", table_schema, "unplaced_path", "unplaced_rows", False)):
+        final = os.path.join(out_dir, COMBINED + suffix + ".parquet")
+        temp = final + ".tmp"
+        sources = [f for f in files if f[rows_key]]
+        if not sources:
+            if os.path.exists(final):
+                _remove(final)
+            counts.append(0)
+            continue
+        written = 0
+        with pq.ParquetWriter(temp, schema, **options) as writer:
+            for f in sources:
+                for batch in pq.ParquetFile(
+                        os.path.join(out_dir, f[key])).iter_batches(batch_size=BATCH_ROWS):
+                    # Cell files are plan schema [+ geometry]: the layer
+                    # column goes between them.
+                    arrays = batch.columns[:len(plan["schema"])]
+                    arrays.append(pa.array([f["cell"]] * batch.num_rows, pa.string()))
+                    arrays += batch.columns[len(plan["schema"]):]
+                    writer.write_batch(pa.RecordBatch.from_arrays(arrays, schema=schema),
+                                       row_group_size=ROW_GROUP_ROWS)
+                    written += batch.num_rows
+        expected = sum(f[rows_key] for f in sources)
+        if written != expected:
+            os.remove(temp)
+            raise ExportError("%s: wrote %d rows, the cells hold %d"
+                              % (os.path.basename(final), written, expected))
+        validate(temp, spatial=spatial, name=os.path.basename(final))
+        _replace(temp, final)
+        counts.append(written)
+    return counts[0], counts[1]
+
+
 def validate(path, spatial, name):
     """What docs/arcgis-pro-geoparquet-brief.md section 7 checks, on the
     file as written. A failure deletes it: nothing half-right is published."""
@@ -691,11 +767,13 @@ def export(root, x=None, y=None, crs=None, force=False, say=print):
 
     out_dir = os.path.join(root, OUT_DIR)
     os.makedirs(out_dir, exist_ok=True)
-    previous = {}
+    previous, previous_combined = {}, {}
     manifest_path = os.path.join(out_dir, MANIFEST_NAME)
     if os.path.isfile(manifest_path):
         with open(manifest_path, encoding="utf-8") as handle:
-            previous = {f["cell"]: f for f in json.load(handle).get("files", [])}
+            old_manifest = json.load(handle)
+        previous = {f["cell"]: f for f in old_manifest.get("files", [])}
+        previous_combined = old_manifest.get("combined") or {}
     published = {}
     published_path = os.path.join(root, "manifest.json")
     if os.path.isfile(published_path):
@@ -751,13 +829,34 @@ def export(root, x=None, y=None, crs=None, force=False, say=print):
             ", %d with rows disagreeing about the coordinate" % disagree)
             if disagree else ""))
 
+    # Keyed on the cell files it is made of, not on `changed`: a run that
+    # died between the cells and this file leaves the stamp behind.
+    stamp = hashlib.sha256(json.dumps(
+        [[f["cell"], f["fingerprint"]] for f in files]).encode()).hexdigest()[:16]
+    combined_out = os.path.join(out_dir, COMBINED + ".parquet")
+    if (force or previous_combined.get("fingerprint") != stamp
+            or (any(f["rows"] for f in files) and not os.path.isfile(combined_out))):
+        placed, unplaced = write_combined(out_dir, files, plan, projjson)
+        combined = {"path": COMBINED + ".parquet", "rows": placed,
+                    "unplaced_rows": unplaced,
+                    "unplaced_path": (COMBINED + "_unplaced.parquet") if unplaced else None,
+                    "bytes": os.path.getsize(combined_out) if placed else 0,
+                    "layer_column": LAYER_COLUMN,
+                    "cells": [f["cell"] for f in files], "fingerprint": stamp}
+        say("  %-14s %9d rows, every cell%s" % (
+            COMBINED, placed,
+            "  [>=500k: run Create Parquet Cache in Pro]" if placed >= 500000 else ""))
+    else:
+        combined = previous_combined
+        say("  %-14s unchanged, kept" % COMBINED)
+
     manifest = {"version": 1, "format_version": FORMAT_VERSION,
                 "generated": datetime.datetime.now(datetime.timezone.utc)
                 .strftime("%Y-%m-%dT%H:%M:%SZ"),
                 "x": settings["x"], "y": settings["y"], "crs": label,
                 "settings_from": source, "requires": "ArcGIS Pro 3.6+",
                 "rows": sum(f["rows"] + f["unplaced_rows"] for f in files),
-                "files": files, "locations": LOCATIONS_FILE,
+                "files": files, "combined": combined, "locations": LOCATIONS_FILE,
                 "dates_kept_as_text": sorted(plan["unparsed"])}
     with open(manifest_path + ".tmp", "w", encoding="utf-8") as handle:
         json.dump(manifest, handle, indent=1)
@@ -767,12 +866,20 @@ def export(root, x=None, y=None, crs=None, force=False, say=print):
     return manifest
 
 
-README = """GeoParquet for ArcGIS Pro 3.6+, one file per matrix and fraction.
+README = """GeoParquet for ArcGIS Pro 3.6+, one file per matrix and fraction,
+and all of them in one.
 
 Add a <MATRIX>_<FRACTION>.parquet file to a map: one point per result, at
 its location's coordinates (%(x)s, %(y)s; %(crs)s). Results at a location
 whose coordinates are missing are in <MATRIX>_<FRACTION>_unplaced.parquet,
 a table. locations.parquet has one point per location.
+
+ALL_RESULTS.parquet is every <MATRIX>_<FRACTION> file in one, for queries
+across matrices. Its SOURCE_LAYER column names the file each row is also
+in: a definition query of SOURCE_LAYER = 'WS_D' is exactly WS_D.parquet.
+Prefer the per-cell files for mapping values: ALL_RESULTS mixes dissolved
+with total and mg/kg with ug/L until you filter it, and Pro rebuilds its
+cache for the whole file whenever any matrix gets new data.
 
 Files of 500,000 rows or more: run Create Parquet Cache on them first.
 Over 10,000 points Pro draws bins; filter with a definition query (on
@@ -790,8 +897,9 @@ A non-detect is not a small measurement: never take a maximum over
 VALUE_OR_LIMIT without excluding VALUE_IS_LIMIT rows where a detection
 exists.
 
-Never combine dissolved and total (the files are already split), or
-matrices whose units differ.
+Never combine dissolved and total (the per-cell files are already split;
+in ALL_RESULTS, filter on SOURCE_LAYER or FRACTION first), or matrices
+whose units differ (check VALUE_UNIT).
 
 manifest.json lists each file with its row counts and the age of the data.
 """

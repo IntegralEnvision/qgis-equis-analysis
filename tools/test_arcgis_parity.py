@@ -120,10 +120,20 @@ def write_fixture(root):
 # ------------------------------------------------------------ comparison
 
 def compare(root, label, expect_equal=True):
-    """Every exported row against the store's view, as multisets."""
+    """Each shape the export writes - the per-cell files, and ALL_RESULTS -
+    against the store's view on its own: each must hold every row once."""
     out = os.path.join(root, ax.OUT_DIR)
-    files = sorted(os.path.join(out, f) for f in os.listdir(out)
-                   if f.endswith(".parquet") and f != ax.LOCATIONS_FILE)
+    names = [f for f in os.listdir(out)
+             if f.endswith(".parquet") and f != ax.LOCATIONS_FILE]
+    combined = [f for f in names if f.startswith(ax.COMBINED)]
+    for shape, chosen in (("cells", sorted(set(names) - set(combined))),
+                          (ax.COMBINED, sorted(combined))):
+        compare_files(root, [os.path.join(out, f) for f in chosen],
+                      "%s, %s" % (label, shape), expect_equal)
+
+
+def compare_files(root, files, label, expect_equal):
+    """Every row of these files against the store's view, as multisets."""
     wanted = ["SYS_LOC_CODE", "CHEMICAL_NAME", "SYS_SAMPLE_CODE", "SAMPLE_DATE",
               "IS_DETECT", "VALUE_OR_LIMIT", "VALUE_IS_LIMIT", "VALUE_UNIT"]
     exported = pa.concat_tables(

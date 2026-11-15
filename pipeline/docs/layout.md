@@ -162,6 +162,8 @@ the plugin repository's `docs/arcgis-pro-geoparquet-brief.md`):
 arcgis/
   <MATRIX>_<FRACTION>.parquet           one point per result      GeoParquet 1.1, WKB, zstd
   <MATRIX>_<FRACTION>_unplaced.parquet  rows with no coordinates  a table; only if any
+  ALL_RESULTS.parquet                   every cell's layer in one  + SOURCE_LAYER = the cell
+  ALL_RESULTS_unplaced.parquet          every cell's unplaced      a table; only if any
   locations.parquet                     one point per location    most common coordinate
   manifest.json                         files, rows, settings, as_of
   README.txt                            for the Pro user
@@ -191,4 +193,26 @@ changed; `--force` rewrites all. Measured 2026-10-14 on about 3.45M rows:
 22.5 s for all ten cells from scratch, and `tools/test_arcgis_parity.py`
 (plugin repository) found every row's detection, value, limit flag, unit
 and date identical to the plugin's store.
+
+**Both shapes, because each fails where the other is good.** A cell file
+cannot mix dissolved with total or mg/kg with ug/L, and a load that touches
+one matrix rebuilds only that file's cache. `ALL_RESULTS` is one file to
+find and to query across matrices, but mixes fractions and units until it
+is filtered, and every user's cache of it - the whole facility, on disk -
+is rebuilt after ANY change. `SOURCE_LAYER = 'WS_D'` on it is exactly
+`WS_D.parquet`. It is concatenated from the cell files as written, never
+re-derived from the partitions, and rebuilt only when the cell files'
+fingerprints change; the parity gate holds each shape to the store on its
+own. It doubles the output on disk and in the upload. Facility A (the
+10-23 copy, 3,515,468 rows), measured 2026-11-15 on this laptop:
+
+- **On disk:** `ALL_RESULTS` is 119.6 MB with 3,427,520 placed rows, plus
+  3.0 MB unplaced. The cell files total 124.5 MB, so the output roughly
+  doubles.
+- **Time:** a full export with both shapes took 175.6 s. Rebuilding
+  `ALL_RESULTS` alone took 63.3 s, against 8.2 s for a run where nothing
+  changed, so writing it costs about 55 s.
+- **Parity:** `tools/test_arcgis_parity.py`'s real-facility comparison
+  found both shapes equal to the store on every row: 0 rows only in the
+  export, 0 only in the store.
 
