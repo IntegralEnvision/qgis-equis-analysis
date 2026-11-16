@@ -1,10 +1,10 @@
 {
  "note": "Written by tools/vendor_chemduck.py. Do not edit these files: re-vendor, and tools/test_chemduck_vendor.py checks them.",
  "repository": "https://github.com/IntegralEnvision/chemduck.git",
- "commit": "a06ad5adb10a5f36b90ebae97b737cf656badd94",
- "subject": "Merge pull request #15 from IntegralEnvision/partition-pruning",
+ "commit": "6d294a8fa5ccd0233cc633885246adde38e114ca",
+ "subject": "Merge pull request #16 from IntegralEnvision/consumer-speed-2",
  "version": "0.2.0",
- "vendored": "2026-11-15",
+ "vendored": "2026-11-16",
  "files": {
   "__init__.py": {
    "bytes": 2852,
@@ -55,8 +55,8 @@
    "sha256": "1c0f61d5c0f44831bf15ac80aded08866b6adbfd038a866795226e67ca88b23f"
   },
   "sql/08_aggregate_points.sql": {
-   "bytes": 55779,
-   "sha256": "dc6ceadaf8ff67f4130984a41990d0d02be130417b33ebd10a5e740b87da1e5e"
+   "bytes": 59555,
+   "sha256": "0f2fda04077b614e0ff8928049036ae8654971c61a043ee48f434d2f63fd3b4a"
   },
   "sql/08_aggregate_results.sql": {
    "bytes": 18161,
