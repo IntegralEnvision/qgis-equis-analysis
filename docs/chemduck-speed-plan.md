@@ -364,8 +364,8 @@ PR #15 as `a06ad5a`, now vendored).
   folder's own SQL, so a folder published before this keeps working, and
   gains pruning when republished.
 
-**Unread columns and planning, 2026-11-15** (ChemDuck `cf4241b`, branch
-`consumer-speed-2`; local, not pushed). The 10-23 copy, 2 threads, plain
+**Unread columns and planning, 2026-11-15** (ChemDuck `cf4241b`, merged
+as `6d294a8`, IntegralEnvision/chemduck#16, and vendored). The 10-23 copy, 2 threads, plain
 Python 3.14.6, DuckDB 1.5.5, the machine at 10-70% load.
 
 **The premise was wrong.** The `results` view's per-row expressions are
