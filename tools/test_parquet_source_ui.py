@@ -451,6 +451,178 @@ if HAVE_PLOT:
     check("an unfiltered chart carries no subtitle at all",
           not plain.texts, str([t.get_text() for t in plain.texts]))
 
+# --- a new publish of an open http source ------------------------------------
+# Over http the store caches the files' metadata, so a session that kept
+# reading after a publish would read the new bytes with the old metadata
+# (ReportStore.from_manifest). The panel re-reads the manifest on a timer,
+# and on a change reopens in the background and swaps the store in, keeping
+# the user's choices. Served here from a temporary folder, so it needs no
+# real data.
+import json                                            # noqa: E402
+import shutil                                          # noqa: E402
+import tempfile                                        # noqa: E402
+import threading                                       # noqa: E402
+import time                                            # noqa: E402
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer  # noqa: E402
+from equis_loader.store import duckdb_module           # noqa: E402
+from equis_loader.tasks import CheckManifestTask       # noqa: E402
+from equis_loader.dialog import MANIFEST_CHECK_MS      # noqa: E402
+
+served = tempfile.mkdtemp(prefix="equis_ui_http_")
+
+
+class Ranged(BaseHTTPRequestHandler):
+    protocol_version = "HTTP/1.1"
+
+    def log_message(self, *args):
+        pass
+
+    def _file(self):
+        return os.path.join(served, *self.path.split("?")[0].lstrip("/").split("/"))
+
+    def _headers(self, size, first=None, last=None):
+        self.send_response(206 if first is not None else 200)
+        self.send_header("Accept-Ranges", "bytes")
+        self.send_header("Last-Modified", self.date_time_string(os.path.getmtime(self._file())))
+        if first is not None:
+            self.send_header("Content-Range", "bytes %d-%d/%d" % (first, last, size))
+        self.send_header("Content-Length", str(size if first is None else last - first + 1))
+        self.end_headers()
+
+    def do_HEAD(self):
+        self._headers(os.path.getsize(self._file()))
+
+    def do_GET(self):
+        path = self._file()
+        size = os.path.getsize(path)
+        wanted = self.headers.get("Range")
+        if not wanted:
+            self._headers(size)
+            with open(path, "rb") as handle:
+                self.wfile.write(handle.read())
+            return
+        first, last = wanted.split("=")[1].split("-")
+        first, last = int(first), min(int(last), size - 1)
+        self._headers(size, first, last)
+        with open(path, "rb") as handle:
+            handle.seek(first)
+            self.wfile.write(handle.read(last - first + 1))
+
+
+def publish(rows):
+    part = os.path.join(served, "matrix=WS", "fraction=N")
+    os.makedirs(part, exist_ok=True)
+    con = duckdb_module().connect(":memory:")
+    # CAS numbers: the picker keys its selection on CAS, so rows without one
+    # would all be "chosen" together.
+    cas = {"Arsenic": "7440-38-2", "Lead": "7439-92-1", "Zinc": "7440-66-6"}
+    values = ", ".join("('%s', '%s', '%s', %s, '4/24/2025 12:00:00 PM', 'Y', 'mg/L', %s, %s)"
+                       % (r[0], r[1], cas[r[1]], r[2], r[3], r[4]) for r in rows)
+    con.execute(
+        "COPY (SELECT * FROM (VALUES %s) AS t(SYS_LOC_CODE, CHEMICAL_NAME, CAS_RN, "
+        "RESULT_NUMERIC, SAMPLE_DATE, DETECT_FLAG, RESULT_UNIT, LATITUDE, LONGITUDE)) "
+        "TO '%s' (FORMAT PARQUET)"
+        % (values, os.path.join(part, "part-0000.parquet").replace("\\", "/")))
+    con.close()
+    with open(os.path.join(served, "manifest.json"), "w", encoding="utf-8") as handle:
+        json.dump({"version": 1, "rows": len(rows), "partitions": [
+            {"path": "matrix=WS/fraction=N/part-0000.parquet", "rows": len(rows)}]}, handle)
+
+
+def wait_for(condition, seconds=60):
+    deadline = time.time() + seconds
+    while not condition() and time.time() < deadline:
+        QgsApplication.processEvents()
+        time.sleep(0.05)
+    return condition()
+
+
+server = ThreadingHTTPServer(("127.0.0.1", 0), Ranged)
+threading.Thread(target=server.serve_forever, daemon=True).start()
+url = "http://127.0.0.1:%d" % server.server_address[1]
+try:
+    publish([("MW-1", "Arsenic", 1.0, -19.1, -43.5), ("MW-2", "Lead", 2.0, -19.2, -43.6)])
+    panel.parquet_edit.setText(url)
+    task = FetchManifestTask(url)
+    task.run()
+    panel._manifest_task = task
+    panel._on_manifest_ready(task, url)
+    opened = panel._report_store
+    check("an http source opens with the metadata caches on",
+          opened is not None and opened.remote_caches)
+    check("...and the panel watches its manifest, every %d s" % (MANIFEST_CHECK_MS // 1000),
+          panel._manifest_timer.isActive())
+    panel.selection_panel.set_selected_analytes(["Lead"])
+    layer_before = panel._locations_layer
+
+    # Nothing published: the check leaves the store alone.
+    check_task = CheckManifestTask(url)
+    check_task.run()
+    panel._manifest_check_task = check_task
+    panel._on_manifest_checked(check_task, check_task._result)
+    check("an unchanged manifest changes nothing",
+          panel._report_store is opened and panel._reopen_task is None
+          and opened.remote_caches)
+
+    time.sleep(1.1)
+    publish([("MW-1", "Arsenic", 1.0, -19.1, -43.5), ("MW-2", "Lead", 2.0, -19.2, -43.6),
+             ("MW-2", "Lead", 3.0, -19.2, -43.6), ("MW-1", "Zinc", 4.0, -19.1, -43.5)])
+    check_task = CheckManifestTask(url)
+    check_task.run()
+    panel._manifest_check_task = check_task
+    panel._on_manifest_checked(check_task, check_task._result)
+    check("a new publish stops the old store caching at once",
+          not opened.remote_caches and panel._reopen_task is not None)
+    swapped = wait_for(lambda: panel._report_store is not opened
+                       and panel._reopened_store is None)
+    store = panel._report_store
+    check("the reopened store is swapped in", swapped and store is not None
+          and store.count() == 4, str(store.count() if store else None))
+    check("...caching again, and watched again",
+          store is not None and store.remote_caches and panel._manifest_timer.isActive())
+    check("the chosen chemical stays chosen",
+          [n for _, n in panel.selection_panel.selected_analytes()] == ["Lead"],
+          str(panel.selection_panel.selected_analytes()))
+    check("the new chemical is offered",
+          "Zinc" in [n for _, n in panel._offered_analytes], str(panel._offered_analytes))
+    counts = {f["code"]: f["results"] for f in panel._locations_layer.getFeatures()}
+    check("the same locations keep their layer, with the new counts",
+          panel._locations_layer is layer_before and counts == {"MW-1": 2, "MW-2": 2},
+          str(counts))
+    said = " ".join(str(m) for m in panel.iface.messageBar().messages)
+    check("the message bar says a new publish was loaded",
+          "republished" in said and "4 rows" in said and "was 2" in said, said[-200:])
+
+    # A location added: the layer is rebuilt, the map is not moved, and what
+    # was selected on it is selected again.
+    layer = panel._locations_layer
+    layer.selectByIds([f.id() for f in layer.getFeatures() if f["code"] == "MW-1"])
+    extent = panel.iface.mapCanvas().extent()
+    second = panel._report_store
+    time.sleep(1.1)
+    publish([("MW-1", "Arsenic", 1.0, -19.1, -43.5), ("MW-2", "Lead", 2.0, -19.2, -43.6),
+             ("MW-3", "Lead", 5.0, -19.3, -43.7)])
+    check_task = CheckManifestTask(url)
+    check_task.run()
+    panel._manifest_check_task = check_task
+    panel._on_manifest_checked(check_task, check_task._result)
+    wait_for(lambda: panel._report_store is not second and panel._reopened_store is None)
+    rebuilt = panel._locations_layer
+    codes = sorted(f["code"] for f in rebuilt.getFeatures()) if rebuilt else []
+    check("a new location rebuilds the layer", rebuilt is not layer
+          and codes == ["MW-1", "MW-2", "MW-3"], str(codes))
+    check("...with the map selection put back by code",
+          sorted(f["code"] for f in rebuilt.selectedFeatures()) == ["MW-1"])
+    check("...and the map left where it was",
+          panel.iface.mapCanvas().extent() == extent)
+
+    # A local source is not cached, so it is not watched.
+    panel._discard_store()
+    check("closing the source stops the watch", not panel._manifest_timer.isActive())
+finally:
+    server.shutdown()
+    shutil.rmtree(served, ignore_errors=True)
+
 panel.close()
 
 print()

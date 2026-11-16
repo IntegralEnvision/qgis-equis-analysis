@@ -275,6 +275,24 @@ class ReportStore(object):
 
         The manifest is data from elsewhere, so it is validated rather than
         trusted: a path that escapes the source directory is refused.
+
+        OVER HTTP, DUCKDB'S METADATA CACHES ARE ON. Without them every query
+        sends one HEAD per partition file, to check whether it changed,
+        because the views read all of them with union_by_name. That holds
+        even when partition pruning reads only one. Measured 2026-11-15 on
+        Facility A's 19 files, served with 30 ms per request: a footer count
+        took 0.94 s, of which 0.08 s with both caches on, and the open 25.9 s
+        against 4.3 s. With the caches on, a warm query sends no request at
+        all (docs/chemduck-speed-plan.md, section 4).
+
+        THE PRICE IS THAT DUCKDB STOPS NOTICING A REWRITE. The pipeline
+        overwrites part-0000.parquet in place, and a cached session that
+        read a rewritten file failed with "No magic bytes found": it read
+        the new bytes with the old size. The manifest says when that has
+        happened. The pipeline uploads it LAST, so the panel re-reads it
+        (manifest_text, is_current) and reopens when it has changed;
+        stop_caching makes this connection read live until then. A new
+        database starts with empty caches, which is why a reopen is safe.
         """
         # A `file:` URL becomes a plain path HERE, once, before anything
         # joins onto it - so the manifest fetch and every partition path
@@ -316,8 +334,14 @@ class ReportStore(object):
                     % relative)
             files.append(cls._join(url, relative))
 
-        store = cls.from_parquet(files, path=path)
+        # http(s) only: a local path reads the disk, where the caches buy
+        # nothing measurable (0.90-1.15x of whole calls, 2026-11-15).
+        remote = url.lower().startswith(("http://", "https://"))
+        store = cls.from_parquet(files, path=path, remote_caches=remote)
         store.manifest = manifest
+        # The bytes as fetched, which is what is_current compares: any
+        # change is a new publish, and nothing in it needs interpreting.
+        store.manifest_text = text
         store.source_url = url
         # The publisher's own count, checked rather than displayed. A
         # truncated upload or a half-written republish reads as a smaller
@@ -582,8 +606,39 @@ class ReportStore(object):
         except Exception as exc:  # noqa: BLE001
             raise StoreError("could not fetch %r: %s" % (url, exc))
 
+    # DuckDB's two metadata caches for a remote source: parquet footers, and
+    # the HEAD answers (size, last modified) for http files. Both are needed;
+    # the parquet cache alone still sends the HEADs (see from_manifest).
+    REMOTE_CACHE_SETTINGS = ("parquet_metadata_cache", "enable_http_metadata_cache")
+
     @classmethod
-    def from_parquet(cls, source, path=":memory:", hive=True):
+    def _cache_remote_metadata(cls, con, on):
+        for name in cls.REMOTE_CACHE_SETTINGS:
+            con.execute("SET %s = %s" % (name, "true" if on else "false"))
+
+    def stop_caching(self):
+        """Read the files live from now on: the source has been republished.
+
+        Turning the caches off makes this connection re-check each file, so
+        it reads the new bytes correctly (measured 2026-11-15 against a file
+        rewritten twice). Its pickers and counts still describe the publish
+        it opened, so this is only for the moment until a reopen replaces
+        it.
+        """
+        if getattr(self, "remote_caches", False):
+            try:
+                self._cache_remote_metadata(self.con, False)
+            except Exception:                   # noqa: BLE001
+                pass
+            self.remote_caches = False
+
+    def is_current(self, manifest_text):
+        """Whether `manifest_text`, fetched now, is the manifest this store
+        opened. False means a new publish: reopen."""
+        return manifest_text == getattr(self, "manifest_text", None)
+
+    @classmethod
+    def from_parquet(cls, source, path=":memory:", hive=True, remote_caches=False):
         """A store over parquet, with NO INGEST at all.
 
         `source` is what DuckDB's read_parquet takes: one file, or a glob
@@ -619,6 +674,10 @@ class ReportStore(object):
         """
         duckdb = duckdb_module()
         con = duckdb.connect(path)
+        # Before anything reads a file: the open itself is most of the
+        # requests (551 HEADs uncached, 19 cached, on Facility A).
+        if remote_caches:
+            cls._cache_remote_metadata(con, True)
         # DuckDB reads a `file:///C:/dir` URL but not the two-slash form
         # people actually type; normalising here means both work, and a
         # plain path is untouched.
@@ -754,6 +813,7 @@ class ReportStore(object):
         store.source = source
         store.files = files
         store._opened_stats = cls._stat_files(files)
+        store.remote_caches = bool(remote_caches)
         return store
 
     @classmethod
@@ -792,8 +852,9 @@ class ReportStore(object):
     def _stat_files(files):
         """{path: (size, mtime_ns)} for every file that is on local disk.
 
-        Remote files are left out: a URL has no cheap stat, and a published
-        set is replaced by a new manifest rather than rewritten in place.
+        Remote files are left out: a URL has no cheap stat. A published set
+        IS rewritten in place, under the same names, and its manifest last;
+        re-reading the manifest is the remote check (from_manifest).
         """
         found = {}
         for path in files:

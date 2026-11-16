@@ -112,6 +112,7 @@ from .tasks import (
     cached_layer_name,
     FetchFacilitiesTask,
     FetchFacilityDetailTask,
+    CheckManifestTask,
     FetchManifestTask,
     LoadLayersTask,
     PrepareLiveReportTask,
@@ -136,6 +137,16 @@ BULK_LAYER_WARNING = 8
 # rebuilds the preview. Long enough to swallow an arrow key held down the
 # chemical list, short enough to read as immediate on a single click.
 PREVIEW_SETTLE_MS = 150
+
+# How often an open http parquet source re-reads its manifest for a new
+# publish (_check_manifest). The store caches the files' metadata, so a
+# session that kept reading after a publish could read the new bytes with
+# the old metadata (ReportStore.from_manifest). A timer, decided
+# 2026-11-15: one ~1.5 KB GET each time, against the 19 HEADs every query
+# sent without the caches. A click made between a publish and the next
+# check can still read rewritten files, and fails rather than answers
+# when it does ("No magic bytes found").
+MANIFEST_CHECK_MS = 2 * 60 * 1000
 
 # How many result rows an unaggregated layer may hold. One chemical over a
 # decade at a few hundred locations is easily tens of thousands of features,
@@ -401,6 +412,14 @@ class EquisDialog(QDockWidget):
         # and the in-flight manifest fetch. Both None on the live path.
         self._parquet_url = None
         self._manifest_task = None
+        # The check for a new publish of an open http source, and the reopen
+        # it starts; see MANIFEST_CHECK_MS and _check_manifest.
+        self._manifest_timer = QTimer(self)
+        self._manifest_timer.setInterval(MANIFEST_CHECK_MS)
+        self._manifest_timer.timeout.connect(self._check_manifest)
+        self._manifest_check_task = None
+        self._reopen_task = None
+        self._reopened_store = None
         # What the histogram was last drawn for; see _refresh_chart.
         self._drawn_scope = None
         # The matrix the panel last reported, so a change can be told from
@@ -1714,6 +1733,7 @@ class EquisDialog(QDockWidget):
         self._apply_row_scope()
         self._schedule_analysis_warmup()
         self._parquet_url = url
+        self._watch_manifest(store)
         self._offline = False
         self._set_busy(False)
         rows = store.count()
@@ -1824,7 +1844,7 @@ class EquisDialog(QDockWidget):
     def _parquet_facility_name(self):
         return (self.facility_combo.currentText() or "").split(" (")[0]
 
-    def _load_parquet_locations(self, store):
+    def _load_parquet_locations(self, store, zoom=True):
         """Location points from the parquet, as the live path gets them from
         the feature service.
 
@@ -1890,7 +1910,8 @@ class EquisDialog(QDockWidget):
         self._locations_layer = layer
         layer.selectionChanged.connect(self._on_map_selection_changed)
         self._refresh_map_selection_label()
-        self._zoom_to(layer)
+        if zoom:
+            self._zoom_to(layer)
         self._update_active_label()
 
         # Unplaced locations are reported rather than quietly dropped: the
@@ -1905,6 +1926,56 @@ class EquisDialog(QDockWidget):
         else:
             self.locations_label.setText(
                 "%s location point(s) on the map." % format(placed, ",d"))
+
+    def _refresh_parquet_locations(self, store):
+        """The locations after a reload, keeping the layer where it can.
+
+        Their counts change with nearly every publish, since results per
+        location and per matrix are attributes. So when the same locations,
+        at the same places, carry the same fields, the values are updated in
+        place: the layer, its style and the map selection the analysis views
+        follow all stay. A location added, moved or removed, or a matrix
+        gained, rebuilds it without moving the map, and the selection is put
+        back by location code.
+        """
+        pages = store.location_features()
+        if pages == self._location_pages:
+            return
+        layer = self._locations_layer
+
+        def shape(found):
+            return [([field["name"] for field in (feature_set.get("fields") or [])],
+                     [(feature["attributes"].get(LOCATION_FIELD), feature.get("geometry"))
+                      for feature in features])
+                    for feature_set, features in (found or [])]
+
+        if layer is not None and self._location_pages and shape(pages) == shape(self._location_pages):
+            names = [layer.fields().at(i).name() for i in range(layer.fields().count())]
+            by_code = {feature["attributes"].get(LOCATION_FIELD): feature["attributes"]
+                       for _, features in pages for feature in features}
+            changes = {}
+            for feature in layer.getFeatures():
+                attributes = by_code.get(feature[LOCATION_FIELD])
+                if attributes is not None:
+                    changes[feature.id()] = {i: attributes.get(name)
+                                             for i, name in enumerate(names)}
+            if changes:
+                layer.dataProvider().changeAttributeValues(changes)
+                layer.triggerRepaint()
+            self._location_pages = pages
+            return
+
+        selected = set()
+        if layer is not None:
+            try:
+                selected = {feature[LOCATION_FIELD] for feature in layer.selectedFeatures()}
+            except RuntimeError:                # the layer was deleted
+                selected = set()
+        self._load_parquet_locations(store, zoom=False)
+        rebuilt = self._locations_layer
+        if selected and rebuilt is not None and rebuilt is not layer:
+            rebuilt.selectByIds([feature.id() for feature in rebuilt.getFeatures()
+                                 if feature[LOCATION_FIELD] in selected])
 
     def _on_parquet_note(self, message):
         """Say what the open is doing right now.
@@ -2587,6 +2658,152 @@ class EquisDialog(QDockWidget):
         # _needs_fetch would keep answering "no fetch needed" after a switch
         # back to EQuIS, and the live path would never fetch again.
         self._parquet_url = None
+        # And the watch for a new publish of it, with any reopen under way.
+        self._manifest_timer.stop()
+        self._manifest_check_task = None
+        self._reopen_task = None
+        if self._reopened_store is not None:
+            self._reopened_store.close()
+            self._reopened_store = None
+
+    # ----------------------------------------- a new publish, while open
+
+    def _watch_manifest(self, store):
+        """Re-read the manifest on a timer while this store caches an http
+        source's metadata (ReportStore.from_manifest); otherwise not."""
+        if getattr(store, "remote_caches", False):
+            self._manifest_timer.start()
+        else:
+            self._manifest_timer.stop()
+
+    def _check_manifest(self):
+        """Fetch the manifest in the background; a change is a new publish."""
+        if self._report_store is None or self._parquet_url is None:
+            return
+        for pending in (self._manifest_task, self._manifest_check_task, self._reopen_task):
+            if pending is not None and not self._task_finished(pending):
+                return
+        task = CheckManifestTask(self._parquet_url)
+        task.finishedOk.connect(lambda text, t=task: self._on_manifest_checked(t, text))
+        task.failed.connect(lambda message, t=task: self._on_manifest_check_failed(t, message))
+        self._manifest_check_task = task
+        QgsApplication.taskManager().addTask(task)
+
+    def _on_manifest_check_failed(self, task, message):
+        if task is not self._manifest_check_task:
+            return
+        self._manifest_check_task = None
+        # Logged only: the next tick tries again, and a network that cannot
+        # fetch 1.5 KB of manifest cannot fetch the parquet either, so the
+        # panel's own reads will say so.
+        QgsMessageLog.logMessage(
+            "Could not re-read the parquet manifest: %s" % message, "EQuIS", Qgis.Info)
+
+    def _on_manifest_checked(self, task, text):
+        if task is not self._manifest_check_task:
+            return
+        self._manifest_check_task = None
+        store = self._report_store
+        if store is None or store.is_current(text):
+            return
+        # A new publish. Its files are already in place (the manifest goes
+        # up last), so this connection reads them live from now on, and a
+        # reopen in the background replaces it.
+        store.stop_caching()
+        self._manifest_timer.stop()
+        QgsMessageLog.logMessage(
+            "The parquet source was republished; reopening %s" % self._parquet_url,
+            "EQuIS", Qgis.Info)
+        self._set_status("The parquet source has a new publish; reloading it "
+                         "in the background…")
+        url = self._parquet_url
+        task = FetchManifestTask(url)
+        task.finishedOk.connect(lambda _r, t=task, u=url: self._on_reopened(t, u))
+        task.failed.connect(lambda message, t=task: self._on_reopen_failed(t, message))
+        self._reopen_task = task
+        QgsApplication.taskManager().addTask(task)
+
+    def _on_reopen_failed(self, task, message):
+        if task is not self._reopen_task:
+            return
+        self._reopen_task = None
+        # The old store reads live now (stop_caching), so its answers are
+        # the new files'; its lists and counts are the old publish's. Said,
+        # and the timer tries again.
+        self._set_status(
+            "The parquet source has a new publish, and reloading it failed: %s. "
+            "The chemical list and counts describe the previous publish; "
+            "reopen the source to load the new one." % message,
+            Qgis.MessageLevel.Warning)
+        self._manifest_timer.start()
+
+    def _on_reopened(self, task, url):
+        store = getattr(task, "store", None)
+        if task is not self._reopen_task or url != self._parquet_url:
+            if store is not None:
+                store.close()
+            return
+        self._reopen_task = None
+        if store is None:
+            self._on_reopen_failed(task, "the parquet did not open")
+            return
+        self._reopened_store = store
+        self._swap_reopened()
+
+    def _store_in_use(self):
+        """Whether something is reading the current store off this thread."""
+        linked = self._linked
+        return self._is_busy() or (linked is not None and linked.busy)
+
+    def _swap_reopened(self):
+        """Put the reopened store in place of the old one, keeping the
+        user's choices: chemicals, matrix, filters, and the layers drawn.
+
+        Not _on_manifest_ready, which starts the panel over: a reload the
+        user did not ask for must not clear their filters or move the map.
+        Waits for a worker using the old store's connection to finish,
+        because closing a connection under a running query is a crash.
+        """
+        store = self._reopened_store
+        if store is None:
+            return
+        if self._report_store is None or self._parquet_url is None:
+            self._reopened_store = None
+            store.close()
+            return
+        if self._store_in_use():
+            QTimer.singleShot(1000, self._swap_reopened)
+            return
+        self._reopened_store = None
+        old = self._report_store
+        was = (getattr(old, "manifest", None) or {}).get("rows")
+        self._report_store = store
+        old.close()
+        self._apply_row_scope()
+        rows = store.analytes()
+        self._offered_analytes = [(row.get("cas_rn") or "", row.get("chemical") or "")
+                                  for row in rows]
+        # set_analytes keeps what stays selected; the counts are the new ones.
+        self.selection_panel.set_analytes(
+            self._offered_analytes,
+            {(row.get("cas_rn") or ""): row.get("count") or 0 for row in rows})
+        self.selection_panel.set_matrices(
+            [(row["matrix"], row["matrix"]) for row in store.matrices()])
+        self._sync_analysis_filters(store)
+        self._refresh_parquet_locations(store)
+        self._schedule_analysis_warmup()
+        self._update_active_label()
+        self._watch_manifest(store)
+        now = store.count()
+        message = ("The parquet source was republished; the panel now reads the "
+                   "new publish (%s rows%s). Layers already on the map were drawn "
+                   "from the previous one."
+                   % (format(now, ",d"),
+                      ", was %s" % format(was, ",d") if isinstance(was, int) else ""))
+        self._set_status(message, Qgis.MessageLevel.Info)
+        self.iface.messageBar().pushMessage("EQuIS", message, level=Qgis.MessageLevel.Info,
+                                            duration=10)
+        QgsMessageLog.logMessage(message, "EQuIS", Qgis.Info)
 
     # ------------------------------------------------------ linked views
 

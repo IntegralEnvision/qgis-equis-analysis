@@ -500,6 +500,13 @@ class LinkedViewsController(object):
     def overlay_visible(self):
         return self.overlay is not None and self.overlay.visible
 
+    @property
+    def busy(self):
+        """Whether an AnalysisTask is reading the store, on its cursor, off
+        the main thread. The panel waits for it before closing that store
+        (a reload after a new publish, dialog._swap_reopened)."""
+        return self._task is not None
+
     def sink(self):
         """Take the view off the map. Returns it for the panel to re-seat."""
         views = self.views

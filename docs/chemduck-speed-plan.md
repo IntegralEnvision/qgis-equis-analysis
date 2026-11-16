@@ -484,8 +484,41 @@ warm-up:
     refresh, and reopens when it has changed;
   - or the publish never reuses a file name.
 - **Not measured: the real network.** A real Azure Blob round trip is not
-  30 ms, and DuckDB may overlap the HEADs differently. Nor whether the
-  panel's parquet source reads over http today.
+  30 ms, and DuckDB may overlap the HEADs differently.
+
+**Done 2026-11-15 in the plugin** (the panel reads parquet over http
+routinely). The names stay constant, so a session watches the manifest.
+- **`ReportStore.from_manifest` turns both caches on for http(s) sources
+  only.** A local path leaves them off.
+- **The panel re-reads `manifest.json` every 2 minutes**
+  (`MANIFEST_CHECK_MS`, `CheckManifestTask`), off the UI thread. On a
+  change, in order:
+  - `stop_caching()` makes the open store read live at once;
+  - the source is reopened in the background;
+  - the new store is swapped in once no analysis worker is using the old
+    one.
+- **The swap keeps the user's choices.** Chosen chemicals, filters and
+  the map extent all stay. The locations layer is updated in place when
+  the same locations carry new counts, and rebuilt, with its selection
+  restored, when locations change. The message bar says a new publish
+  was loaded, with the old and new row counts, and that layers already
+  drawn came from the previous one.
+- **Measured on a rewritten file:**
+  - with the caches still on, a cached session failed with "No magic
+    bytes found";
+  - after `stop_caching()`, the same connection read it correctly;
+  - a new database starts with empty caches.
+- **What the timer leaves open:** a click made between a publish and the
+  next check can read rewritten files. When it does, it fails with an
+  error rather than returning a plausible number.
+- **Tests:**
+  - `tools/test_parquet_source.py`: caches off for local and on for http;
+    a warm query sends no HEAD, while an uncached control does; a
+    republish is detected; reads are correct after `stop_caching`, and
+    the no-op mutation fails with "No magic bytes"; a reopen sees the new
+    publish.
+  - `tools/test_parquet_source_ui.py` (QGIS): the whole swap over a local
+    http server.
 
 **What is left for section 4:**
 1. **`ident`'s GROUP BY in a series**, 0.07 s. In a series a point

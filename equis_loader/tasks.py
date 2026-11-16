@@ -741,6 +741,32 @@ class FetchManifestTask(_BaseTask):
         return True
 
 
+class CheckManifestTask(_BaseTask):
+    """Fetch a published manifest's text, off the UI thread, to compare.
+
+    The panel's check for a new publish of an open http source: one GET of
+    ~1.5 KB, where a query without DuckDB's metadata caches sent 19 HEADs
+    (ReportStore.from_manifest). Off the UI thread because a bad network
+    hangs for the whole timeout, and this runs on a timer the user did
+    not ask for. The result is the text; the store decides what it means
+    (ReportStore.is_current).
+    """
+
+    def __init__(self, url, timeout=30):
+        super().__init__("Checking the published parquet for a new publish")
+        self.url = url
+        self.timeout = timeout
+
+    def run(self):
+        try:
+            from .store import ReportStore
+            self._result = ReportStore._fetch(
+                ReportStore._join(self.url, ReportStore.MANIFEST_NAME), self.timeout)
+        except Exception as exc:               # noqa: BLE001
+            return self._fail(str(exc))
+        return True
+
+
 class BuildStoreTask(_BaseTask):
     """Load a fetched report into a DuckDB file, off the UI thread.
 
