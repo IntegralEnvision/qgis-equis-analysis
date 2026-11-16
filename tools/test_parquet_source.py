@@ -361,6 +361,133 @@ try:
     finally:
         shutil.rmtree(moving_dir, ignore_errors=True)
 
+    # --- over http: metadata cached, and a new publish noticed ---------------
+    # Without DuckDB's metadata caches every query sent a HEAD per partition
+    # file (19 on Facility A, 0.6-0.9 s at 30 ms each, 2026-11-15). With them
+    # DuckDB stops noticing a rewrite, and the pipeline rewrites files in
+    # place: a cached session failed with "No magic bytes found". So the
+    # store caches only over http, the manifest says when to stop, and a
+    # store that stops reads the new files correctly.
+    import threading
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+    served = tempfile.mkdtemp(prefix="equis_http_")
+    # HEADs: what the caches remove. (A file this small is read whole by a
+    # GET on every query, cached or not; Facility A's real partitions sent
+    # nothing at all once warm.)
+    requests = {"n": 0}
+
+    class Ranged(BaseHTTPRequestHandler):
+        protocol_version = "HTTP/1.1"
+
+        def log_message(self, *args):
+            pass
+
+        def _file(self):
+            return os.path.join(served, *self.path.split("?")[0].lstrip("/").split("/"))
+
+        def _headers(self, size, first=None, last=None):
+            self.send_response(206 if first is not None else 200)
+            self.send_header("Accept-Ranges", "bytes")
+            self.send_header("Last-Modified",
+                             self.date_time_string(os.path.getmtime(self._file())))
+            if first is not None:
+                self.send_header("Content-Range", "bytes %d-%d/%d" % (first, last, size))
+            self.send_header("Content-Length",
+                             str(size if first is None else last - first + 1))
+            self.end_headers()
+
+        def do_HEAD(self):
+            requests["n"] += 1
+            self._headers(os.path.getsize(self._file()))
+
+        def do_GET(self):
+            path = self._file()
+            size = os.path.getsize(path)
+            wanted = self.headers.get("Range")
+            if not wanted:
+                self._headers(size)
+                with open(path, "rb") as handle:
+                    self.wfile.write(handle.read())
+                return
+            first, last = wanted.split("=")[1].split("-")
+            first = int(first) if first else size - int(last)
+            last = min(int(last), size - 1) if (last and wanted.split("=")[1][0] != "-") else size - 1
+            self._headers(size, first, last)
+            with open(path, "rb") as handle:
+                handle.seek(first)
+                self.wfile.write(handle.read(last - first + 1))
+
+    def publish(rows):
+        part = os.path.join(served, "matrix=WS", "fraction=N")
+        os.makedirs(part, exist_ok=True)
+        write_rows(os.path.join(part, "part-0000.parquet"), rows)
+        with open(os.path.join(served, "manifest.json"), "w", encoding="utf-8") as handle:
+            json.dump({"version": 1, "rows": len(rows), "partitions": [
+                {"path": "matrix=WS/fraction=N/part-0000.parquet", "rows": len(rows)}]},
+                handle)
+
+    def settings(store):
+        return dict(store.con.execute(
+            "SELECT name, value FROM duckdb_settings() WHERE name IN (%s)"
+            % ", ".join("'%s'" % s for s in ReportStore.REMOTE_CACHE_SETTINGS)).fetchall())
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Ranged)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    url = "http://127.0.0.1:%d" % server.server_address[1]
+    try:
+        publish([("MW-1", "Arsenic", 1.0, "4/24/2025 12:00:00 PM")])
+        local = ReportStore.from_manifest(served)
+        check("a local manifest leaves DuckDB's metadata caches off",
+              not local.remote_caches
+              and set(settings(local).values()) == {"false"}, str(settings(local)))
+        local.close()
+
+        store = ReportStore.from_manifest(url)
+        check("an http manifest turns both metadata caches on",
+              store.remote_caches and set(settings(store).values()) == {"true"},
+              str(settings(store)))
+        store.count()
+        requests["n"] = 0
+        warm = store.count()
+        check("a warm query over http asks after no file", requests["n"] == 0 and warm == 1,
+              "%d HEAD(s)" % requests["n"])
+        # The control: the same files without the caches do ask.
+        control = ReportStore.from_parquet(store.files)
+        control.count()
+        requests["n"] = 0
+        control.count()
+        check("...where an uncached store asks on every query", requests["n"] > 0,
+              "%d HEAD(s)" % requests["n"])
+        control.close()
+        text = ReportStore._fetch(ReportStore._join(url, ReportStore.MANIFEST_NAME))
+        check("the manifest as opened is current", store.is_current(text))
+
+        # A new publish: the partition rewritten in place, the manifest last.
+        import time as _t
+        _t.sleep(1.1)
+        publish([("MW-1", "Arsenic", 1.0, "4/24/2025 12:00:00 PM"),
+                 ("MW-2", "Lead", 2.0, "4/24/2025 12:00:00 PM"),
+                 ("MW-3", "Lead", 3.0, "4/24/2025 12:00:00 PM")])
+        text = ReportStore._fetch(ReportStore._join(url, ReportStore.MANIFEST_NAME))
+        check("a republished manifest is not current", not store.is_current(text))
+        store.stop_caching()
+        try:
+            after = store.count()
+        except Exception as exc:                # noqa: BLE001
+            after = "%s: %s" % (type(exc).__name__, str(exc)[:80])
+        check("after stop_caching the old store reads the new file",
+              after == 3 and not store.remote_caches
+              and set(settings(store).values()) == {"false"}, str(after))
+        store.close()
+        fresh = ReportStore.from_manifest(url)
+        check("a reopened store reads the new publish, caches on again",
+              fresh.count() == 3 and fresh.remote_caches and fresh.is_current(text))
+        fresh.close()
+    finally:
+        server.shutdown()
+        shutil.rmtree(served, ignore_errors=True)
+
     # --- reading staging ON PURPOSE is not an error --------------------------
     # Every matched file is an intermediate, so nothing is double-counted.
     store = ReportStore.from_parquet(

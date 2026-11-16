@@ -364,15 +364,168 @@ PR #15 as `a06ad5a`, now vendored).
   folder's own SQL, so a folder published before this keeps working, and
   gains pruning when republished.
 
-**What is left for section 4, in order of expected gain:**
-1. **The `withpol` stage's per-row expressions** (ChemDuck). The
-   `results` view computes every column of every row, 0.3 s for 51,030
-   rows. Columns a stage doesn't read could be left uncomputed.
-2. **Planning** (ChemDuck). The plan has 232-236 operators; the optimizer
-   cost is mostly the expression rewriter and join ordering. The six
-   `chemduck_settings` subqueries in `point_scope`'s scope are the next
-   candidates, as `matrix_combine_class` already found for
-   `matrix_classes`.
+**Unread columns and planning, 2026-11-15** (ChemDuck `cf4241b`, branch
+`consumer-speed-2`; local, not pushed). The 10-23 copy, 2 threads, plain
+Python 3.14.6, DuckDB 1.5.5, the machine at 10-70% load.
+
+**The premise was wrong.** The `results` view's per-row expressions are
+not the 0.3 s the item above assumed. Forced one column at a time over
+Arsenic MWS/T (51,030 rows), none costs more than 0.05 s. The unit-plan
+lookup, which most unit and limit columns share, is computed once, and
+projection pushdown already drops the columns no stage reads. Materialising
+`point_scope`'s whole output costs 0.08 s over counting it.
+
+**Where the sparkline call's time was:**
+- **`ev_agg`'s GROUP BY: 0.26 s.** Every point computed both winners,
+  `w_recent` and `w_max` (each an `arg_min` over a wide struct), plus the
+  `attrs` minimums, whatever the call read.
+- **`ident`'s GROUP BY: 0.23 s** on a materialised `withpol`:
+  - 0.11 s aggregating seven policy columns per point, three of them
+    structs. One integer key costs 0.007 s.
+  - 0.08 s sorting and joining the `matrices` and `unit_source` lists
+    per point, though every point there has one value.
+
+**Changed** (rules unchanged):
+- **The policy travels as a key.** `withpol` carries it, and `ident`
+  joins the policy's columns back once per point. A location has one
+  project, so a point has one policy.
+- **The lists are answered from `min = max`** where a point has one
+  value. The list functions run only where the values differ.
+- **`ev_agg` computes only what the call reads:** `w_recent` for
+  most_recent, `w_max` for maximum and statistic, `attrs` for statistic.
+- **A series point is built directly.** Under `p_each_sample` the sample
+  is in the point's key, and a sample has one date and time, so every
+  point has exactly one event. `ev_agg` builds those rows as the GROUP BY
+  would build a one-row group, without grouping.
+
+**Against `a06ad5a`**, 5 alternated rounds, medians, identical rows on all
+16 calls. The calls covered four policies, three event rules, series,
+counts, a rollup, `p_matrices`, flagged units, `sample_results` and
+`aggregate_results`. Floats were compared to 1e-12 relative: the published
+code's means already differ in the 16th digit from run to run, because of
+summation order.
+
+| Call | Old | New | New / old, wall (CPU) |
+| --- | --- | --- | --- |
+| Sparklines, Arsenic MWS/T | 1.415 s | 1.058 s | 0.75 (0.66) |
+| Series, Iron WS/D, half-DL (17,507 samples) | 0.543 s | 0.483 s | 0.89 (0.80) |
+| One location's series, Arsenic WS/T | 0.164 s | 0.153 s | 0.93 (0.80) |
+| Maps, footers, rollup, `sample_results` | | | 0.86-1.09 |
+
+- **An earlier 3-round run put the sparklines at 0.65x** (1.235 to
+  0.799 s), so read the gain as 0.65-0.75x.
+- **The maps did not slow down.** Their wall ratios ran 0.86-1.09 in
+  both runs. DuckDB's profile, alternated 11 times, found:
+  - planning differs by -0.009 to +0.011 s, both ways;
+  - operator CPU fell 0.02-0.05 s;
+  - latency was equal or lower.
+- **Facility A parity: PASS** (`test_chemduck_parity.py`, 12 analytes,
+  767 s), with `cf4241b` vendored temporarily. Its tallies match the
+  `e7139bd`, `1440b79` and `e5355a1` runs count for count. The parity
+  fixture, `test_chemduck_vendor` and ChemDuck's five suites: green.
+
+**Planning, decomposed.** It costs about 0.1 s of every call, out of 0.15-0.2 s for
+a one-location series:
+
+| Layer | Binding | Optimisers | Latency |
+| --- | --- | --- | --- |
+| `results` view | 0.020 s | 0.009 s | 0.038 s |
+| `point_scope` | 0.027 s | 0.023 s | 0.080 s |
+| `point_series`, one location | 0.052 s | 0.048 s | 0.19 s |
+
+The largest optimiser pass, the expression rewriter, takes 0.011-0.014 s.
+About 0.045 s of a one-location series is not attributed by the profile,
+and one thread against two makes no difference to it. Each candidate,
+measured:
+- **The six `chemduck_settings` subqueries:** nothing. Made constants,
+  `aggregate_points` planned in the same time.
+- **The unit-plan MAP in the view:** 0.01 s of bind on every query.
+  Keyed on one string instead of a list of four, it bound slower (0.032
+  against 0.025 s), so it stays.
+- **Kaplan-Meier's five window CTEs:** about 0.05 s of every call
+  (0.03 s of it planning), KM or not. A list-based KM would remove them,
+  but it is quadratic in a point's events, about 1,000 at Facility A's
+  monitoring wells. That trade is bad for a statistic map, so it stays.
+- **`parquet_metadata_cache`, on local disk:** it cuts binding the view
+  by 0.013 s, and it does see a file rewritten in place, even within a
+  second. But no whole call moved measurably (0.90-1.15x, 5 rounds).
+  Local disk is the case where it matters least; see http below.
+
+**Over http, the metadata caches are most of a call** (2026-11-15). Facility A's
+files were served from this machine by a range-capable server that adds
+30 ms to every request (scratchpad `range_server.py`, `http_bench.py`).
+DuckDB's `httpfs`, 2 threads, ChemDuck `a06ad5a`; medians of 3 after a
+warm-up:
+
+| | No caches | `parquet_metadata_cache` | plus `enable_http_metadata_cache` |
+| --- | --- | --- | --- |
+| Open (`open_consumer`) | 25.9 s, 551 HEAD | 18.4 s, 551 HEAD | 4.3 s, 19 HEAD |
+| Count, one file | 0.94 s | 0.47 s | 0.08 s |
+| Map, Arsenic WS/T | 1.89 s | 1.43 s | 0.70 s |
+| One location's series | 0.99 s | 1.10 s | 0.43 s |
+| Footer | 0.93 s | 0.77 s | 0.25 s |
+| Requests per warm call | 19 HEAD | 19 HEAD | none |
+
+- **Every call asks after every file.** Without caches, each call sends one
+  HEAD per partition file, 19 of them, even when partition pruning reads
+  one. No data was re-fetched once warm: DuckDB's external file cache is
+  on by default.
+- **The parquet cache alone halves the cost.** It still sends the 19 HEADs,
+  which check whether each file has changed.
+- **Both caches send nothing once warm.** Calls come close to their local
+  times, and the open takes a sixth of the time.
+- **But then nothing notices a rewrite.** With `enable_http_metadata_cache`
+  on, DuckDB stops asking whether a file changed. The pipeline overwrites
+  `part-0000.parquet` in place, so a session open across a nightly publish
+  could serve the old data, or an old footer with new bytes. A stale map
+  that looks live is the failure CLAUDE.md engineers against. Something
+  else must answer "has this changed?" before the cache is turned on:
+  - either the plugin re-reads `manifest.json` (one request) on each
+    refresh, and reopens when it has changed;
+  - or the publish never reuses a file name.
+- **Not measured: the real network.** A real Azure Blob round trip is not
+  30 ms, and DuckDB may overlap the HEADs differently.
+
+**Done 2026-11-15 in the plugin** (the panel reads parquet over http
+routinely). The names stay constant, so a session watches the manifest.
+- **`ReportStore.from_manifest` turns both caches on for http(s) sources
+  only.** A local path leaves them off.
+- **The panel re-reads `manifest.json` every 2 minutes**
+  (`MANIFEST_CHECK_MS`, `CheckManifestTask`), off the UI thread. On a
+  change, in order:
+  - `stop_caching()` makes the open store read live at once;
+  - the source is reopened in the background;
+  - the new store is swapped in once no analysis worker is using the old
+    one.
+- **The swap keeps the user's choices.** Chosen chemicals, filters and
+  the map extent all stay. The locations layer is updated in place when
+  the same locations carry new counts, and rebuilt, with its selection
+  restored, when locations change. The message bar says a new publish
+  was loaded, with the old and new row counts, and that layers already
+  drawn came from the previous one.
+- **Measured on a rewritten file:**
+  - with the caches still on, a cached session failed with "No magic
+    bytes found";
+  - after `stop_caching()`, the same connection read it correctly;
+  - a new database starts with empty caches.
+- **What the timer leaves open:** a click made between a publish and the
+  next check can read rewritten files. When it does, it fails with an
+  error rather than returning a plausible number.
+- **Tests:**
+  - `tools/test_parquet_source.py`: caches off for local and on for http;
+    a warm query sends no HEAD, while an uncached control does; a
+    republish is detected; reads are correct after `stop_caching`, and
+    the no-op mutation fails with "No magic bytes"; a reopen sees the new
+    publish.
+  - `tools/test_parquet_source_ui.py` (QGIS): the whole swap over a local
+    http server.
+
+**What is left for section 4:**
+1. **`ident`'s GROUP BY in a series**, 0.07 s. In a series a point
+   usually has one result, and `ev_n` already knows which points have
+   one. Expected gain about 0.03-0.04 s, after the cost of the join.
+2. **A quiet-machine re-measure** of every call, before calling any of
+   them inside or over budget.
 
 ## 5. If it was the pan
 

@@ -11,6 +11,7 @@ python tools/test_parsing.py          # parsing, paging, aggregation, cache
 python tools/test_tasks.py            # cache decisions
 python tools/test_state.py            # the panel's state machine
 python tools/test_store_parity.py     # ReportTable vs ReportStore (needs duckdb)
+python tools/test_parquet_source.py   # a parquet source: rows once, URLs, http caches vs a new publish
 python tools/test_overlay_payload.py  # overlay data shaping
 python tools/measure_pivot.py         # what a pivot must decide, on the real parquet
 python tools/test_pivot.py            # one row per sample: the pivot's rules
@@ -209,6 +210,15 @@ change something they depend on.
 - **Temporal filtering works inside an envelope**: ~100,000–150,000 results
   per layer with a few thousand visible per window. The scan is paid over the
   whole layer every frame.
+- **Over http, DuckDB's metadata caches are most of a query, and they are
+  safe only because the manifest is watched.** Uncached, every query sent a
+  HEAD per partition file (19 on Facility A; 0.94 s against 0.08 s for a
+  count at 30 ms a request, 2026-11-15). Cached, DuckDB never notices a
+  rewrite, and the pipeline rewrites `part-0000.parquet` in place: a cached
+  session read the new bytes with the old metadata and failed. The panel
+  re-reads `manifest.json` on a timer and reopens on a change
+  (`ReportStore.from_manifest`, `dialog._check_manifest`). Turning the
+  caches on anywhere else needs the same watch.
 
 ## Two habits this work kept needing
 
