@@ -446,10 +446,46 @@ measured:
   (0.03 s of it planning), KM or not. A list-based KM would remove them,
   but it is quadratic in a point's events, about 1,000 at Facility A's
   monitoring wells. That trade is bad for a statistic map, so it stays.
-- **`parquet_metadata_cache`:** it cuts binding the view by 0.013 s, and
-  it does see a file rewritten in place, even within a second. But no
-  whole call moved measurably (0.90-1.15x, 5 rounds), so it is not
-  recommended on this evidence.
+- **`parquet_metadata_cache`, on local disk:** it cuts binding the view
+  by 0.013 s, and it does see a file rewritten in place, even within a
+  second. But no whole call moved measurably (0.90-1.15x, 5 rounds).
+  Local disk is the case where it matters least; see http below.
+
+**Over http, the metadata caches are most of a call** (2026-11-15). Facility A's
+files were served from this machine by a range-capable server that adds
+30 ms to every request (scratchpad `range_server.py`, `http_bench.py`).
+DuckDB's `httpfs`, 2 threads, ChemDuck `a06ad5a`; medians of 3 after a
+warm-up:
+
+| | No caches | `parquet_metadata_cache` | plus `enable_http_metadata_cache` |
+| --- | --- | --- | --- |
+| Open (`open_consumer`) | 25.9 s, 551 HEAD | 18.4 s, 551 HEAD | 4.3 s, 19 HEAD |
+| Count, one file | 0.94 s | 0.47 s | 0.08 s |
+| Map, Arsenic WS/T | 1.89 s | 1.43 s | 0.70 s |
+| One location's series | 0.99 s | 1.10 s | 0.43 s |
+| Footer | 0.93 s | 0.77 s | 0.25 s |
+| Requests per warm call | 19 HEAD | 19 HEAD | none |
+
+- **Every call asks after every file.** Without caches, each call sends one
+  HEAD per partition file, 19 of them, even when partition pruning reads
+  one. No data was re-fetched once warm: DuckDB's external file cache is
+  on by default.
+- **The parquet cache alone halves the cost.** It still sends the 19 HEADs,
+  which check whether each file has changed.
+- **Both caches send nothing once warm.** Calls come close to their local
+  times, and the open takes a sixth of the time.
+- **But then nothing notices a rewrite.** With `enable_http_metadata_cache`
+  on, DuckDB stops asking whether a file changed. The pipeline overwrites
+  `part-0000.parquet` in place, so a session open across a nightly publish
+  could serve the old data, or an old footer with new bytes. A stale map
+  that looks live is the failure CLAUDE.md engineers against. Something
+  else must answer "has this changed?" before the cache is turned on:
+  - either the plugin re-reads `manifest.json` (one request) on each
+    refresh, and reopens when it has changed;
+  - or the publish never reuses a file name.
+- **Not measured: the real network.** A real Azure Blob round trip is not
+  30 ms, and DuckDB may overlap the HEADs differently. Nor whether the
+  panel's parquet source reads over http today.
 
 **What is left for section 4:**
 1. **`ident`'s GROUP BY in a series**, 0.07 s. In a series a point
