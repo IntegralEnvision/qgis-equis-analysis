@@ -365,5 +365,12 @@ if FAILURES:
     print("%d FAILED" % len(FAILURES))
     for label in FAILURES:
         print("  - " + label)
-    sys.exit(1)
-print("ALL LAYER FIELD TESTS PASSED")
+else:
+    print("ALL LAYER FIELD TESTS PASSED")
+# Shut QGIS down before the interpreter does. Falling off the end left
+# QgsApplication to Python's shutdown, which segfaulted under the pixi QGIS
+# 4.2.3 build (Linux, 2026-11-21) after every check had passed: exit code
+# 139, so a runner read a green test as a crash. test_offline.py already
+# ends this way.
+app.exitQgis()
+sys.exit(1 if FAILURES else 0)
