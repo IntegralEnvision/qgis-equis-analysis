@@ -444,6 +444,16 @@ WITH params AS (
     filters_ignored(p_matrix, p_fraction, p_sample_types, p_method_class,
                     reportable_scope(p_reportable_only)) AS ignored
 ),
+-- The policies, each with a small key. A row carries the key, not the
+-- policy's columns: three of them are structs, and carrying seven columns
+-- through withpol and aggregating them per point in ident took 0.11 s of
+-- ident's 0.23 s in point_series for Arsenic MWS/T at Facility A (51,030
+-- points; the key alone, 0.007 s). ident joins the columns back once per
+-- point. Numbered in a fixed order, so every reference agrees on the key.
+pols AS (
+    SELECT row_number() OVER (ORDER BY p.name, p.version) AS pid, p.*
+    FROM v_nd_policies p
+),
 filtered AS (
     SELECT
         v.* EXCLUDE (project), params.um,
@@ -467,9 +477,8 @@ withpol AS (
              ELSE COALESCE(f.sample_datetime, CAST(f.sample_date AS TIMESTAMP))
         END AS ev_key,
         p.event_grain = 'timestamp' AND f.sample_datetime IS NOT NULL AS has_time,
-        p.name || '@' || p.version AS nd_policy,
-        p.display_factor, p.across_nd_limit, p.reruns_nd_limit,
-        p.r_reruns, p.r_same_day, p.r_over_time,
+        -- the policy's key; of its columns, only what stage 1 reads per row
+        p.pid, p.display_factor, p.reruns_nd_limit, p.r_reruns,
         CASE p.limit_basis
             WHEN 'source_chain' THEN f.detection_limit
             WHEN 'reporting' THEN f.reporting_limit
@@ -477,10 +486,9 @@ withpol AS (
             ELSE f.quantitation_limit
         END AS lim,
         CASE WHEN p.limit_basis = 'source_chain' THEN f.limit_source ELSE p.limit_basis END AS lim_source,
-        CASE WHEN p.limit_basis = 'source_chain' THEN f.limit_type ELSE p.limit_basis END AS lim_type,
-        p.event_grain
+        CASE WHEN p.limit_basis = 'source_chain' THEN f.limit_type ELSE p.limit_basis END AS lim_type
     FROM filtered f
-    LEFT JOIN v_nd_policies p ON p.name = f.pol.name AND p.version = COALESCE(f.pol.version, p.latest_version)
+    LEFT JOIN pols p ON p.name = f.pol.name AND p.version = COALESCE(f.pol.version, p.latest_version)
     WHERE CASE
         WHEN p.name IS NULL THEN CAST(error('aggregate_points: no non-detect policy '
             || f.pol.name || COALESCE(' version ' || f.pol.version, '')
@@ -497,37 +505,55 @@ unit_vars AS (
     FROM units_by_variable('withpol', 'aggregate_points')
 ),
 -- What is constant per measurement identity, once: its fields, its policy,
--- its units and its unknown detect statuses.
+-- its units and its unknown detect statuses. The policy is one per point (a
+-- location has one project), so the GROUP BY takes its key and the join
+-- after it its columns (pols).
 ident AS (
-    SELECT ikey,
-           any_value(location_id) AS location_id, any_value(x) AS x, any_value(y) AS y,
-           any_value(matrix) AS matrix, any_value(top_depth) AS top_depth,
-           any_value(bottom_depth) AS bottom_depth, any_value(position) AS position,
-           any_value(fraction) AS fraction,
-           any_value(meas_basis) AS meas_basis, any_value(analyte) AS analyte,
-           any_value(method_class) AS method_class,
-           any_value(nd_policy) AS nd_policy, any_value(display_factor) AS display_factor,
-           any_value(across_nd_limit) AS across_nd_limit,
-           any_value(r_reruns) AS r_reruns, any_value(r_same_day) AS r_same_day,
-           any_value(r_over_time) AS r_over_time,
-           any_value(event_grain) AS event_grain,
-           min(anl_sm_mb) AS anl_sm_mb, min(analyte_group) AS analyte_group,
-           min(cas_number) AS cas_number,
-           any_value(vkey) AS vkey,
-           -- A plain list, made distinct and sorted afterwards: DISTINCT and
-           -- ORDER BY inside an aggregate keep a sorted set per group, and
-           -- point_series has a group per sample (51,030 for Arsenic MWS/T
-           -- at Facility A). The NULL cases keep what the ordered aggregates
-           -- returned: a NULL matrix as the list's last element, and NULL,
-           -- not '', for a point with no unit_source.
-           list_concat(list_sort(list_distinct(list(src_matrix))),
-                       CASE WHEN count(src_matrix) < count(*) THEN [CAST(NULL AS VARCHAR)]
-                            ELSE CAST([] AS VARCHAR[]) END) AS matrices,
-           CASE WHEN count(unit_source) > 0
-                THEN array_to_string(list_sort(list_distinct(list(unit_source))), ', ')
-           END AS unit_source,
-           count(*) FILTER (WHERE detected IS NULL) AS n_unknown_detect
-    FROM withpol GROUP BY ikey
+    SELECT g.*,
+           p.name || '@' || p.version AS nd_policy, p.display_factor, p.across_nd_limit,
+           p.r_reruns, p.r_same_day, p.r_over_time, p.event_grain
+    FROM (
+        SELECT ikey,
+               any_value(location_id) AS location_id, any_value(x) AS x, any_value(y) AS y,
+               any_value(matrix) AS matrix, any_value(top_depth) AS top_depth,
+               any_value(bottom_depth) AS bottom_depth, any_value(position) AS position,
+               any_value(fraction) AS fraction,
+               any_value(meas_basis) AS meas_basis, any_value(analyte) AS analyte,
+               any_value(method_class) AS method_class,
+               any_value(pid) AS pid,
+               min(anl_sm_mb) AS anl_sm_mb, min(analyte_group) AS analyte_group,
+               min(cas_number) AS cas_number,
+               any_value(vkey) AS vkey,
+               -- A plain list, made distinct and sorted afterwards: DISTINCT
+               -- and ORDER BY inside an aggregate keep a sorted set per
+               -- group, and point_series has a group per sample (51,030 for
+               -- Arsenic MWS/T at Facility A). The NULL cases keep what the
+               -- ordered aggregates returned: a NULL matrix as the list's
+               -- last element, and NULL, not '', for a point with no
+               -- unit_source.
+               --
+               -- A point with one value of each is answered from min = max,
+               -- and the list functions run only where they differ: sorting
+               -- and joining a list per group cost 0.08 s of ident at
+               -- Facility A, where every one of those 51,030 points has one
+               -- unit_source. The list aggregates themselves are cheap.
+               CASE
+                   WHEN count(src_matrix) = count(*) AND min(src_matrix) = max(src_matrix)
+                       THEN [min(src_matrix)]
+                   WHEN count(src_matrix) = 0 THEN [CAST(NULL AS VARCHAR)]
+                   ELSE list_concat(list_sort(list_distinct(list(src_matrix))),
+                                    CASE WHEN count(src_matrix) < count(*) THEN [CAST(NULL AS VARCHAR)]
+                                         ELSE CAST([] AS VARCHAR[]) END)
+               END AS matrices,
+               CASE
+                   WHEN count(unit_source) = 0 THEN NULL
+                   WHEN min(unit_source) = max(unit_source) THEN min(unit_source)
+                   ELSE array_to_string(list_sort(list_distinct(list(unit_source))), ', ')
+               END AS unit_source,
+               count(*) FILTER (WHERE detected IS NULL) AS n_unknown_detect
+        FROM withpol GROUP BY ikey
+    ) g
+    JOIN pols p ON p.pid = g.pid
 ),
 -- How many results each event holds. A sample with no re-run, in an event
 -- of one sample, gives the next two stages nothing to choose among or
@@ -679,24 +705,60 @@ ev_agg AS (
            count(*) FILTER (WHERE v.detected) AS n_detects,
            min(sample_date) AS first_sample_date,
            max(sample_date) AS last_sample_date,
+           -- Each winner and the attrs only for the calls that read them:
+           -- w_recent for most_recent, w_max for maximum and statistic (its
+           -- value is the statistic's winner), attrs for statistic. Each is
+           -- an aggregate over a wide struct that cost every group whether
+           -- read or not: this GROUP BY took 0.26 s of point_series for
+           -- Arsenic MWS/T at Facility A (51,030 groups of one event).
+           -- ea is the call's, so a FILTER leaves an aggregate no rows.
+           --
            -- the latest event (an unknown status last); ties by rank_across
            arg_min(struct_pack(v := v, sample_date := sample_date,
                                sample_datetime := CASE WHEN has_time THEN ev_key END,
                                tie := untimed_tie),
                    struct_pack(u := v.detected IS NULL,
                                t := COALESCE(-epoch(ev_key), CAST('Infinity' AS DOUBLE)),
-                               k := k)) AS w_recent,
+                               k := k)) FILTER (WHERE ea = 'most_recent') AS w_recent,
            -- the first event by rank_across
            arg_min(struct_pack(v := v, sample_date := sample_date,
                                sample_datetime := CASE WHEN has_time THEN ev_key END,
-                               tie := untimed_tie), k) AS w_max,
+                               tie := untimed_tie), k) FILTER (WHERE ea <> 'most_recent') AS w_max,
            count(*) FILTER (WHERE ea = 'statistic') AS n_items,
            list(struct_pack(inp := inp, v := v))
                FILTER (WHERE ea = 'statistic' AND r_over_time.est NOT IN ('select', 'refuse')) AS items,
-           struct_pack(depth := min(v.depth), units := min(v.units),
-                                   std_units := min(v.std_units)) AS attrs
+           struct_pack(depth := min(v.depth) FILTER (WHERE ea = 'statistic'),
+                       units := min(v.units) FILTER (WHERE ea = 'statistic'),
+                       std_units := min(v.std_units) FILTER (WHERE ea = 'statistic')) AS attrs
     FROM ev
+    WHERE NOT p_each_sample
     GROUP BY ikey
+    UNION ALL
+    -- p_each_sample: the sample is in the point's key, and a sample has one
+    -- date and time, so every point has exactly one event. What the GROUP BY
+    -- above makes of one row, without it: it took 0.19 s of point_series
+    -- for Arsenic MWS/T at Facility A, 51,030 groups of one row each.
+    SELECT ikey, ea,
+           CAST(1 AS BIGINT) AS n_events,
+           CAST(CASE WHEN v.detected THEN 1 ELSE 0 END AS BIGINT) AS n_detects,
+           sample_date AS first_sample_date,
+           sample_date AS last_sample_date,
+           CASE WHEN ea = 'most_recent' THEN
+               struct_pack(v := v, sample_date := sample_date,
+                           sample_datetime := CASE WHEN has_time THEN ev_key END,
+                           tie := untimed_tie) END AS w_recent,
+           CASE WHEN ea <> 'most_recent' THEN
+               struct_pack(v := v, sample_date := sample_date,
+                           sample_datetime := CASE WHEN has_time THEN ev_key END,
+                           tie := untimed_tie) END AS w_max,
+           CAST(CASE WHEN ea = 'statistic' THEN 1 ELSE 0 END AS BIGINT) AS n_items,
+           CASE WHEN ea = 'statistic' AND r_over_time.est NOT IN ('select', 'refuse')
+                THEN [struct_pack(inp := inp, v := v)] END AS items,
+           struct_pack(depth := CASE WHEN ea = 'statistic' THEN v.depth END,
+                       units := CASE WHEN ea = 'statistic' THEN v.units END,
+                       std_units := CASE WHEN ea = 'statistic' THEN v.std_units END) AS attrs
+    FROM ev
+    WHERE p_each_sample
 ),
 ev_parts AS (
     SELECT *,
