@@ -14,9 +14,20 @@ everything. Three questions:
 Runs anywhere - a plain interpreter or the QGIS Python console:
 
     python tools/test_phase0.py
+    python tools/test_phase0.py --require-bundle
     exec(open(r"C:\\path\\to\\equis_qgis\\tools\\test_phase0.py").read())
 
-Build the bundle first with tools/vendor_deps.py.
+TWO SUBSTRATES, as the plugin has. With a bundle for this interpreter
+(tools/vendor_deps.py - the Windows release zip), question 1 is asked as
+written: duckdb and arro3 must import from it. Without one, the plugin does
+not fail: store.duckdb_module() imports the host's duckdb, and
+bridge_payload.IPC_WRITERS serializes with whichever Arrow runtime is there.
+A conda-forge/pixi QGIS on Linux supplies its own duckdb (2.0.0 on the pixi
+QGIS 4.2.3 build, Python 3.13, 2026-11-21), so a cp313 bundle is neither built
+nor wanted, and this test used to report that working install as BLOCKED.
+It now checks the host path instead, and says the bundle checks did not run
+rather than counting them as passed. --require-bundle restores the old rule,
+for checking a bundled zip.
 """
 
 import os
@@ -41,7 +52,13 @@ def record(label, ok, detail=""):
     print("[%s] %s%s" % (mark, label, (" - " + detail) if detail else ""))
 
 
-def main():
+def _build_hint():
+    print("")
+    print("  Build it:  python tools/vendor_deps.py --target local")
+    print("  For a different QGIS:  --target win|mac|linux --python 312")
+
+
+def main(require_bundle=False):
     from equis_loader import vendor
 
     env = vendor.describe_environment()
@@ -55,28 +72,39 @@ def main():
     print("")
 
     state = vendor.check()
-    record("bundle present for this interpreter", state["bundle_present"],
-           state["bundle_path"])
-    if not state["bundle_present"]:
-        print("")
-        print("  Build it:  python tools/vendor_deps.py --target local")
-        print("  For a different QGIS:  --target win|mac|linux --python 312")
+    bundled = state["bundle_present"]
+    if bundled:
+        record("bundle present for this interpreter", True,
+               state["bundle_path"])
+        for name, info in state["modules"].items():
+            if not info["ok"]:
+                record("import %s" % name, False, info["error"])
+                continue
+            # A system-wide copy answering instead of ours would make the
+            # bundle look like it worked when it had done nothing.
+            record("import %s" % name, True,
+                   "%s%s" % (info["version"], "" if info["from_bundle"]
+                             else "  (NOT from bundle!)"))
+            if not info["from_bundle"]:
+                record("%s came from the bundle" % name, False, info["path"])
+        if not state["ok"]:
+            return 1
+    elif require_bundle:
+        record("bundle present for this interpreter", False,
+               state["bundle_path"])
+        _build_hint()
         return 1
-
-    for name, info in state["modules"].items():
-        if not info["ok"]:
-            record("import %s" % name, False, info["error"])
-            continue
-        # A system-wide copy answering instead of ours would make the bundle
-        # look like it worked when it had done nothing.
-        record("import %s" % name, True,
-               "%s%s" % (info["version"],
-                         "" if info["from_bundle"] else "  (NOT from bundle!)"))
-        if not info["from_bundle"]:
-            record("%s came from the bundle" % name, False, info["path"])
-
-    if not state["ok"]:
-        return 1
+    else:
+        # INFO, not PASS: nothing about a bundle was verified.
+        record("bundle present for this interpreter", None,
+               "none - checking the host's own duckdb, as the plugin does")
+        duck = state["modules"]["duckdb"]
+        if not duck["ok"]:
+            record("import duckdb from the host", False, duck["error"])
+            _build_hint()
+            return 1
+        record("import duckdb from the host", True,
+               "%s  %s" % (duck["version"], duck["path"]))
 
     # Snapshot before any of our own Arrow work. The claim being protected is
     # "OUR path does not need pyarrow", not "pyarrow is absent from this
@@ -86,8 +114,6 @@ def main():
     pyarrow_before = "pyarrow" in sys.modules
 
     import duckdb
-    from arro3.core import Table
-    from arro3.io import write_ipc
 
     # --- 2. does it compute, and does it serialize ----------------------
     con = duckdb.connect()
@@ -169,61 +195,107 @@ def main():
     # --- Arrow IPC, the wire format the bridge needs ---------------------
     print("")
     import io
-    # NOT DuckDBPyRelation.arrow(), which imports pyarrow - roughly 40 MB plus
-    # numpy, and a second Arrow runtime beside the one arro3 already carries.
-    # DuckDB exposes __arrow_c_stream__, so the Arrow PyCapsule interface
-    # hands the data to arro3 with no pyarrow anywhere. This is the reason
-    # boro depends on arro3-io rather than pyarrow, and it is worth a test of
-    # its own because .arrow() is the obvious call and quietly costs the win.
-    relation = con.sql("""SELECT location, plot_value FROM v_results
+
+    def nickel():
+        return con.sql("""SELECT location, plot_value FROM v_results
                           WHERE chemical = 'Nickel' LIMIT 20000""")
-    record("duckdb exposes __arrow_c_stream__",
-           hasattr(relation, "__arrow_c_stream__"))
-    table = Table.from_arrow(relation)
-    start = time.time()
-    buffer = io.BytesIO()
-    write_ipc(table, buffer)
-    payload = buffer.getvalue()
-    TIMINGS["ipc"] = time.time() - start
-    record("Arrow IPC serialize 20,000 rows", len(payload) > 0,
-           "%s bytes in %.1f ms" % (format(len(payload), ",d"),
-                                    TIMINGS["ipc"] * 1000))
 
-    import base64
-    encoded = base64.b64encode(payload).decode()
-    record("base64 for the QWebChannel hop", len(encoded) > 0,
-           "%s chars (+%.0f%%)"
-           % (format(len(encoded), ",d"),
-              100.0 * (len(encoded) - len(payload)) / max(len(payload), 1)))
+    if bundled:
+        # The bundle's own route. NOT DuckDBPyRelation.arrow(), which imports
+        # pyarrow - roughly 40 MB plus numpy, and a second Arrow runtime
+        # beside the one arro3 already carries. DuckDB exposes
+        # __arrow_c_stream__, so the Arrow PyCapsule interface hands the data
+        # to arro3 with no pyarrow anywhere. This is the reason boro depends
+        # on arro3-io rather than pyarrow, and it is worth a test of its own
+        # because .arrow() is the obvious call and quietly costs the win.
+        from arro3.core import Table
+        from arro3.io import write_ipc
+        relation = nickel()
+        record("duckdb exposes __arrow_c_stream__",
+               hasattr(relation, "__arrow_c_stream__"))
+        table = Table.from_arrow(relation)
+        start = time.time()
+        buffer = io.BytesIO()
+        write_ipc(table, buffer)
+        TIMINGS["ipc"] = time.time() - start
+        record("Arrow IPC via the bundle's arro3, 20,000 rows",
+               len(buffer.getvalue()) > 0,
+               "%s bytes in %.1f ms" % (format(len(buffer.getvalue()), ",d"),
+                                        TIMINGS["ipc"] * 1000))
+        # Snapshot NOW, before the plugin's writers below: they prefer
+        # pyarrow when the host has it, by design, and judging the arro3
+        # route after them failed a clean bundle (2026-11-21).
+        pyarrow_after_arro3 = "pyarrow" in sys.modules
 
-    # --- what it costs on disk -------------------------------------------
-    total = 0
-    for base, _dirs, files in os.walk(state["bundle_path"]):
-        for name in files:
-            try:
-                total += os.path.getsize(os.path.join(base, name))
-            except OSError:
-                pass
-    record("bundle size on disk", None, "%.1f MB" % (total / 1048576.0))
-
-    # The real size claim: pyarrow is not something we have to ship.
-    shipped = set(os.listdir(state["bundle_path"]))
-    unwanted = sorted(n for n in shipped
-                      if n.split("-")[0].lower() in ("pyarrow", "numpy"))
-    record("bundle ships neither pyarrow nor numpy", not unwanted,
-           ", ".join(unwanted) if unwanted
-           else "~40 MB and a second Arrow runtime avoided")
-
-    # And the behavioural half: we did not drag it in ourselves.
-    pyarrow_after = "pyarrow" in sys.modules
-    if pyarrow_before:
-        record("our Arrow path did not import pyarrow", True,
-               "pyarrow was already loaded by the host (QGIS ships it); "
-               "not ours, and not in the bundle")
+    # The route the plugin actually takes, whatever the substrate: the first
+    # of bridge_payload's writers whose runtime is present. Walked here
+    # rather than through to_arrow_ipc() so the verdict can name which one
+    # answered; IPC_WRITERS is exposed for exactly that.
+    from equis_loader import bridge_payload
+    payload, used = None, None
+    for writer in bridge_payload.IPC_WRITERS:
+        payload = writer(nickel())
+        if payload is not None:
+            used = writer.__name__.replace("_ipc_with_", "")
+            break
+    if payload:
+        # Timed warm, on a second call: the first paid for importing the
+        # runtime (pyarrow's first import was most of 79 ms, pixi QGIS
+        # 4.2.3, 2026-11-21), which is a once-per-session cost, not a
+        # per-payload one.
+        start = time.time()
+        payload = writer(nickel())
+        elapsed = time.time() - start
+        TIMINGS.setdefault("ipc", elapsed)
+        record("Arrow IPC via the plugin's writers, 20,000 rows", True,
+               "%s: %s bytes in %.1f ms" % (used, format(len(payload), ",d"),
+                                            elapsed * 1000))
+        import base64
+        encoded = base64.b64encode(payload).decode()
+        record("base64 for the QWebChannel hop", len(encoded) > 0,
+               "%s chars (+%.0f%%)"
+               % (format(len(encoded), ",d"),
+                  100.0 * (len(encoded) - len(payload)) / len(payload)))
     else:
-        record("our Arrow path did not import pyarrow", not pyarrow_after,
-               "imported during serialization" if pyarrow_after
-               else "PyCapsule route used throughout")
+        record("Arrow IPC via the plugin's writers, 20,000 rows", False,
+               "no Arrow runtime: install pyarrow, or arro3-core and "
+               "arro3-io")
+        # One cause, one failure: with no payload there is nothing to encode.
+        print("[NOT RUN] base64 for the QWebChannel hop - no payload")
+
+    total = None
+    if bundled:
+        # --- what it costs on disk ---------------------------------------
+        total = 0
+        for base, _dirs, files in os.walk(state["bundle_path"]):
+            for name in files:
+                try:
+                    total += os.path.getsize(os.path.join(base, name))
+                except OSError:
+                    pass
+        record("bundle size on disk", None, "%.1f MB" % (total / 1048576.0))
+
+        # The real size claim: pyarrow is not something we have to ship.
+        shipped = set(os.listdir(state["bundle_path"]))
+        unwanted = sorted(n for n in shipped
+                          if n.split("-")[0].lower() in ("pyarrow", "numpy"))
+        record("bundle ships neither pyarrow nor numpy", not unwanted,
+               ", ".join(unwanted) if unwanted
+               else "~40 MB and a second Arrow runtime avoided")
+
+        # And the behavioural half: the arro3 route did not drag it in.
+        if pyarrow_before:
+            record("the arro3 route did not import pyarrow", True,
+                   "pyarrow was already loaded by the host (QGIS ships it); "
+                   "not ours, and not in the bundle")
+        else:
+            record("the arro3 route did not import pyarrow",
+                   not pyarrow_after_arro3,
+                   "imported during serialization" if pyarrow_after_arro3
+                   else "PyCapsule route used throughout")
+    else:
+        print("[NOT RUN] bundle size, bundle ships no pyarrow, arro3 route "
+              "imports no pyarrow - there is no bundle to check")
 
     # --- verdict ----------------------------------------------------------
     fails = [r for r in RESULTS if r[1] is False]
@@ -241,17 +313,24 @@ def main():
         print("  WORKS, BUT SLOW. These missed the 100 ms budget: %s"
               % ", ".join(slow))
         print("  US-11's promise would need qualifying.")
-    else:
+    elif bundled:
         print("  CLEAR. The substrate imports from the plugin's own bundle,")
         print("  computes, serializes to Arrow IPC, and answers every")
         print("  post-fetch operation well inside 100 ms at report scale.")
+    else:
+        print("  CLEAR ON THE HOST'S DUCKDB. No bundle here; the host's")
+        print("  duckdb computes, the plugin's writers serialize to Arrow IPC")
+        print("  (%s), and every post-fetch operation is inside 100 ms." % used)
+        print("  The bundle checks did not run - not a pass for a bundle.")
     print("")
     print("  Paste this line back:")
-    print("    %s | Python %s | %s | duckdb %s | bundle %.0f MB | "
+    print("    %s | Python %s | %s | duckdb %s | %s | arrow %s | "
           "slowest %.1f ms | ipc %.1f ms"
-          % (platform.system(), env["python"], env["bundle"],
+          % (platform.system(), env["python"],
+             env["bundle"] if bundled else "host (no bundle)",
              state["modules"]["duckdb"].get("version", "?"),
-             total / 1048576.0,
+             "bundle %.0f MB" % (total / 1048576.0) if bundled
+             else "bundle n/a", used,
              1000 * max([v for k, v in TIMINGS.items()
                          if k not in ("build", "ipc")] or [0]),
              1000 * TIMINGS.get("ipc", 0)))
@@ -259,6 +338,6 @@ def main():
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    sys.exit(main(require_bundle="--require-bundle" in sys.argv[1:]))
 else:
     main()
