@@ -8,6 +8,7 @@ for whoever is changing it.
 
 ```
 python tools/test_parsing.py          # parsing, paging, aggregation, cache
+python tools/test_parquet_address.py  # a parquet URL's address (project) vs token (person)
 python tools/test_tasks.py            # cache decisions
 python tools/test_state.py            # the panel's state machine
 python tools/test_store_parity.py     # ReportTable vs ReportStore (needs duckdb)
@@ -48,6 +49,8 @@ Needing QGIS (run under `python-qgis.bat`, or paste into the QGIS console):
 tools/test_offline.py   tools/test_storage.py   tools/test_roll.py
 tools/test_phase0.py    tools/test_webengine.py
 tools/test_interactive.py   tools/test_parquet_source_ui.py
+tools/test_project_source.py   (the source in the project file, never its token;
+                                settings sandboxed, the real profile untouched)
 tools/test_tickable_combos.py   tools/test_bivariate_layer.py
 tools/test_depth_filter.py   (the depth and unit rows: slider dragged, spin boxes, through the dialog)
 tools/test_layer_fields.py   (every report column on the layers: names, types, GeoPackage;
@@ -70,7 +73,7 @@ shipped unbundled plugin, which does run on 3.34).
 ## The one structural rule
 
 **`equis_api.py`, `report_data.py`, `sparkline.py`, `cache.py`, `store.py`,
-`chem.py` and the vendored `chemduck/` import no QGIS.** That is why
+`chem.py`, `parquet_address.py` and the vendored `chemduck/` import no QGIS.** That is why
 1,500+ lines of tests run under a plain interpreter, and it is the reason
 most of this codebase can be verified
 without a GUI. Anything needing a path takes it from the caller, as

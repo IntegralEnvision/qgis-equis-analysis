@@ -23,11 +23,12 @@ try:
     from qgis.gui import QgsRangeSlider
 except ImportError:  # QGIS built without the range slider
     QgsRangeSlider = None
-from qgis.PyQt.QtCore import QSettings, Qt, QTimer, pyqtSignal
+from qgis.PyQt.QtCore import QSettings, QStringListModel, Qt, QTimer, pyqtSignal
 from qgis.PyQt.QtWidgets import (
     QAbstractItemView,
     QCheckBox,
     QComboBox,
+    QCompleter,
     QDockWidget,
     QFormLayout,
     QHBoxLayout,
@@ -47,6 +48,7 @@ from qgis.PyQt.QtWidgets import (
     QWidget,
 )
 
+from . import parquet_address
 from . import settings as settings_store
 from .cache import describe_age, describe_size
 from .equis_api import EquisClient, EquisError, token_expiry, utc_now
@@ -484,6 +486,11 @@ class EquisDialog(QDockWidget):
         # Saving the project is what gives GeoPackage storage somewhere to
         # write, so the hint has to follow it rather than going stale.
         QgsProject.instance().fileNameChanged.connect(self._update_storage_hint)
+        # The parquet source is the project's, so the field follows the
+        # project: a project opened, or File > New. `cleared` also fires
+        # just before a project is read, and readProject then refills.
+        QgsProject.instance().readProject.connect(self._on_project_changed)
+        QgsProject.instance().cleared.connect(self._on_project_changed)
         QTimer.singleShot(0, self._auto_connect)
 
     # ------------------------------------------------------------------- ui
@@ -551,6 +558,14 @@ class EquisDialog(QDockWidget):
         self.parquet_edit.setMaximumWidth(16777215)
         self.parquet_edit.setCursorPosition(0)
         self.parquet_edit.textChanged.connect(self._on_parquet_url_changed)
+        # Every address this person has a token for, offered as they type.
+        # Addresses only: the token is looked up on Open
+        # (parquet_address.resolve), so picking one is all it takes.
+        self._parquet_completer = QCompleter(QStringListModel([], self), self)
+        self._parquet_completer.setCaseSensitivity(
+            Qt.CaseSensitivity.CaseInsensitive)
+        self._parquet_completer.setFilterMode(Qt.MatchFlag.MatchContains)
+        self.parquet_edit.setCompleter(self._parquet_completer)
         conn_form.addRow("Parquet URL:", self.parquet_edit)
         self.parquet_label = conn_form.labelForField(self.parquet_edit)
 
@@ -1212,14 +1227,12 @@ class EquisDialog(QDockWidget):
         self.key_edit.setText(cfg["api_key"])
         self.verify_ssl_check.setChecked(cfg["verify_ssl"])
         self.read_only_check.setChecked(settings_store.load_read_only())
-        self.parquet_edit.setText(cfg.get("parquet_url", ""))
-        index = self.source_combo.findData(cfg.get("source",
-                                                   settings_store.SOURCE_LIVE))
-        if index >= 0:
-            self.source_combo.blockSignals(True)
-            self.source_combo.setCurrentIndex(index)
-            self.source_combo.blockSignals(False)
-        self._on_source_changed()
+        # The person's defaults, for a project that has not said: the .env's
+        # parquet URL and the last source chosen. _apply_project_source
+        # lets the project override both.
+        self._default_parquet_url = cfg.get("parquet_url", "")
+        self._default_source = cfg.get("source", settings_store.SOURCE_LIVE)
+        self._apply_project_source()
         # A key saved once and since expired keeps being sent, and every
         # request 401s in a way that looks like the service is down.
         self._offer_fresh_key()
@@ -1237,6 +1250,51 @@ class EquisDialog(QDockWidget):
         self._update_storage_hint()
 
     # --------------------------------------------------------------- state
+
+    def _on_project_changed(self, *_args):
+        """A project was opened or closed: show ITS parquet source.
+
+        Fills the field and nothing more. Opening a source takes seconds and
+        replaces what is loaded, so it stays the person's click; and what is
+        loaded is left alone, since its layers' fate is the project's
+        business, not this field's.
+        """
+        self._apply_project_source()
+
+    def _apply_project_source(self):
+        """Set the source and the parquet field from the open project.
+
+        The project records the source and the parquet ADDRESS; the token,
+        if this person has one for that address, comes from their own
+        settings (parquet_address.py says why). A project that records
+        nothing gets the person's defaults - never the last URL opened in
+        some other project, which is what this field used to show.
+        """
+        source, address = settings_store.load_project_source()
+        tokens = settings_store.load_parquet_tokens()
+        self._parquet_completer.model().setStringList(sorted(tokens))
+        index = self.source_combo.findData(source or self._default_source)
+        if index >= 0:
+            self.source_combo.blockSignals(True)
+            self.source_combo.setCurrentIndex(index)
+            self.source_combo.blockSignals(False)
+        if address:
+            self.parquet_edit.setText(parquet_address.resolve(tokens, address))
+        else:
+            self.parquet_edit.setText(self._default_parquet_url)
+        self.parquet_edit.setCursorPosition(0)
+        self._on_source_changed()
+        if (source == settings_store.SOURCE_PARQUET and address
+                and parquet_address.needs_token(tokens, address)):
+            # Said once, here, rather than left to a 403 on Open that reads
+            # like a broken source. A public container needs no token, so
+            # this informs and does not refuse.
+            self._set_status(
+                "This project's parquet source has no token on this "
+                "computer. If it is signed, paste the full URL (with its "
+                "?sp=...&sig=... part) once; it is remembered for this "
+                "address, never written into the project.",
+                Qgis.MessageLevel.Warning)
 
     def _set_status(self, message, level=Qgis.MessageLevel.Info):
         colors = {
@@ -1654,6 +1712,12 @@ class EquisDialog(QDockWidget):
         # into "Connected. 33 facilities available."
         if self._analysis is not None or self._facilities:
             return
+        # A parquet source with nothing in the field - a project that never
+        # opened one - has nothing to open, and saying "enter the URL" the
+        # moment the panel appears is a warning about nothing.
+        if (self._data_source() == settings_store.SOURCE_PARQUET
+                and not self.parquet_edit.text().strip()):
+            return
         if self.site_edit.text().strip() and self.key_edit.text().strip():
             self._on_connect()
         elif self.site_edit.text().strip():
@@ -1676,7 +1740,10 @@ class EquisDialog(QDockWidget):
         where it is cheap and where the connection stays on the thread that
         will use it.
         """
-        url = self.parquet_edit.text().strip()
+        # A bare address - the project's, or one the completer offered -
+        # opens with the token this person holds for it.
+        url = parquet_address.resolve(settings_store.load_parquet_tokens(),
+                                      self.parquet_edit.text())
         if not url:
             self._set_status(
                 "Enter the URL of the folder holding the parquet partitions. "
@@ -1697,8 +1764,7 @@ class EquisDialog(QDockWidget):
             self.site_edit.text().strip(),
             self.key_edit.text().strip(),
             self.verify_ssl_check.isChecked(),
-            source=self._data_source(),
-            parquet_url=url)
+            source=self._data_source())
 
         self._set_busy(True)
         self._set_status("Opening the published parquet…")
@@ -1733,6 +1799,15 @@ class EquisDialog(QDockWidget):
         self._apply_row_scope()
         self._schedule_analysis_warmup()
         self._parquet_url = url
+        # Recorded only once it opened: a mistyped token saved on the
+        # attempt would replace the one that works. The token goes to this
+        # person's settings and the address to the project, which QGIS then
+        # counts as a change to save - it is one: the project maps a
+        # different source now.
+        settings_store.remember_parquet_token(url)
+        settings_store.save_project_source(settings_store.SOURCE_PARQUET, url)
+        self._parquet_completer.model().setStringList(
+            sorted(settings_store.load_parquet_tokens()))
         self._watch_manifest(store)
         self._offline = False
         self._set_busy(False)
@@ -2044,8 +2119,14 @@ class EquisDialog(QDockWidget):
             self.key_edit.text().strip(),
             self.verify_ssl_check.isChecked(),
             source=self._data_source(),
-            parquet_url=self.parquet_edit.text().strip(),
         )
+        # A project that said parquet and is now connected live says live,
+        # so it reopens on the source it was left on. One that never said
+        # either is not touched: the auto-connect runs this on every start,
+        # and writing then would make every untitled project ask to be
+        # saved on quit.
+        if settings_store.load_project_source()[0] is not None:
+            settings_store.save_project_source(settings_store.SOURCE_LIVE)
 
         self.facility_combo.clear()
         self._reset_report_state()
@@ -2711,8 +2792,11 @@ class EquisDialog(QDockWidget):
         # reopen in the background replaces it.
         store.stop_caching()
         self._manifest_timer.stop()
+        # The address, not the URL: the log is copied into bug reports and
+        # screenshots, and a signed URL's query string is its credential.
         QgsMessageLog.logMessage(
-            "The parquet source was republished; reopening %s" % self._parquet_url,
+            "The parquet source was republished; reopening %s"
+            % parquet_address.split(self._parquet_url)[0],
             "EQuIS", Qgis.Info)
         self._set_status("The parquet source has a new publish; reloading it "
                          "in the background…")
@@ -7203,6 +7287,14 @@ class EquisDialog(QDockWidget):
 
     def shutdown(self):
         """Release everything; called when the plugin itself is unloaded."""
+        # The project outlives the plugin; a signal left connected would
+        # call into a deleted panel the next time a project opens.
+        project = QgsProject.instance()
+        for signal in (project.readProject, project.cleared):
+            try:
+                signal.disconnect(self._on_project_changed)
+            except (TypeError, RuntimeError):
+                pass
         if self._task is not None:
             self._task.cancel()
             self._task = None

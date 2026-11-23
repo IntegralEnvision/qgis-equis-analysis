@@ -97,6 +97,17 @@ equis_site: https://yoursite.equisonline.com
 Credentials entered in the panel are saved to QSettings, so `.env` is only a
 convenience for the first launch. Keep `.env` out of version control.
 
+A parquet source is saved with the **QGIS project**, not with you: the
+project records which source it maps and the source's address, so opening
+the project fills the panel with that facility's source (it does not open
+it - that is still **Open**). A signed URL's token - the `?sp=...&sig=...`
+part - is **never written into the project**: it stays in your own QGIS
+settings, looked up by address, so a `.qgz` can be shared without handing
+out read access. Someone opening a shared project without a token for its
+address is told so, and pastes the full URL once; it is remembered for
+that address from then on, and the field offers every address you hold a
+token for as you type.
+
 The account needs **Creator on Reports** for the live query path, which
 creates one report of its own per facility (see [What it writes to your
 EQuIS site](#what-it-writes-to-your-equis-site)). Without it the first fetch
@@ -930,7 +941,8 @@ equis_loader/
   sparkline.py       small SVG sparklines (no QGIS imports)
   timeseries.py      the embedded matplotlib plot
   maptool.py         click a point -> location code
-  settings.py        QSettings + .env fallback, cache location
+  settings.py        QSettings + .env fallback, cache location, the project's source
+  parquet_address.py a parquet URL's address (project) vs token (person) (no QGIS imports)
   -- experimental --
   store.py           the DuckDB store, parquet sources (no QGIS imports)
   pivot.py           one row per sample, every analyte (no QGIS imports)
