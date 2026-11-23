@@ -72,7 +72,8 @@ Illustrative values:
   rows left out for a unit on the wrong basis, by chemical and unit.
 
 - `prefix` is fixed when a facility is first sliced; names live on in the
-  tenant. A hand-made manifest without it falls back to `parquet`.
+  tenant. A manifest with slices and no `prefix` is refused, never given a
+  default; the refusal names the prefix its slice names carry.
 - `rows: null` in history = stored nothing (split it); `0` = genuinely
   empty (leave it).
 - A facility-wide `location_rows` from before 2026-10-05 is ignored: it

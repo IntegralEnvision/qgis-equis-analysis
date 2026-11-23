@@ -1,6 +1,6 @@
 """The parquet pipeline's bookkeeping, without EQuIS or a network.
 
-    python pipeline/test_slice_pipeline.py
+    python pipeline/tests/test_slice_pipeline.py
 
 Each check here is a way the pipeline can lose data while reporting
 success. The two that were real bugs until 2026-10-05:
@@ -20,8 +20,9 @@ import shutil
 import sys
 import tempfile
 
+# The package from this checkout, installed or not.
 HERE = os.path.dirname(os.path.abspath(__file__))
-sys.path.insert(0, HERE)
+sys.path.insert(0, os.path.dirname(HERE))
 
 FAILURES = []
 
@@ -40,8 +41,8 @@ except ImportError:
     print("pyarrow is not importable; skipping.")
     raise SystemExit(0)
 
-import nightly_slices  # noqa: E402
-import slice_store as ss  # noqa: E402
+from parquet_source import nightly_slices  # noqa: E402
+from parquet_source import slice_store as ss  # noqa: E402
 
 
 def write_slice(staging, matrix, fraction, name, locations):
@@ -63,9 +64,37 @@ def partition_rows(root, matrix, fraction):
 root = tempfile.mkdtemp(prefix="slice_test_")
 try:
     # ---------------------------------------------------------- names
-    check("a legacy manifest keeps the names already in the tenant",
-          ss.Manifest(os.path.join(root, "none.json")).prefix
-          == ss.LEGACY_PREFIX)
+    empty = ss.Manifest(os.path.join(root, "none.json"))
+    check("a manifest with no slices has no prefix problem yet",
+          empty.prefix_problem() is None)
+    try:
+        empty.prefix
+        guessed = True
+    except ss.PrefixMissing:
+        guessed = False
+    check("no prefix is ever guessed: reading an unrecorded one raises",
+          not guessed)
+    named = ss.Manifest(os.path.join(root, "named.json"))
+    for index in (0, 1):
+        named.put_slice("old_names_WS_D_%02d" % index, matrix="WS",
+                        fraction="D", index=index)
+    named.put_slice("old_names_SO_N_00", matrix="SO", fraction="N", index=0)
+    problem = named.prefix_problem() or ""
+    check("slices without a recorded prefix are refused, naming the one "
+          "their names carry", 'add "prefix": "old_names"' in problem, problem)
+    named.put_slice("other_WS_T_00", matrix="WS", fraction="T", index=0)
+    problem = named.prefix_problem() or ""
+    check("slice names with two prefixes are refused without a suggestion",
+          "do not share one prefix" in problem and '"old_names"' not in problem,
+          problem)
+    from parquet_source import create_slice_reports as csr_names
+    try:
+        csr_names.set_up_manifest(named, 1234567, None)
+        refused = False
+    except SystemExit:
+        refused = True
+    check("create_slice_reports refuses it rather than naming new slices",
+          refused and "prefix" not in named.data)
     check("a new facility's names carry its id",
           ss.slice_name("WS", "D", 3, ss.default_prefix(1234567))
           == "parquet_1234567_WS_D_03")
@@ -196,7 +225,7 @@ try:
           str(ss.merge_extra_fields("None")))
     check("extra fields: LAB_SDG is not asked for twice",
           "LAB_SDG" not in merged.upper(), merged)
-    import create_slice_reports
+    from parquet_source import create_slice_reports
     cloned = create_slice_reports.clone_parameters(
         {"parameters": [{"name": "@extra_fields", "value": "None"},
                         {"name": "@sys_loc_codes", "value": "X"}]},
@@ -210,7 +239,7 @@ try:
           by_name["@sys_loc_codes"]["value"] == "MW-1|MW-2")
 
     # ------------------------------------------- pipeline.json at setup
-    import create_slice_reports as csr
+    from parquet_source import create_slice_reports as csr
     sroot = os.path.join(root, "setup")
     csr.record_config(sroot, 7, "N", None, write=False)
     check("setup: a dry run writes no pipeline.json",
@@ -235,7 +264,7 @@ try:
     except SystemExit:
         refused = True
     check("setup: a cell made with other sample types is refused", refused)
-    import run_nightly
+    from parquet_source import run_nightly
     check("setup: what it writes is what the check accepts",
           run_nightly.load_config(sroot)["sample_types"] == "N")
 
@@ -452,7 +481,7 @@ try:
 
     # ---------------------------------------- the published manifest
     try:
-        import publish_manifest
+        from parquet_source import publish_manifest
         manifest.data["facility_id"] = 4242
         manifest.save()
         published = publish_manifest.build(root, "test")

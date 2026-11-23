@@ -1,8 +1,8 @@
 """Run the slices when the facility has new data; rebuild what has finished.
 
-    python pipeline/nightly_slices.py --facility <id> --root data/<facility>
-    python pipeline/nightly_slices.py ... --trigger     # arm every slice now
-    python pipeline/nightly_slices.py ... --rewrite     # after a significant load
+    python -m parquet_source.nightly_slices --facility <id> --root data/<facility>
+    python -m parquet_source.nightly_slices ... --trigger     # arm every slice now
+    python -m parquet_source.nightly_slices ... --rewrite     # after a significant load
 
 With no flags it CHECKS, and that is what run_nightly.py runs, as often as
 it is scheduled:
@@ -59,10 +59,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
-HERE = os.path.dirname(os.path.abspath(__file__))
-sys.path.insert(0, HERE)
-
-from slice_store import (  # noqa: E402
+from .slice_store import (
     read_env,
     DEFAULT_TARGET_ROWS, MANIFEST_NAME, TARGET_LOCATIONS_PER_SLICE,
     UNITS_NAME, Manifest, arm_agent, bin_count, cell_key,
@@ -225,7 +222,7 @@ def csv_to_parquet(csv_path, parquet_path, target=None, factors=None,
     """
     import pyarrow as pa
     import pyarrow.csv as pacsv
-    import unit_convert
+    from . import unit_convert
     import pyarrow.parquet as pq
 
     types = {name: pa.string() for name in FORCE_STRING}
@@ -309,7 +306,7 @@ def collect(api, manifest, root, only=None, runs=None):
     # rather than hardcoded, so the day the tenant's `percent` factors land
     # this starts converting them without anyone editing Python - see
     # unit_convert.py.
-    import unit_convert
+    from . import unit_convert
     try:
         factors = unit_convert.load_factors(api.base, api.api_key)
         print("unit conversion: %d factor(s) from EQuIS" % len(factors))
@@ -809,6 +806,10 @@ def main():
     if not manifest.data["slices"]:
         fail("No slices in %s. Run create_slice_reports.py first."
              % os.path.join(args.root, MANIFEST_NAME))
+    # Refused before anything runs, not on the night a re-bin first needs
+    # to name a new slice, which can be months away.
+    if manifest.prefix_problem():
+        fail(manifest.prefix_problem())
 
     started = utc_now()
     print("facility %d  root %s  started %s\n"

@@ -1,7 +1,7 @@
 r"""Make each slice report return ONE unit, by setting @reporting_unit.
 
-    python pipeline/set_reporting_units.py --root data/<facility> --dry-run
-    python pipeline/set_reporting_units.py --root data/<facility>
+    python -m parquet_source.set_reporting_units --root data/<facility> --dry-run
+    python -m parquet_source.set_reporting_units --root data/<facility>
 
 WHY. A result's unit is whatever the lab reported, so one analyte in one
 matrix arrives in several. Measured on the first facility 2026-09-24: Arsenic in WS is
@@ -37,11 +37,8 @@ import os
 import sys
 import time
 
-HERE = os.path.dirname(os.path.abspath(__file__))
-sys.path.insert(0, HERE)
-
-from nightly_slices import Api, read_env  # noqa: E402
-from slice_store import (  # noqa: E402
+from .nightly_slices import Api, read_env
+from .slice_store import (
     MANIFEST_NAME, UNITS_NAME, Manifest, cell_key, load_units,
 )
 

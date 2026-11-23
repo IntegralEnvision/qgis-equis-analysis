@@ -1,6 +1,6 @@
 """Write the reader-facing manifest that a client points at.
 
-    python pipeline/publish_manifest.py --root data/<name>
+    python -m parquet_source.publish_manifest --root data/<name>
 
 TWO MANIFESTS, ON PURPOSE. The nightly pipeline's manifest.json holds
 report ids, agent event ids, per-slice location lists and run history -
@@ -23,10 +23,7 @@ import json
 import os
 import sys
 
-HERE = os.path.dirname(os.path.abspath(__file__))
-sys.path.insert(0, HERE)
-
-from slice_store import (  # noqa: E402
+from .slice_store import (
     MANIFEST_NAME, Manifest, cell_key, load_units, utc_now,
 )
 

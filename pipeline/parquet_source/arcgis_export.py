@@ -1,8 +1,8 @@
 """The published partitions, rewritten as GeoParquet that ArcGIS Pro opens.
 
-    python pipeline/arcgis_export.py --root data/<name>
-    python pipeline/arcgis_export.py --root data/<name> --x X_COORD --y Y_COORD --crs EPSG:26917
-    python pipeline/arcgis_export.py --root data/<name> --crs my_crs.projjson
+    python -m parquet_source.arcgis_export --root data/<name>
+    python -m parquet_source.arcgis_export --root data/<name> --x X_COORD --y Y_COORD --crs EPSG:26917
+    python -m parquet_source.arcgis_export --root data/<name> --crs my_crs.projjson
 
 Run after the nightly repack. Writes data/<name>/arcgis/:
 

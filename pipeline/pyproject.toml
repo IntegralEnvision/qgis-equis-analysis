@@ -1,0 +1,23 @@
+# The QGIS plugin's parquet source, installable from a git subdirectory and
+# never published to an index. Elsewhere, always pinned to a commit:
+#   pip install "git+https://github.com/IntegralEnvision/qgis-equis-analysis@<commit>#subdirectory=pipeline"
+# From a checkout: pip install -e pipeline (or run the scripts by path).
+
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "parquet-source"
+version = "0.1.0"
+description = "The QGIS EQuIS plugin's parquet source: a facility's results as partitioned parquet and a published manifest"
+readme = "README.md"
+requires-python = ">=3.8"
+dependencies = ["pyarrow", "numpy"]
+
+[project.optional-dependencies]
+# A CRS other than EPSG:4326 for the ArcGIS output, without a PROJJSON file.
+crs = ["pyproj"]
+
+[tool.setuptools]
+packages = ["parquet_source"]

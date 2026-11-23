@@ -1,7 +1,7 @@
 """Survey a facility before slicing it: which (matrix, fraction) cells exist.
 
-    python pipeline/survey_facility.py --facility <id>
-    python pipeline/survey_facility.py --facility <id> --json survey.json
+    python -m parquet_source.survey_facility --facility <id>
+    python -m parquet_source.survey_facility --facility <id> --json survey.json
 
 The first step of extracting a facility to parquet. It writes nothing to
 EQuIS: it reads DT_SAMPLE and counts DT_TEST over OData, then prints each
@@ -37,11 +37,8 @@ import json
 import os
 import sys
 
-HERE = os.path.dirname(os.path.abspath(__file__))
-sys.path.insert(0, HERE)
-
-from nightly_slices import Api, read_env  # noqa: E402
-from slice_store import cell_key  # noqa: E402
+from .nightly_slices import Api, read_env
+from .slice_store import cell_key
 
 # Fraction codes are READ from RT_FRACTION and each is counted on DT_TEST.
 # They used to be a fixed ("N", "T", "D"), with a comment promising an
@@ -183,7 +180,7 @@ def main():
     print("\n%d candidate cell(s). Dry-run each; the probe refuses empty ones:"
           % len(cells))
     for matrix, fraction in cells:
-        print("   python pipeline/create_slice_reports.py --facility %d "
+        print("   python -m parquet_source.create_slice_reports --facility %d "
               "--root data/<name> --sample-types N --cell %s --dry-run"
               % (args.facility, cell_key(matrix, fraction)))
 

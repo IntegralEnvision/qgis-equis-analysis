@@ -1,6 +1,6 @@
 """Offline tests for run_nightly.py: the order of the night, and what stops it.
 
-    python pipeline/test_run_nightly.py
+    python pipeline/tests/test_run_nightly.py
 
 No network beyond localhost and no EQuIS: each pipeline script is replaced
 by a stand-in, and the upload goes to a fake blob store on 127.0.0.1.
@@ -16,11 +16,12 @@ import sys
 import tempfile
 import threading
 
+# The package from this checkout, installed or not.
 HERE = os.path.dirname(os.path.abspath(__file__))
-sys.path.insert(0, HERE)
+sys.path.insert(0, os.path.dirname(HERE))
 
-import run_nightly as rn  # noqa: E402
-from slice_store import MANIFEST_NAME, utc_now  # noqa: E402
+from parquet_source import run_nightly as rn  # noqa: E402
+from parquet_source.slice_store import MANIFEST_NAME, utc_now  # noqa: E402
 
 FAILURES = []
 
@@ -399,6 +400,51 @@ def test_lock():
     check("lock: a lock left by a crashed night is taken over", taken)
 
 
+# --------------------------------------------------------------- launch
+def test_launch():
+    """The steps for real, not the stand-in: as modules, and by old path.
+
+    From a directory that is not the checkout, with PYTHONPATH empty, so
+    nothing but run_script itself can make the package importable - as for
+    a scheduled task that runs a checkout nobody installed.
+    """
+    import subprocess
+
+    class Lines(object):
+        def __init__(self):
+            self.lines = []
+
+        def line(self, text=""):
+            self.lines.append(text)
+
+    pipeline = os.path.dirname(HERE)
+    elsewhere = tempfile.mkdtemp(prefix="nightly_")
+    saved_cwd, saved_path = os.getcwd(), os.environ.pop("PYTHONPATH", None)
+    try:
+        os.chdir(elsewhere)
+        log = Lines()
+        code, lines = rn.run_script(log, "publish_manifest.py", ["--help"])
+        check("launch: a step runs as a module from any directory", code == 0,
+              (code, lines[-3:]))
+        check("launch: the log names the module it ran",
+              log.lines and "-m parquet_source.publish_manifest" in log.lines[0],
+              log.lines[:1])
+        shims = sorted(name for name in os.listdir(pipeline)
+                       if name.endswith(".py"))
+        broken = []
+        for name in shims:
+            done = subprocess.run([sys.executable, os.path.join(pipeline, name), "--help"],
+                                  stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+            if done.returncode != 0 or b"usage:" not in done.stdout:
+                broken.append((name, done.returncode))
+        check("launch: every old script path still runs its step (%d)" % len(shims),
+              shims and not broken, broken)
+    finally:
+        os.chdir(saved_cwd)
+        if saved_path is not None:
+            os.environ["PYTHONPATH"] = saved_path
+
+
 if __name__ == "__main__":
     try:
         test_config()
@@ -411,6 +457,7 @@ if __name__ == "__main__":
         test_upload()
         test_sas_url()
         test_lock()
+        test_launch()
     finally:
         for name in os.listdir(tempfile.gettempdir()):
             if name.startswith("nightly_"):

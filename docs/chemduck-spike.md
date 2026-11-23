@@ -83,7 +83,7 @@ layer query leaves out what it can't draw.
    (Installing the extension into a deep folder also failed on Windows'
    260-character path limit.)
 3. **The sidecars are a pipeline step.** Publishing them took 8.8 s and
-   645 KB for Facility A. They belong in `pipeline/run_nightly.py`, beside
+   645 KB for Facility A. They belong in `pipeline/parquet_source/run_nightly.py`, beside
    the manifest, as Chemrooms already expects.
 4. **Chemrooms' query builder is tied to its 3D view.** The SQL
    `buildSamplesLayerSql` emits joins `geoid_offset()`,

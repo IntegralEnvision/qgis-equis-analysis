@@ -1,7 +1,7 @@
 r"""Convert the units in parquet already on disk, without re-collecting.
 
-    python pipeline/convert_existing.py --root data/<facility> --dry-run
-    python pipeline/convert_existing.py --root data/<facility>
+    python -m parquet_source.convert_existing --root data/<facility> --dry-run
+    python -m parquet_source.convert_existing --root data/<facility>
 
 WHY THIS EXISTS SEPARATELY. nightly_slices.py converts as it writes, so
 tomorrow's collect is already handled. This is for the 3.45 million rows
@@ -34,12 +34,9 @@ import os
 import shutil
 import sys
 
-HERE = os.path.dirname(os.path.abspath(__file__))
-sys.path.insert(0, HERE)
-
-import unit_convert  # noqa: E402
-from nightly_slices import ROW_GROUP_ROWS, SORT_COLUMNS, read_env  # noqa: E402
-from slice_store import load_units  # noqa: E402
+from . import unit_convert
+from .nightly_slices import ROW_GROUP_ROWS, SORT_COLUMNS, read_env
+from .slice_store import load_units
 
 MARKER = "RESULT_UNIT_ORIGINAL"
 

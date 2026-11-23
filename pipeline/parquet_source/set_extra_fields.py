@@ -1,8 +1,8 @@
 r"""Add slice_store.EXTRA_FIELDS to every slice report's @extra_fields.
 
-    python pipeline/set_extra_fields.py --root data/<facility> --dry-run
-    python pipeline/set_extra_fields.py --root data/<facility> --only <slice>
-    python pipeline/set_extra_fields.py --root data/<facility>
+    python -m parquet_source.set_extra_fields --root data/<facility> --dry-run
+    python -m parquet_source.set_extra_fields --root data/<facility> --only <slice>
+    python -m parquet_source.set_extra_fields --root data/<facility>
 
 WHY. create_slice_reports.py asks for the extra columns when it makes a
 slice, but slices made before a column was added keep the @extra_fields
@@ -26,11 +26,8 @@ import os
 import sys
 import time
 
-HERE = os.path.dirname(os.path.abspath(__file__))
-sys.path.insert(0, HERE)
-
-from nightly_slices import Api, read_env  # noqa: E402
-from slice_store import (  # noqa: E402
+from .nightly_slices import Api, read_env
+from .slice_store import (
     EXTRA_FIELDS, MANIFEST_NAME, Manifest, merge_extra_fields,
 )
 

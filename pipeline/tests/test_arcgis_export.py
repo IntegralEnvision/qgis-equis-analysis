@@ -1,6 +1,6 @@
 """arcgis_export.py, without EQuIS, a network, or ArcGIS Pro.
 
-    python pipeline/test_arcgis_export.py
+    python pipeline/tests/test_arcgis_export.py
 
 What can be checked without Pro: that every file meets the written
 requirements (docs/arcgis-pro-geoparquet-brief.md in the plugin repository),
@@ -19,8 +19,9 @@ import struct
 import sys
 import tempfile
 
+# The package from this checkout, installed or not.
 HERE = os.path.dirname(os.path.abspath(__file__))
-sys.path.insert(0, HERE)
+sys.path.insert(0, os.path.dirname(HERE))
 
 FAILURES = []
 
@@ -39,7 +40,7 @@ except ImportError:
     print("pyarrow is not importable; skipping.")
     raise SystemExit(0)
 
-import arcgis_export as ax  # noqa: E402
+from parquet_source import arcgis_export as ax  # noqa: E402
 
 QUIET = dict(say=lambda *_: None)
 

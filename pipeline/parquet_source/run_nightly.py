@@ -1,8 +1,8 @@
 r"""One facility's check, unattended: arm, collect, provision, publish, upload.
 
-    python pipeline/run_nightly.py --root data/<facility>
-    python pipeline/run_nightly.py --root data/<facility> --no-upload
-    python pipeline/run_nightly.py --root data/<facility> --trigger
+    python -m parquet_source.run_nightly --root data/<facility>
+    python -m parquet_source.run_nightly --root data/<facility> --no-upload
+    python -m parquet_source.run_nightly --root data/<facility> --trigger
 
 Schedule it as often as you like - hourly is reasonable. When the facility
 has no new data it costs the tenant five small reads and publishes nothing;
@@ -78,10 +78,13 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
-HERE = os.path.dirname(os.path.abspath(__file__))
-sys.path.insert(0, HERE)
+# The directory holding this package. A step runs as `python -m
+# parquet_source.<step>`, and from a checkout nothing is installed, so the
+# child is given this directory on PYTHONPATH: it then imports the same
+# package as this process, installed or not.
+PACKAGE_PARENT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
-from slice_store import (  # noqa: E402
+from .slice_store import (
     CONFIG_NAME, MANIFEST_NAME, Manifest, find_env_file, read_env_file,
     utc_now,
 )
@@ -249,13 +252,26 @@ class Log(object):
 
 # ------------------------------------------------------------------ steps
 
+def step_module(script):
+    """`nightly_slices.py` -> `parquet_source.nightly_slices`."""
+    name = script[:-3] if script.endswith(".py") else script
+    return "%s.%s" % (__package__ or "parquet_source", name)
+
+
 def run_script(log, script, args):
-    """Run one pipeline script; (exit code, its output lines)."""
-    argv = [sys.executable, os.path.join(HERE, script)] + list(args)
-    log.line("$ %s" % " ".join([os.path.basename(sys.executable), "pipeline/" + script] + list(args)))
+    """Run one pipeline step as a module; (exit code, its output lines).
+
+    A step is named by its file (`nightly_slices.py`), as the notes name it.
+    """
+    module = step_module(script)
+    argv = [sys.executable, "-m", module] + list(args)
+    env = dict(os.environ)
+    env["PYTHONPATH"] = os.pathsep.join(
+        [PACKAGE_PARENT] + ([env["PYTHONPATH"]] if env.get("PYTHONPATH") else []))
+    log.line("$ %s" % " ".join([os.path.basename(sys.executable), "-m", module] + list(args)))
     process = subprocess.Popen(argv, stdout=subprocess.PIPE,
                                stderr=subprocess.STDOUT, text=True,
-                               encoding="utf-8", errors="replace")
+                               encoding="utf-8", errors="replace", env=env)
     lines = []
     for raw in process.stdout:
         text = raw.rstrip("\n")

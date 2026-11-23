@@ -1,15 +1,15 @@
 """Create the slice reports and their agents, and seed the manifest.
 
     # see the plan: writes only one ZZ_ probe report, run then deleted
-    python pipeline/create_slice_reports.py --facility <id> --root data/<name> \
+    python -m parquet_source.create_slice_reports --facility <id> --root data/<name> \
         [--sample-types N] --cell WS/D --dry-run
 
     # create it
-    python pipeline/create_slice_reports.py --facility <id> --root data/<name> \
+    python -m parquet_source.create_slice_reports --facility <id> --root data/<name> \
         [--sample-types N] --cell WS/D
 
     # give reports to the slices nightly_slices.py --rewrite added
-    python pipeline/create_slice_reports.py --facility <id> --root data/<name> \
+    python -m parquet_source.create_slice_reports --facility <id> --root data/<name> \
         [--sample-types N] --pending
 
 This is the step `nightly_slices.py` assumes has already run. It divides one
@@ -69,17 +69,14 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
-HERE = os.path.dirname(os.path.abspath(__file__))
-sys.path.insert(0, HERE)
-
-from slice_store import (  # noqa: E402
+from .slice_store import (
     read_env,
     CONFIG_NAME, DEFAULT_TARGET_ROWS, MANIFEST_NAME, UNITS_NAME, Manifest,
     bin_count,
     cell_key, default_prefix, merge_extra_fields, pack_bins, propose_unit,
     read_load_signal, run_once_schedule, slice_name, utc_now,
 )
-import unit_convert  # noqa: E402
+from . import unit_convert
 
 
 # Result rows per sample, used to convert sample-count weights into the row
@@ -374,8 +371,8 @@ def create_report(api, template, facility_id, name, matrix, fraction,
         "facilityId": facility_id,
         "statusFlag": "A",
         "remark": "Parquet slice: %s/%s, %d locations. Managed by "
-                  "pipeline/nightly_slices.py." % (matrix, fraction,
-                                                len(locations)),
+                  "parquet_source.nightly_slices." % (matrix, fraction,
+                                                      len(locations)),
         "parameters": clone_parameters(template, facility_id, matrix,
                                        fraction, locations),
     }
@@ -471,13 +468,15 @@ def set_up_manifest(manifest, facility_id, prefix):
     trusts the manifest completely.
 
     An EXISTING manifest keeps the prefix its slices already carry - the
-    names are on reports and agents in the tenant - including a hand-made
-    one with no prefix, which keeps the fallback.
+    names are on reports and agents in the tenant. One with slices and no
+    recorded prefix is refused (Manifest.prefix_problem).
     """
     recorded = manifest.data.get("facility_id")
     if recorded is not None and int(recorded) != int(facility_id):
         fail("%s belongs to facility %s, not %s. Use a separate --root per "
              "facility." % (manifest.path, recorded, facility_id))
+    if manifest.prefix_problem():
+        fail(manifest.prefix_problem())
     manifest.data["facility_id"] = int(facility_id)
     if not manifest.data["slices"]:
         manifest.set_prefix(prefix or default_prefix(facility_id))
@@ -529,7 +528,7 @@ def provision(api, template, facility_id, manifest, name, matrix, fraction,
               index, codes, user_id, email, replace):
     """One slice: its report (created, or reused with THESE locations saved)
     and its agent, recorded in the manifest. Returns True on success."""
-    from nightly_slices import save_locations
+    from .nightly_slices import save_locations
     existing = find_report(api, facility_id, name)
     if existing and not replace:
         print("   %-28s a report of this name exists (%d); use --replace"
@@ -839,7 +838,7 @@ def main():
 
     print("\ncreated %d slice(s); manifest: %s" % (created, manifest.path))
     print("Their agents run once in the next 20-90 minutes. Then:\n"
-          "   python pipeline/nightly_slices.py --facility %d --root %s"
+          "   python -m parquet_source.nightly_slices --facility %d --root %s"
           % (args.facility, args.root))
     return 0
 
