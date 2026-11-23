@@ -321,7 +321,75 @@ def main():
                    .replace_schema_metadata(meta), good, compression="zstd")
     ax.validate(good, spatial=True, name="good.parquet")
     check("...and passes the same file with every point present", os.path.exists(good))
+    # Statistics are optional in parquet: a null must be found without them.
+    path = os.path.join(work, "nostats.parquet")
+    pq.write_table(pa.table({"CODE": ["a", "b"],
+                             "geometry": pa.array([b"\x01" * 21, None], pa.binary())})
+                   .replace_schema_metadata(meta), path, compression="zstd",
+                   write_statistics=False)
+    try:
+        ax.validate(path, spatial=True, name="nostats.parquet")
+        check("a null geometry is refused in a file without statistics", False, "passed")
+    except ax.ExportError as exc:
+        check("a null geometry is refused in a file without statistics",
+              "1 null geometries" in str(exc), str(exc)[:100])
     shutil.rmtree(work)
+
+    # A file held for a moment (a virus scanner, on Windows) is retried; one
+    # held throughout is refused with the message about Pro.
+    real_replace, saved_waits = os.replace, ax.RETRY_SECONDS
+    ax.RETRY_SECONDS = (0, 0, 0)
+    calls = []
+
+    def flaky(src, dst, held=2):
+        calls.append(src)
+        if len(calls) <= held:
+            raise PermissionError(13, "in use", dst)
+        return real_replace(src, dst)
+
+    work = tempfile.mkdtemp(prefix="arcgis_test_")
+    try:
+        temp, final = os.path.join(work, "a.tmp"), os.path.join(work, "a.parquet")
+        open(temp, "w").close()
+        os.replace = flaky
+        ax._replace(temp, final)
+        check("a file held for a moment is replaced on a retry",
+              os.path.exists(final) and len(calls) == 3, "%d attempts" % len(calls))
+        calls.clear()
+        open(temp, "w").close()
+        os.replace = lambda src, dst: flaky(src, dst, held=99)
+        try:
+            ax._replace(temp, final)
+            check("a file held throughout is refused", False, "replaced")
+        except ax.ExportError as exc:
+            check("a file held throughout is refused, after %d attempts"
+                  % (len(ax.RETRY_SECONDS) + 1),
+                  "is in use" in str(exc) and len(calls) == len(ax.RETRY_SECONDS) + 1,
+                  "%d attempts" % len(calls))
+    finally:
+        os.replace, ax.RETRY_SECONDS = real_replace, saved_waits
+        shutil.rmtree(work)
+
+    # No location has coordinates (a compilation before its coordinates are
+    # known): every row is unplaced, and the point files are empty, not
+    # refused. pyarrow writes no statistics for their empty row group.
+    root = tempfile.mkdtemp(prefix="arcgis_test_")
+    write_cell(root, "WS", "D", 6, unplaced=range(6))
+    write_cell(root, "SE", "N", 4, unplaced=range(4))
+    try:
+        manifest = ax.export(root, **QUIET)
+        out = os.path.join(root, ax.OUT_DIR)
+        check("no coordinates anywhere: every row is unplaced",
+              sum(f["rows"] for f in manifest["files"]) == 0
+              and sum(f["unplaced_rows"] for f in manifest["files"]) == 10
+              and manifest["combined"]["unplaced_rows"] == 10,
+              json.dumps([(f["cell"], f["rows"], f["unplaced_rows"])
+                          for f in manifest["files"]]))
+        check("...and locations.parquet is written, with no point",
+              pq.read_metadata(os.path.join(out, "locations.parquet")).num_rows == 0)
+    except ax.ExportError as exc:
+        check("no coordinates anywhere: every row is unplaced", False, str(exc)[:120])
+    shutil.rmtree(root)
 
     print("\n%d failure(s)" % len(FAILURES))
     raise SystemExit(1 if FAILURES else 0)

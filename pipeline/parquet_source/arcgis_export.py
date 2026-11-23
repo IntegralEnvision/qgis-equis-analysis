@@ -84,6 +84,7 @@ import json
 import os
 import re
 import sys
+import time
 
 import numpy as np
 import pyarrow as pa
@@ -571,9 +572,26 @@ def write_cell(path, out, plan, settings, projjson):
     return counts[0], counts[1], len(unplaced_locations)
 
 
+# Windows refuses to replace or delete a file another process holds open. A
+# virus scanner opens each file just written, for a moment: two runs in four
+# of tests/test_arcgis_export.py failed so on Windows (2026-11-23), with no
+# Pro running. So try again briefly (about 4 s in all) before saying Pro
+# holds it.
+RETRY_SECONDS = (0.1, 0.25, 0.5, 1.0, 2.0)
+
+
+def _retrying(action, *args):
+    for wait in RETRY_SECONDS:
+        try:
+            return action(*args)
+        except PermissionError:
+            time.sleep(wait)
+    return action(*args)
+
+
 def _replace(temp, final):
     try:
-        os.replace(temp, final)
+        _retrying(os.replace, temp, final)
     except PermissionError:
         raise ExportError("%s is in use - close it in ArcGIS Pro (or remove "
                           "the layer) and run again" % final)
@@ -581,7 +599,7 @@ def _replace(temp, final):
 
 def _remove(path):
     try:
-        os.remove(path)
+        _retrying(os.remove, path)
     except PermissionError:
         raise ExportError("%s is in use - close it in ArcGIS Pro and run again"
                           % path)
@@ -716,16 +734,17 @@ def validate(path, spatial, name):
                     or not column.get("crs")):
                 problems.append("geo metadata %s" % json.dumps(
                     {k: v for k, v in column.items() if k != "crs"}))
-            index = schema.get_field_index(GEOMETRY)
-            nulls = sum(meta.row_group(i).column(index).statistics.null_count
-                        for i in range(meta.num_row_groups))
+            column = pq.read_table(path, columns=[GEOMETRY]).column(GEOMETRY)
+            # Counted from the column, not the row groups' statistics: those
+            # are optional, and pyarrow writes none for an empty row group -
+            # a file with no point at all, where no location has coordinates.
+            nulls = column.null_count
             if nulls:
                 problems.append("%d null geometries" % nulls)
             # Empty points too (NaN coordinates): Pro's persistent cache
             # refused 557,691 rows holding them with no nulls at all.
             # Every geometry here is a 21-byte WKB point, so the
             # coordinates are read straight off the data buffer.
-            column = pq.read_table(path, columns=[GEOMETRY]).column(GEOMETRY)
             column = column.combine_chunks() if column.num_chunks else column
             data = column.buffers()[2] if len(column) else None
             if data is not None:
