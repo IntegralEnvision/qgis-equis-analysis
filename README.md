@@ -748,9 +748,10 @@ whole night unattended - collect, re-bin, provision new slices, publish and
 upload - and exits non-zero when something needs a look:
 
 ```
-python pipeline/run_nightly.py --root data/<facility>
-python pipeline/test_slice_pipeline.py     # the pipeline's bookkeeping
-python pipeline/test_run_nightly.py        # the night's order and failures
+pip install -e pipeline                            # once
+python -m parquet_source.run_nightly --root data/<facility>
+python pipeline/tests/test_slice_pipeline.py     # the pipeline's bookkeeping
+python pipeline/tests/test_run_nightly.py        # the night's order and failures
 ```
 
 ### The DuckDB store

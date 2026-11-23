@@ -121,10 +121,6 @@ TARGET_LOCATIONS_PER_SLICE = 400
 # outcome. Re-measure on a new tenant before raising it.
 DEFAULT_TARGET_ROWS = 92000
 
-# Slice names for a manifest with no `prefix` recorded. Every manifest this
-# code creates records one; this is only the fallback for a hand-made one.
-LEGACY_PREFIX = "parquet"
-
 # Per-facility unit choices, beside the manifest. See load_units().
 UNITS_NAME = "units.json"
 
@@ -528,10 +524,18 @@ def default_prefix(facility_id):
     return "parquet_%d" % int(facility_id)
 
 
-def slice_name(matrix, fraction, index, prefix=LEGACY_PREFIX):
+def slice_name(matrix, fraction, index, prefix):
     """A stable, sortable name. Used for the report, the EIA and the file."""
-    return "%s_%s_%s_%02d" % (prefix, matrix or "ALL", fraction or "ALL",
-                              index)
+    return "%s_%s" % (prefix, slice_suffix(matrix, fraction, index))
+
+
+def slice_suffix(matrix, fraction, index):
+    """What follows the prefix in a slice's name: `WS_D_03`."""
+    return "%s_%s_%02d" % (matrix or "ALL", fraction or "ALL", index)
+
+
+class PrefixMissing(Exception):
+    """A manifest records no slice-name prefix. The message says how to fix it."""
 
 
 def cell_key(matrix, fraction):
@@ -867,8 +871,39 @@ class Manifest(object):
 
         Stored rather than recomputed: the names are already on reports and
         agents in the tenant, and a changed default must never rename them.
+        Raises PrefixMissing when none is recorded. There is no fallback:
+        a default prefix is a guess, and a wrong guess names new slices that
+        match no report in the tenant, or another facility's (the first
+        facility's names carry a prefix no default would produce).
         """
-        return self.data.get("prefix") or LEGACY_PREFIX
+        prefix = self.data.get("prefix")
+        if not prefix:
+            raise PrefixMissing(self.prefix_problem())
+        return prefix
+
+    def prefix_problem(self):
+        """Why this manifest cannot name slices, or None when it can.
+
+        A manifest with no slices has none yet: create_slice_reports.py
+        gives it one. One WITH slices and no prefix is refused, naming the
+        prefix its slices' names carry when they all agree, so the fix is
+        one line someone checks, never a value this code chooses.
+        """
+        if self.data.get("prefix") or not self.data["slices"]:
+            return None
+        seen = set()
+        for name, entry in self.data["slices"].items():
+            suffix = "_" + slice_suffix(entry.get("matrix"), entry.get("fraction"),
+                                        int(entry.get("index") or 0))
+            seen.add(name[:-len(suffix)] if name.endswith(suffix) else None)
+        if len(seen) == 1 and None not in seen:
+            fix = 'its %d slice name(s) all start "%s_": add "prefix": "%s"' % (
+                len(self.data["slices"]), next(iter(seen)), next(iter(seen)))
+        else:
+            fix = ('its slice names do not share one prefix: add "prefix" with '
+                   "the one their reports and agents in the tenant carry")
+        return ("%s has slices but records no slice-name prefix, and one is "
+                "never guessed; %s." % (self.path, fix))
 
     def set_prefix(self, prefix):
         self.data.setdefault("prefix", prefix)

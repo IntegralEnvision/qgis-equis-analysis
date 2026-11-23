@@ -25,12 +25,21 @@ tenant's credentials (this repo's root, usually), and point `--root` at
 the facility's data directory, which can be anywhere:
 
 ```
-python pipeline/survey_facility.py --facility <id>
-python pipeline/create_slice_reports.py --facility <id> --root C:\data\<name> ...
+pip install -e pipeline        # once, from this repository's root
+python -m parquet_source.survey_facility --facility <id>
+python -m parquet_source.create_slice_reports --facility <id> --root C:\data\<name> ...
 ```
 
-- **Python 3.8+ and `pyarrow`** (`pip install pyarrow`). Nothing else: the
-  scripts use the standard library for HTTP.
+- **Python 3.8+, `pyarrow` and `numpy`**, which the install brings
+  (`pyproj` too with `pip install -e "pipeline[crs]"`, for an ArcGIS CRS
+  other than EPSG:4326 without a PROJJSON file). Nothing else: the steps
+  use the standard library for HTTP.
+- **Installing elsewhere**: `pip install
+  "git+https://github.com/IntegralEnvision/qgis-equis-analysis@<commit>#subdirectory=pipeline"`,
+  always pinned to a commit. Each step is then `python -m
+  parquet_source.<step>`. From a checkout the old paths, `python
+  pipeline/<step>.py`, still run without installing; they are kept for
+  scheduled tasks that call them.
 - **Credentials**: `EQUIS_SITE` and `EQUIS_API_KEY` environment variables,
   or a `.env` in the working directory or any directory above it:
   ```
@@ -48,10 +57,10 @@ python pipeline/create_slice_reports.py --facility <id> --root C:\data\<name> ..
   every sample type is exported (the plugin can still filter QC on read).
   `--template <rid>` remains for a hand-tuned report whose saved filters
   every slice should share.
-- **Check it works**: `python pipeline/test_slice_pipeline.py`,
-  `python pipeline/test_unit_convert.py`,
-  `python pipeline/test_run_nightly.py` and
-  `python pipeline/test_arcgis_export.py`, offline, in a few seconds.
+- **Check it works**: `python pipeline/tests/test_slice_pipeline.py`,
+  `python pipeline/tests/test_unit_convert.py`,
+  `python pipeline/tests/test_run_nightly.py` and
+  `python pipeline/tests/test_arcgis_export.py`, offline, in a few seconds.
 
 Each facility gets its own data directory (`--root data/<name>`): the
 manifests, `units.json`, `pipeline.json` and the parquet all live there.
@@ -66,7 +75,7 @@ pipeline.json                 what run_nightly.py needs to know        written b
 run_nightly.py                scheduled from then on, e.g. hourly      see below
 ```
 
-1. **Survey.** `python pipeline/survey_facility.py --facility <id>`. Prints
+1. **Survey.** `python -m parquet_source.survey_facility --facility <id>`. Prints
    matrices (samples, locations, date span, sample types), fractions, and a
    dry-run command per candidate cell. Read-only.
 2. **Dry-run one cell**, then create it:
@@ -100,9 +109,9 @@ run_nightly.py                scheduled from then on, e.g. hourly      see below
 ## Every check: `run_nightly.py`
 
 ```
-python pipeline/run_nightly.py --root data/<name>
-python pipeline/run_nightly.py --root data/<name> --no-upload
-python pipeline/run_nightly.py --root data/<name> --trigger
+python -m parquet_source.run_nightly --root data/<name>
+python -m parquet_source.run_nightly --root data/<name> --no-upload
+python -m parquet_source.run_nightly --root data/<name> --trigger
 ```
 
 **What it asks of the tenant.** Each check reads the facility's **load
@@ -194,9 +203,11 @@ yet. A file whose MD5 matches the blob already there is skipped.
 **Scheduling.** Hourly is reasonable: an idle check costs the tenant five
 small reads. A load is then armed within the hour and, if the agents run
 as fast as the test one did, published at the next check. On Windows, a Task Scheduler action of
-`python pipeline\run_nightly.py --root data\<name>`, starting in the
-project directory, repeating every hour. With cron:
-`0 * * * * cd /path/to/project && python pipeline/run_nightly.py --root data/<name>`.
+`python -m parquet_source.run_nightly --root data\<name>`, starting in the
+project directory, repeating every hour, with a Python the package is
+installed in. With cron:
+`0 * * * * cd /path/to/project && python -m parquet_source.run_nightly --root data/<name>`.
+A task that calls `pipeline\run_nightly.py` by path still works.
 
 ## Rows dropped for a unit on the wrong basis
 
@@ -230,8 +241,8 @@ it is not asked for again (that only adds a duplicate). New slices get the
 fields when they are created. Slices made earlier are brought level with:
 
 ```
-python pipeline/set_extra_fields.py --root data/<name> --dry-run
-python pipeline/set_extra_fields.py --root data/<name>
+python -m parquet_source.set_extra_fields --root data/<name> --dry-run
+python -m parquet_source.set_extra_fields --root data/<name>
 ```
 
 The column reaches the parquet with each slice's next stored output; run

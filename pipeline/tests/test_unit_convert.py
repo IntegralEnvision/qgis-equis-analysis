@@ -1,6 +1,6 @@
 r"""Unit conversion: the factors are EQuIS's, the arithmetic is ours.
 
-    python pipeline/test_unit_convert.py
+    python pipeline/tests/test_unit_convert.py
 
 No network and no GUI: the factor table is passed in, which is the whole
 point - this file must not know any chemistry of its own.
@@ -8,8 +8,9 @@ point - this file must not know any chemistry of its own.
 import os
 import sys
 
+# The package from this checkout, installed or not.
 HERE = os.path.dirname(os.path.abspath(__file__))
-sys.path.insert(0, HERE)
+sys.path.insert(0, os.path.dirname(HERE))
 
 FAILURES = []
 
@@ -28,7 +29,7 @@ except ImportError:
     print("SKIPPED")
     raise SystemExit(0)
 
-from unit_convert import (convert_table, describe, propose_target,  # noqa: E402
+from parquet_source.unit_convert import (convert_table, describe, propose_target,  # noqa: E402
                           target_for, unit_counts)
 
 # Exactly the rows EQuIS actually has, and deliberately NO percent row -
@@ -174,7 +175,7 @@ check("describe names what moved",
       describe({("mg/L", "ug/L"): 18397}))
 
 # --- the wrong basis: dropped, not converted ---------------------------------
-from unit_convert import basis, dropped_counts, split_mismatched  # noqa: E402
+from parquet_source.unit_convert import basis, dropped_counts, split_mismatched  # noqa: E402
 
 check("basis: per volume and per mass are told apart",
       [basis(u) for u in ("ug/L", "MG/L", "ng/mL", "mg/kg", "ug/Kg",

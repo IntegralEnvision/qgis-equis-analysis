@@ -27,12 +27,12 @@ python tools/analysis_preview.py       # the Analysis tab in a browser, no QGIS 
 python tools/profile_chemduck.py --manifest <facility>/manifest.json --out <dir>   # ChemDuck through a plugin session: the open per statement, every click, DuckDB profiles (--explain); run under plain Python AND QGIS
 
 # The parquet export pipeline: plain Python + pyarrow, imports no plugin code
-python pipeline/test_slice_pipeline.py  # pipeline bookkeeping (pyarrow)
-python pipeline/test_unit_convert.py    # collect-time unit conversion
-python pipeline/test_arcgis_export.py   # GeoParquet for ArcGIS Pro: files, CRS, refusals
-python pipeline/test_run_nightly.py     # the unattended check: order, stops, upload
+python pipeline/tests/test_slice_pipeline.py  # pipeline bookkeeping (pyarrow)
+python pipeline/tests/test_unit_convert.py    # collect-time unit conversion
+python pipeline/tests/test_arcgis_export.py   # GeoParquet for ArcGIS Pro: files, CRS, refusals
+python pipeline/tests/test_run_nightly.py     # the unattended check: order, stops, upload, launch
 python tools/test_arcgis_parity.py      # that export's non-detect columns vs ReportStore (duckdb)
-python pipeline/run_nightly.py --root data/<facility>   # one facility's check: arm on new data, rebuild what ran
+python -m parquet_source.run_nightly --root data/<facility>   # one facility's check (after pip install -e pipeline; the old path still works)
 
 python tools/vendor_deps.py --target win --python 312   # build a dep bundle
 python tools/vendor_chemduck.py --commit <sha>          # vendor ChemDuck (committed; default: re-vendor the pin)
@@ -247,7 +247,7 @@ If you add a rule to one implementation, add the case to the parity fixture.
 One mutation survived the first round purely because no fixture row exercised
 it.
 
-A third copy of the non-detect rules lives in `pipeline/arcgis_export.py`,
+A third copy of the non-detect rules lives in `pipeline/parquet_source/arcgis_export.py`,
 which does not import the plugin: the pipeline runs on its own, with Python
 and pyarrow, wherever a facility's data lives. `tools/test_arcgis_parity.py` holds it to the store,
 row for row, including on the real facility. A change to the value ladder,

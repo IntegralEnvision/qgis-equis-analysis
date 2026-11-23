@@ -34,7 +34,7 @@ sys.path.insert(0, os.path.join(ROOT, "pipeline"))
 import pyarrow as pa                                 # noqa: E402
 import pyarrow.parquet as pq                         # noqa: E402
 
-import arcgis_export as ax                           # noqa: E402
+from parquet_source import arcgis_export as ax      # noqa: E402
 from equis_loader import report_data as rd           # noqa: E402
 from equis_loader import store                       # noqa: E402
 

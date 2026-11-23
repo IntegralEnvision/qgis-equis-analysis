@@ -55,15 +55,16 @@ jobs:
           python tools/test_tasks.py
           python tools/test_overlay_payload.py
 
-      # The export pipeline ships beside the plugin, not in its ZIP, and
-      # needs pyarrow (and numpy, for the ArcGIS writer) - nothing else.
+      # The pipeline ships beside the plugin, not in its ZIP, as the
+      # parquet_source package. Installing it is part of the test: it
+      # brings pyarrow and numpy, and fails if pyproject.toml does not build.
       - name: Pipeline tests
         run: |
-          python -m pip install --quiet pyarrow numpy
-          python pipeline/test_slice_pipeline.py
-          python pipeline/test_unit_convert.py
-          python pipeline/test_arcgis_export.py
-          python pipeline/test_run_nightly.py
+          python -m pip install --quiet ./pipeline
+          python pipeline/tests/test_slice_pipeline.py
+          python pipeline/tests/test_unit_convert.py
+          python pipeline/tests/test_arcgis_export.py
+          python pipeline/tests/test_run_nightly.py
 
       - name: Build zip
         run: python tools/package.py

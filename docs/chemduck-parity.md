@@ -27,7 +27,7 @@ and turn it into a value per location:
 | **Chemrooms** (`chemrooms`) | Browser workbench on SQLRooms and DuckDB-WASM | ChemDuck's SQL, loaded at startup |
 
 The plugin also has a third copy of its non-detect rules in its parquet
-pipeline (`pipeline/arcgis_export.py`), held to the store by its own parity
+pipeline (`pipeline/parquet_source/arcgis_export.py`), held to the store by its own parity
 test. ChemDuck's rules were ported from the plugin's on 2026-09-30
 (`chemduck/docs/domain-rules-remediation.md`), but nothing compared the two
 afterwards. Two tools reading the same facility could map different numbers

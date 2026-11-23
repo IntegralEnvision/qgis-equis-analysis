@@ -20,7 +20,7 @@ of ChemDuck), and ChemDuck's `docs/shared-rules-decisions*.md`.
 plugin: which result a location shows, how a non-detect is valued, which
 results may be combined, when units or matrices refuse. Today the plugin holds
 three copies of those rules (`report_data.py`, `store.py`,
-`pipeline/arcgis_export.py`), and ChemDuck a fourth. The end state has one.
+`pipeline/parquet_source/arcgis_export.py`), and ChemDuck a fourth. The end state has one.
 
 What stays the plugin's:
 
@@ -581,7 +581,7 @@ Following CLAUDE.md's rule for deleting old code:
 - `tools/test_store_parity.py` is retargeted: the adapter against ChemDuck's
   fixture answers, with the same mutation discipline (deliberate rule breaks
   must fail it).
-- `pipeline/arcgis_export.py` stops holding its own non-detect rules: it
+- `pipeline/parquet_source/arcgis_export.py` stops holding its own non-detect rules: it
   reads ChemDuck's `results` view once the pipeline has DuckDB (phase 6), and
   `tools/test_arcgis_parity.py` compares it to ChemDuck.
 - CLAUDE.md's domain-rules section is rewritten to point at ChemDuck as the
@@ -592,7 +592,7 @@ that replaced the old ones have each been mutation-checked.
 
 ### Phase 6 — the pipeline publishes ChemDuck's sidecars
 
-- `pipeline/run_nightly.py` gains a step after repacking and before upload:
+- `pipeline/parquet_source/run_nightly.py` gains a step after repacking and before upload:
   ChemDuck `publish` writes the sidecars, the ChemDuck SQL bundle and its
   `SOURCE.json` beside `manifest.json`. The manifest lists them.
 - The pipeline gains `duckdb` and `pyyaml` as dependencies, and ChemDuck,

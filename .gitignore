@@ -57,3 +57,7 @@ data/facility_a_backup_*/
 # run_nightly.py's per-night logs and its overlap lock.
 data/**/_logs/
 data/**/_nightly.lock
+
+# What `pip install -e pipeline` and a build leave beside the package.
+pipeline/*.egg-info/
+pipeline/build/
