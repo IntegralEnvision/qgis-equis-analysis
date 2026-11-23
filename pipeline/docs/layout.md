@@ -21,6 +21,15 @@ One directory per facility. `create_slice_reports.py` records the
 facility id in `manifest_local.json` and refuses a root that belongs to
 another.
 
+**What readers rely on, and what is the pipeline's own.** The partitions
+(this section and [Columns](#columns)), the published `manifest.json` and
+`arcgis/` are the format: the QGIS plugin and ChemDuck read them, and any
+writer of this layout - this pipeline from EQuIS, or another tool from a
+compilation - must produce them as specified here. A change to them is a
+change to this file first, then to the writers and the readers.
+`manifest_local.json`, `units.json`, `pipeline.json`, `_staging/` and
+`_dropped/` are this pipeline's bookkeeping; no reader opens them.
+
 ## Partitions
 
 Partitioned on **matrix and fraction only**: they are in every query the
@@ -33,6 +42,81 @@ Written zstd level 9, dictionary-encoded, sorted on
 `CHEMICAL_NAME, SYS_LOC_CODE, SAMPLE_DATE`, 50,000-row groups, statistics
 on, written beside and renamed over so an interrupted repack never leaves a
 truncated partition.
+
+## Columns
+
+A partition's rows are EQuIS Analytical Results II rows under ARII's own
+column names. Another writer uses the same names: every reader finds its
+columns by name, and a filter on a column the source lacks matches every
+row rather than none.
+
+Three readers, each with its own copy of the rules: the plugin
+(`equis_loader/report_data.py` `COLUMNS`), ChemDuck
+(`equis_arii_parquet_mapping.yaml`, in its repository and vendored into
+the plugin) and the ArcGIS writer (`arcgis_export.py`, held to the plugin
+by `tools/test_arcgis_parity.py`). Where they read different columns for
+one fact, a writer provides both.
+
+**Required.** A writer provides all of these. The plugin refuses a source
+without `SYS_LOC_CODE`, `CHEMICAL_NAME`, `SAMPLE_DATE`, `DETECT_FLAG` or
+any value column (`REQUIRED_FOR_ANALYSIS`); ChemDuck's publish refuses one
+without `DETECT_FLAG`. The rest are not refused when missing, which is
+worse: ChemDuck leaves out rows with no `SYS_SAMPLE_CODE`, and without
+`FRACTION` nothing can keep dissolved and total apart.
+
+| Column | Type | Rule |
+|---|---|---|
+| `SYS_LOC_CODE` | string | the location. Readers join it to other sources case-insensitively |
+| `CHEMICAL_NAME` | string | the analyte |
+| `SAMPLE_DATE` | string | ARII's text, `M/D/YYYY h:mm:ss AM`. Readers try the same ten formats in order (`report_data.DATE_FORMATS`); a typed timestamp also parses |
+| `DETECT_FLAG` | string | **exactly `Y` or `N`**. Detection comes from this column and nothing else: without it every result read as a non-detect and was halved (2026-10-08). The plugin and the ArcGIS writer accept `YES`, `TRUE` and `1` as well; ChemDuck maps only `Y` and `N`, so a writer writes those two |
+| `RESULT_NUMERIC` | double | the measured value; **null for a non-detect** |
+| `REPORT_RESULT_VALUE` | double | the value as reported: for a non-detect, the limit it fell below. ChemDuck reads its result from here; the plugin falls back to it |
+| `RESULT_UNIT`, `REPORT_RESULT_UNIT` | string | the plugin reads `RESULT_UNIT` first; a non-detect has none, so its unit is `REPORT_RESULT_UNIT`, which ChemDuck reads for every row |
+| `SYS_SAMPLE_CODE` | string | one field sample: a pivoted or multivariate view's row, and ChemDuck's sample id |
+| `MATRIX_CODE`, `FRACTION` | string | equal to the file's `matrix=` and `fraction=` (every row, on the first facility). Results are never aggregated across fractions |
+
+**The value ladder.** A non-detect carries only a limit, so a value is the
+first present of `RESULT_NUMERIC`, `REPORT_RESULT_VALUE`, then the limits
+`REPORT_METHOD_DETECTION_LIMIT`, `METHOD_DETECTION_LIMIT`,
+`REPORTING_DETECTION_LIMIT`, `REPORT_REPORTING_LIMIT`,
+`REPORT_RESULT_LIMIT`. On the first facility (3,515,468 rows, 2026-11-23)
+1,649,349 rows have no `RESULT_NUMERIC`, and 51,844 have no
+`REPORT_RESULT_VALUE` either, so the limit columns are not optional in
+practice. ChemDuck's own order is `limit_chain` in its mapping.
+
+**Read when present.** `CAS_RN`, `SAMPLE_TYPE_CODE` (QC is filtered on it),
+`START_DEPTH`, `END_DEPTH`, `DEPTH_UNIT` (depths compare in one unit, by
+exact length factors), `ANALYTIC_METHOD` and `TEST_TYPE` (two methods on
+one sample are real data, not duplicates), `REPORTABLE_RESULT`,
+`REPORT_RESULT_LIMIT`, `REPORT_QUANTITATION_LIMIT`, `DILUTION_FACTOR`,
+`INTERPRETED_QUALIFIERS`, `LAB_QUALIFIERS`, `VALIDATOR_QUALIFIERS`,
+`LAB_NAME_CODE`, `LAB_SAMPLE_ID`, `LAB_SDG`, `ANALYSIS_DATE`,
+`APPROVAL_CODE`, `ANALYTE_TYPE`, `TASK_CODE`, `PARENT_SAMPLE_CODE`,
+`FACILITY_CODE`, `LOC_NAME`, `LOC_TYPE`.
+
+**Coordinates** are named per facility, never inferred from a column's
+name: `X_COORD` is longitude at one facility and an easting at the next.
+The plugin tries `X_COORD`/`Y_COORD`, then `LONGITUDE`/`LATITUDE`; the
+ArcGIS writer takes them and their CRS from `arcgis.json` (default
+`LONGITUDE`, `LATITUDE`, EPSG:4326); ChemDuck takes them at publish and
+requires WGS84 longitude and latitude.
+
+**Written by this pipeline, beyond ARII's output.**
+
+- `matrix`, `fraction`: the Hive keys, also inside each file as dictionary
+  strings.
+- `RESULT_UNIT_ORIGINAL`, `RESULT_VALUE_ORIGINAL`: present when a cell's
+  unit conversion ran (`units.json`). Conversion rewrites every value and
+  limit column and every unit column to the cell's unit, by EQuIS's
+  factors; these keep the unit and value the laboratory reported.
+- `IDENTIFIER`: asked for through `@extra_fields` (README, "Columns beyond
+  the default output").
+
+**Types.** Dates are text as ARII writes them; numbers are double; ids
+are int64. A column with no value in one file can be null-typed there
+(`LEACHATE_DATE`, `IDENTIFIER`), so readers combine files by column name
+(`union_by_name`), never by position.
 
 ## manifest_local.json
 
