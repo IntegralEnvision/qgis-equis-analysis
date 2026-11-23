@@ -481,6 +481,12 @@ class EquisDialog(QDockWidget):
         self._roll_markers = []
         self._roll_index = 0
 
+        # What the open project maps on the live path, (site, facility id,
+        # facility name), and this person's parquet tokens by address. Both
+        # are refilled from their stores by _apply_project_source.
+        self._project_live = (None, None, None)
+        self._parquet_tokens = {}
+
         self._build_ui()
         self._load_settings()
         # Saving the project is what gives GeoPackage storage somewhere to
@@ -576,6 +582,13 @@ class EquisDialog(QDockWidget):
         self.key_hint.setStyleSheet("color: #5a6b7b;")
         conn_form.addRow("", self.key_hint)
         self.key_edit.textChanged.connect(self._on_key_changed)
+        # A signed URL carries its expiry too (`se=`), and an expired one
+        # fails as a 403 that reads like a broken source. Said beside the
+        # field, as the key's is.
+        self.parquet_hint = QLabel("")
+        self.parquet_hint.setWordWrap(True)
+        self.parquet_hint.setStyleSheet("color: #5a6b7b;")
+        conn_form.addRow("", self.parquet_hint)
         self.site_label = conn_form.labelForField(self.site_edit)
         self.key_label = conn_form.labelForField(self.key_edit)
         self.source_combo.currentIndexChanged.connect(self._on_source_changed)
@@ -1156,8 +1169,18 @@ class EquisDialog(QDockWidget):
         return self.source_combo.currentData() or settings_store.SOURCE_LIVE
 
     def _on_parquet_url_changed(self, text):
-        """Keep the long token out of the way and readable on hover."""
+        """Keep the long token out of the way and readable on hover, and say
+        when it stops working.
+
+        The token is the one Open would use: the field's own, or the one
+        this person holds for a bare address (parquet_address.resolve).
+        """
         self.parquet_edit.setToolTip(text or "")
+        url = parquet_address.resolve(self._parquet_tokens, text)
+        self._show_expiry(
+            self.parquet_hint,
+            parquet_address.token_expiry(parquet_address.split(url)[1]),
+            "token")
 
     def _on_source_changed(self):
         """Show only the credentials the chosen source actually uses.
@@ -1172,7 +1195,8 @@ class EquisDialog(QDockWidget):
                        self.key_edit, self.key_label, self.key_hint):
             if widget is not None:
                 widget.setVisible(not parquet)
-        for widget in (self.parquet_edit, self.parquet_label):
+        for widget in (self.parquet_edit, self.parquet_label,
+                       self.parquet_hint):
             if widget is not None:
                 widget.setVisible(parquet)
         # Offline browsing is a cache of API responses; a parquet set is
@@ -1227,11 +1251,8 @@ class EquisDialog(QDockWidget):
         self.key_edit.setText(cfg["api_key"])
         self.verify_ssl_check.setChecked(cfg["verify_ssl"])
         self.read_only_check.setChecked(settings_store.load_read_only())
-        # The person's defaults, for a project that has not said: the .env's
-        # parquet URL and the last source chosen. _apply_project_source
-        # lets the project override both.
-        self._default_parquet_url = cfg.get("parquet_url", "")
-        self._default_source = cfg.get("source", settings_store.SOURCE_LIVE)
+        # The fields hold the person's defaults now; the project, if it
+        # records a source, a site or an address, overrides them.
         self._apply_project_source()
         # A key saved once and since expired keeps being sent, and every
         # request 401s in a way that looks like the service is down.
@@ -1252,49 +1273,104 @@ class EquisDialog(QDockWidget):
     # --------------------------------------------------------------- state
 
     def _on_project_changed(self, *_args):
-        """A project was opened or closed: show ITS parquet source.
+        """A project was opened or closed: show what IT maps.
 
-        Fills the field and nothing more. Opening a source takes seconds and
-        replaces what is loaded, so it stays the person's click; and what is
-        loaded is left alone, since its layers' fate is the project's
-        business, not this field's.
+        Fills the fields and nothing more, with one exception below.
+        Opening a parquet source takes seconds and replaces what is loaded,
+        so it stays the person's click; and what is loaded is left alone,
+        since its layers' fate is the project's business, not these fields'.
         """
         self._apply_project_source()
+        # The exception: already connected to the project's site, with
+        # nothing loaded, choosing its facility is the click anyone would
+        # make next, and it discards nothing.
+        if self._report_table is None:
+            self._select_project_facility()
 
     def _apply_project_source(self):
-        """Set the source and the parquet field from the open project.
+        """Set the source and the connection fields from the open project.
 
-        The project records the source and the parquet ADDRESS; the token,
-        if this person has one for that address, comes from their own
-        settings (parquet_address.py says why). A project that records
-        nothing gets the person's defaults - never the last URL opened in
-        some other project, which is what this field used to show.
+        The project records the source, the EQuIS site and facility, and a
+        parquet source's ADDRESS. The credentials - the API key for that
+        site, the token for that address - come from this person's own
+        settings (parquet_address.py says why). Whatever the project does
+        not record falls back to the person's defaults: their last site
+        and source, and only the .env's parquet URL - never the last URL
+        opened in some other project, which is what this field used to show.
         """
+        cfg = settings_store.load()
         source, address = settings_store.load_project_source()
+        self._project_live = settings_store.load_project_live()
+        site = self._project_live[0]
         tokens = settings_store.load_parquet_tokens()
+        self._parquet_tokens = tokens
         self._parquet_completer.model().setStringList(sorted(tokens))
-        index = self.source_combo.findData(source or self._default_source)
+
+        index = self.source_combo.findData(source or cfg["source"])
         if index >= 0:
             self.source_combo.blockSignals(True)
             self.source_combo.setCurrentIndex(index)
             self.source_combo.blockSignals(False)
+        if site:
+            self.site_edit.setText(site)
+            self.key_edit.setText(settings_store.api_key_for(site))
+        else:
+            self.site_edit.setText(cfg["site"])
+            self.key_edit.setText(cfg["api_key"])
         if address:
             self.parquet_edit.setText(parquet_address.resolve(tokens, address))
         else:
-            self.parquet_edit.setText(self._default_parquet_url)
+            self.parquet_edit.setText(cfg.get("parquet_url", ""))
         self.parquet_edit.setCursorPosition(0)
         self._on_source_changed()
+
+        # Said once, here, rather than left to a 401 or a 403 that reads
+        # like a broken service. Neither refuses: a public container needs
+        # no token, and a key can still be pasted.
         if (source == settings_store.SOURCE_PARQUET and address
                 and parquet_address.needs_token(tokens, address)):
-            # Said once, here, rather than left to a 403 on Open that reads
-            # like a broken source. A public container needs no token, so
-            # this informs and does not refuse.
             self._set_status(
                 "This project's parquet source has no token on this "
                 "computer. If it is signed, paste the full URL (with its "
                 "?sp=...&sig=... part) once; it is remembered for this "
                 "address, never written into the project.",
                 Qgis.MessageLevel.Warning)
+        elif (source != settings_store.SOURCE_PARQUET and site
+                and not self.key_edit.text().strip()):
+            self._set_status(
+                "This project uses %s, and there is no API key for it on "
+                "this computer. Paste one and press Connect; it is "
+                "remembered for this site, never written into the project."
+                % site, Qgis.MessageLevel.Warning)
+
+    def _select_project_facility(self):
+        """Choose the project's facility, when the list holds it.
+
+        Only on the project's own site - a facility id is EQuIS's and means
+        another facility, or nothing, on another tenant - and only when
+        nothing else is chosen, so it never replaces the person's pick.
+        Choosing it loads it, through _on_facility_changed like a click.
+        """
+        site, facility_id, name = self._project_live
+        if not facility_id or not self._facilities or not self._connected():
+            return
+        if site and settings_store.site_key(self._site()) != site:
+            return
+        if self._current_facility() is not None:
+            return          # already it, or the person chose another: keep
+        for row in range(1, self.facility_combo.count()):
+            data = self.facility_combo.itemData(row)
+            if data and str(data.get("id")) == facility_id:
+                self.facility_combo.setCurrentIndex(row)
+                return
+        # Filtered out, removed from the tenant, or not in the cache when
+        # offline: say which, rather than leaving the person to wonder why
+        # the project did not come back.
+        self._set_status(
+            "This project maps %s, which is not in the list%s."
+            % (name or "facility %s" % facility_id,
+               " of cached facilities" if self._offline else ""),
+            Qgis.MessageLevel.Warning)
 
     def _set_status(self, message, level=Qgis.MessageLevel.Info):
         colors = {
@@ -1806,8 +1882,9 @@ class EquisDialog(QDockWidget):
         # different source now.
         settings_store.remember_parquet_token(url)
         settings_store.save_project_source(settings_store.SOURCE_PARQUET, url)
+        self._parquet_tokens = settings_store.load_parquet_tokens()
         self._parquet_completer.model().setStringList(
-            sorted(settings_store.load_parquet_tokens()))
+            sorted(self._parquet_tokens))
         self._watch_manifest(store)
         self._offline = False
         self._set_busy(False)
@@ -2066,6 +2143,13 @@ class EquisDialog(QDockWidget):
         # Shown, not just logged: unlike the store accelerator, this IS the
         # data the user asked for, so a failure leaves them with nothing and
         # they need to know why.
+        expiry = parquet_address.token_expiry(parquet_address.split(
+            parquet_address.resolve(self._parquet_tokens,
+                                    self.parquet_edit.text()))[1])
+        if expiry is not None and expiry <= utc_now():
+            message += (" - the URL's token expired on %s UTC; whoever "
+                        "published the source can issue a new one"
+                        % expiry.strftime("%Y-%m-%d %H:%M"))
         self._set_status("Could not open the parquet source: %s" % message,
                          Qgis.MessageLevel.Critical)
 
@@ -2226,21 +2310,31 @@ class EquisDialog(QDockWidget):
 
     def _on_key_changed(self, text):
         """Describe a pasted key's expiry immediately, before connecting."""
-        expiry = token_expiry((text or "").strip())
+        self._show_expiry(self.key_hint, token_expiry((text or "").strip()),
+                          "key")
+
+    @staticmethod
+    def _show_expiry(label, expiry, noun):
+        """Say on `label` when a credential expires: red once it has, amber
+        within a week, grey otherwise, nothing when it does not say.
+
+        One wording for the API key and a signed URL's token, so the two
+        rows read alike and a week means the same thing on both.
+        """
         if expiry is None:
-            self.key_hint.setText("")
+            label.setText("")
             return
         now = utc_now()
         stamp = expiry.strftime("%Y-%m-%d %H:%M")
         if expiry <= now:
-            self.key_hint.setText("This key expired on %s UTC." % stamp)
-            self.key_hint.setStyleSheet("color: #a01010;")
+            label.setText("This %s expired on %s UTC." % (noun, stamp))
+            label.setStyleSheet("color: #a01010;")
         elif (expiry - now).days <= 7:
-            self.key_hint.setText("This key expires %s UTC." % stamp)
-            self.key_hint.setStyleSheet("color: #a05a00;")
+            label.setText("This %s expires %s UTC." % (noun, stamp))
+            label.setStyleSheet("color: #a05a00;")
         else:
-            self.key_hint.setText("Key valid until %s UTC." % stamp)
-            self.key_hint.setStyleSheet("color: #5a6b7b;")
+            label.setText("%s valid until %s UTC." % (noun.capitalize(), stamp))
+            label.setStyleSheet("color: #5a6b7b;")
 
     def _warn_if_key_expiring(self, expiry):
         """Flag a key that is about to lapse, while it still works.
@@ -2304,6 +2398,7 @@ class EquisDialog(QDockWidget):
             )
             self._update_active_label()
             self._update_cache_label()
+            self._select_project_facility()
             return
 
         self._facilities = facilities
@@ -2321,6 +2416,8 @@ class EquisDialog(QDockWidget):
             Qgis.MessageLevel.Success,
         )
         self._update_cache_label()
+        # Last, so its "Loading ..." replaces "Select one".
+        self._select_project_facility()
 
     # ---------------------------------------------------------- 2. facility
 
@@ -2380,6 +2477,11 @@ class EquisDialog(QDockWidget):
         # the active session outright rather than asking - but say so, since
         # a loaded report and its layer are being discarded.
         had_report = self._report_table is not None
+        # The choice that says what the project maps: the site and the
+        # facility go into it (never the key). The same values again - the
+        # project's own facility chosen on reopening - leave it unmodified.
+        settings_store.save_project_live(self._site(), facility)
+        self._project_live = settings_store.load_project_live()
         self._reset_report_state()
         self._enter(st.FACILITY, "facility chosen")
         self.locations_label.setText("")

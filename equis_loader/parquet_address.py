@@ -18,6 +18,9 @@ address works for them afterwards.
 No QGIS here (see CLAUDE.md), so the rules are tested under a plain
 interpreter: tools/test_parquet_address.py.
 """
+import datetime
+import re
+from urllib.parse import parse_qs
 
 
 def is_remote(text):
@@ -89,3 +92,30 @@ def needs_token(book, text):
     address, token = split(text)
     return bool(is_remote(address) and not token
                 and not (book or {}).get(address))
+
+
+# The forms Azure accepts for a SAS's `se` (signed expiry), all UTC:
+# a date, or a date and time ending in Z, with or without seconds. A
+# fraction of a second (some tools write seven digits) is dropped before
+# parsing; strptime's %f takes at most six.
+_EXPIRY_FORMATS = ("%Y-%m-%dT%H:%M:%SZ", "%Y-%m-%dT%H:%MZ", "%Y-%m-%d")
+
+
+def token_expiry(token):
+    """When a SAS token stops working, as a naive UTC datetime, or None.
+
+    Naive UTC because the rest of the plugin keeps UTC naive
+    (equis_api.utc_now), and comparing aware with naive raises. None for
+    no token, a token without `se`, or an `se` in a form Azure would not
+    accept either: a hint that guesses is worse than no hint.
+    """
+    values = parse_qs((token or "").lstrip("?")).get("se") or []
+    if not values:
+        return None
+    raw = re.sub(r"\.\d+Z$", "Z", values[0].strip())
+    for fmt in _EXPIRY_FORMATS:
+        try:
+            return datetime.datetime.strptime(raw, fmt)
+        except ValueError:
+            continue
+    return None

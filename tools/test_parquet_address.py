@@ -5,6 +5,7 @@ Runs on a plain interpreter (no QGIS, no network):
 
   python tools/test_parquet_address.py
 """
+import datetime
 import importlib.util
 import os
 import sys
@@ -94,6 +95,30 @@ check("not when the book has it", not pa.needs_token(book, ADDRESS))
 check("not when the URL carries it", not pa.needs_token({}, SIGNED))
 check("never for a local folder", not pa.needs_token({}, "data/facility_a"))
 check("never for nothing", not pa.needs_token({}, ""))
+
+# --- token_expiry: the SAS's own `se`, naive UTC
+D = datetime.datetime
+check("se with seconds", pa.token_expiry(TOKEN) == D(2027, 11, 1),
+      repr(pa.token_expiry(TOKEN)))
+check("se percent-encoded, as Azure's portal writes it",
+      pa.token_expiry("sp=r&se=2027-11-01T13%3A45%3A10Z&sig=x")
+      == D(2027, 11, 1, 13, 45, 10))
+check("se without seconds",
+      pa.token_expiry("se=2027-11-01T13:45Z") == D(2027, 11, 1, 13, 45))
+check("se as a date", pa.token_expiry("se=2027-11-01") == D(2027, 11, 1))
+check("se with a seven-digit fraction",
+      pa.token_expiry("se=2027-11-01T13:45:10.0000000Z")
+      == D(2027, 11, 1, 13, 45, 10))
+check("a leading ? is tolerated",
+      pa.token_expiry("?se=2027-11-01") == D(2027, 11, 1))
+check("naive, like the rest of the plugin's UTC",
+      pa.token_expiry(TOKEN).tzinfo is None)
+check("no se, no expiry", pa.token_expiry("sp=r&sig=x") is None)
+check("no token, no expiry",
+      pa.token_expiry("") is None and pa.token_expiry(None) is None)
+check("an se Azure would refuse is not guessed at",
+      pa.token_expiry("se=11/01/2027") is None
+      and pa.token_expiry("se=2027-11-01T13:45:10+02:00") is None)
 
 print("\n%d failure(s)" % len(FAILURES))
 sys.exit(1 if FAILURES else 0)
