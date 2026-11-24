@@ -39,6 +39,7 @@ import time as _time
 import urllib.parse
 import urllib.request
 
+from . import parquet_address
 from . import report_data as rd
 
 # Columns the store holds, and where each comes from in the source report.
@@ -108,7 +109,15 @@ def duckdb_module():
 
 
 class StoreError(RuntimeError):
-    pass
+    """A store that could not open or answer, in words for the user.
+
+    Redacted here, once, because nearly every message names its source and
+    a published source's URL carries its SAS token: "could not fetch
+    'https://...?sv=...&sig=...'" went to the status line as it was.
+    """
+
+    def __init__(self, message=""):
+        super().__init__(parquet_address.redact(message))
 
 
 def build_store_file(table, path, with_raw=False):

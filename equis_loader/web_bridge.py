@@ -33,6 +33,7 @@ import json
 from qgis.PyQt.QtCore import QObject, pyqtSignal, pyqtSlot
 
 from . import bridge_payload
+from . import parquet_address
 
 try:
     from qgis.core import Qgis, QgsMessageLog
@@ -53,7 +54,8 @@ KEY_ERROR = "error"
 def _log(message, level=None):
     if QgsMessageLog is None:  # pragma: no cover - outside QGIS
         return
-    QgsMessageLog.logMessage(str(message), LOG_TAG,
+    # The query and its error can both carry a parquet source's URL.
+    QgsMessageLog.logMessage(parquet_address.redact(message), LOG_TAG,
                              level if level is not None else Qgis.Info)
 
 
@@ -124,8 +126,10 @@ class WebBridge(QObject):
 
     @staticmethod
     def _fail(message, kind):
+        # DuckDB names the file it failed on, and a published source's
+        # file URLs end in their SAS token; the page shows this text.
         return json.dumps({KEY_OK: False, KEY_KIND: kind,
-                           KEY_ERROR: str(message)})
+                           KEY_ERROR: parquet_address.redact(message)})
 
     # ----------------------------------------------------------- diagnostics
 

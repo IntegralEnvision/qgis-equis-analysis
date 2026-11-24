@@ -28,6 +28,7 @@ import time
 from qgis.PyQt.QtCore import QTimer, Qt
 from qgis.PyQt.QtGui import QColor
 
+from . import parquet_address
 from . import web_assets
 from .web_bridge import WebBridge
 
@@ -59,7 +60,8 @@ class WebViewError(RuntimeError):
 def _log(message, level=None):
     if QgsMessageLog is None:  # pragma: no cover
         return
-    QgsMessageLog.logMessage(str(message), "equis-web",
+    # The page's console relays errors that can name a parquet URL.
+    QgsMessageLog.logMessage(parquet_address.redact(message), "equis-web",
                              level if level is not None else Qgis.Info)
 
 

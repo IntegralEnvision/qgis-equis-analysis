@@ -8,7 +8,7 @@ for whoever is changing it.
 
 ```
 python tools/test_parsing.py          # parsing, paging, aggregation, cache
-python tools/test_parquet_address.py  # a parquet URL's address (project) vs token (person), its expiry
+python tools/test_parquet_address.py  # a parquet URL's address (project) vs token (person), its expiry, its redaction
 python tools/test_tasks.py            # cache decisions
 python tools/test_state.py            # the panel's state machine
 python tools/test_store_parity.py     # ReportTable vs ReportStore (needs duckdb)

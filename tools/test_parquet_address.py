@@ -120,5 +120,30 @@ check("an se Azure would refuse is not guessed at",
       pa.token_expiry("se=11/01/2027") is None
       and pa.token_expiry("se=2027-11-01T13:45:10+02:00") is None)
 
+# --- redact: no token in anything the panel shows or logs
+for label, text, kept in (
+    ("DuckDB's wording", "HTTP GET error on '%s/matrix=WS/fraction=N/part-0000"
+     ".parquet?%s' (HTTP 403)" % (ADDRESS, TOKEN),
+     "%s/matrix=WS/fraction=N/part-0000.parquet?<token>' (HTTP 403)" % ADDRESS),
+    ("a repr'd list of files", repr([ADDRESS + "/a.parquet?" + TOKEN,
+                                     ADDRESS + "/b.parquet?" + TOKEN]),
+     "b.parquet?<token>'"),
+    ("a bare URL at the end", "could not fetch " + SIGNED, ADDRESS + "?<token>"),
+    ("sig first", ADDRESS + "?sig=x&sp=r failed", ADDRESS + "?<token> failed"),
+    ("a token with no URL", "token: " + TOKEN, "sig=<token>"),
+    ("percent-encoded", "u=" + ADDRESS + "%3Fsv%3D1%26sig%3Dabc", "sig=<token>"),
+):
+    out = pa.redact(text)
+    check("redact, %s: no signature left" % label,
+          "abc" not in out and "sig=x" not in out, out)
+    check("redact, %s: the rest kept" % label, kept in out, out)
+check("redact leaves a query with no signature alone (an API URL's $filter "
+      "is the useful part)",
+      pa.redact("GET https://site/api/odata/x?$filter=a eq 1 -> 400")
+      == "GET https://site/api/odata/x?$filter=a eq 1 -> 400")
+check("redact leaves plain text alone", pa.redact("no rows") == "no rows")
+check("redact takes anything", pa.redact(None) == ""
+      and pa.redact(ValueError("x?sig=1")) == "x?<token>")
+
 print("\n%d failure(s)" % len(FAILURES))
 sys.exit(1 if FAILURES else 0)

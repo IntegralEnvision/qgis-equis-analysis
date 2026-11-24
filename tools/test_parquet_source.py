@@ -21,6 +21,7 @@ sys.path.insert(0, ROOT)
 
 import equis_loader.report_data as rd  # noqa: E402
 from equis_loader.store import ReportStore, StoreError  # noqa: E402
+import equis_loader.parquet_address as pa  # noqa: E402
 
 FAILURES = []
 
@@ -397,11 +398,23 @@ try:
                              str(size if first is None else last - first + 1))
             self.end_headers()
 
+        def _missing(self):
+            # A 404 rather than a dropped connection, as Azure answers a
+            # file that is not there.
+            if os.path.isfile(self._file()):
+                return False
+            self.send_error(404)
+            return True
+
         def do_HEAD(self):
             requests["n"] += 1
+            if self._missing():
+                return
             self._headers(os.path.getsize(self._file()))
 
         def do_GET(self):
+            if self._missing():
+                return
             path = self._file()
             size = os.path.getsize(path)
             wanted = self.headers.get("Range")
@@ -484,6 +497,59 @@ try:
         check("a reopened store reads the new publish, caches on again",
               fresh.count() == 3 and fresh.remote_caches and fresh.is_current(text))
         fresh.close()
+
+        # --- a signed source's failures never show its token -------------
+        # The status line and the log carry these messages, and
+        # CONTRIBUTING asks for that text in a public issue. Each case
+        # fails for real, over http, so DuckDB's and urllib's own wording
+        # is what is redacted - not a message written to suit the regex.
+        secret = "sv=2022-11-02&sr=c&sp=r&sig=SECRETabc%3D"
+
+        def opened(source):
+            try:
+                ReportStore.from_manifest(source).close()
+            except StoreError as exc:
+                return str(exc)
+            return None
+
+        nowhere = opened(url + "/nowhere?" + secret)
+        check("a manifest that is not there: refused, and the token is not "
+              "in the message", nowhere is not None and "SECRET" not in nowhere
+              and "sig=" not in nowhere, repr(nowhere))
+        check("...which still names the address and the answer",
+              nowhere is not None and url + "/nowhere/manifest.json?<token>"
+              in nowhere and "404" in nowhere, repr(nowhere))
+
+        broken = os.path.join(served, "broken")
+        os.makedirs(broken)
+        with open(os.path.join(broken, "manifest.json"), "w",
+                  encoding="utf-8") as handle:
+            json.dump({"version": 1, "partitions": [
+                {"path": "matrix=WS/fraction=N/part-0000.parquet"}]}, handle)
+        missing = opened(url + "/broken?" + secret)
+        check("a partition that is not there: DuckDB's error, without the "
+              "token", missing is not None and "SECRET" not in missing,
+              repr(missing))
+
+        # A query that fails after the open is DuckDB's own exception, not
+        # a StoreError; it reaches the page and the status line through
+        # redact, so the real wording is held to it here.
+        signed = ReportStore.from_manifest(url + "?" + secret)
+        signed.stop_caching()
+        os.remove(os.path.join(served, "matrix=WS", "fraction=N",
+                               "part-0000.parquet"))
+        try:
+            signed.count()
+            raw = None
+        except Exception as exc:                # noqa: BLE001
+            raw = str(exc)
+        signed.close()
+        check("a query on a vanished file names the signed URL (the leak "
+              "is real)", raw is not None and "SECRET" in raw, repr(raw))
+        check("...and redact removes it, keeping the file",
+              raw is not None and "SECRET" not in pa.redact(raw)
+              and "part-0000.parquet?<token>" in pa.redact(raw),
+              repr(pa.redact(raw)) if raw else "")
     finally:
         server.shutdown()
         shutil.rmtree(served, ignore_errors=True)
