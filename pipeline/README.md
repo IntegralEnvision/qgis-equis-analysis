@@ -182,7 +182,8 @@ person:
 
 **Upload** goes to Azure Blob storage over a container SAS URL with write
 rights, kept in the `.env` (or the environment) beside the read-only one
-readers are given:
+readers are given (in the plugin, a reader pastes it once; the QGIS project
+keeps only the address before the `?`, the token stays on their computer):
 
 ```
 parquet_cache:    https://<account>.blob.core.windows.net/<container>?sv=...&sp=r...
