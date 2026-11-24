@@ -15,7 +15,9 @@ The most useful reports say:
 - whether the data was live, cached (offline) or a parquet source.
 
 **Leave out API keys, site URLs and real data.** A key is a bearer token for
-your account, and a site URL or location code can identify a client. Replace
+your account, a parquet URL's query string (`?sv=...&sig=...`) is a
+credential for its storage, and a site URL or location code can identify a
+client. Replace
 them with placeholders; a description of the data's shape is enough.
 
 ## Changing the code

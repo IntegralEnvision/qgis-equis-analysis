@@ -1,10 +1,19 @@
-"""Connection settings, stored in QSettings with a .env fallback."""
+"""Connection settings, stored in QSettings with a .env fallback.
 
+What a project maps is the exception, split across two stores on purpose
+(see parquet_address.py): the source, the EQuIS site and facility, and a
+parquet source's address belong to the QGIS project; the credentials - the
+API key, a signed URL's token - belong to the person, looked up by site or
+address, and never reach the project file.
+"""
+
+import json
 import os
 
-from qgis.core import QgsApplication
+from qgis.core import QgsApplication, QgsProject
 from qgis.PyQt.QtCore import QSettings
 
+from . import parquet_address
 from .cache import DEFAULT_MAX_BYTES, EquisCache
 from .layer_builder import (
     clamp_spark_range,
@@ -103,22 +112,31 @@ def stale_saved_key():
 
 
 def load():
+    """The person's connection settings: their defaults.
+
+    A project that records a site, a source or a parquet address overrides
+    these (`load_project_source`, `load_project_live`). `site` and `source`
+    are the person's last choices, for a project that has made none, and
+    `api_key` is the one they hold for that site. `parquet_url` is only the
+    .env's: it used to be the last URL opened in any project in this
+    profile, which put project A's source in front of project B.
+    """
+    _migrate_parquet_url()
+    _migrate_api_key()
     settings = QSettings()
     settings.beginGroup(GROUP)
     site = settings.value("site", "", type=str)
-    api_key = settings.value("api_key", "", type=str)
     verify_ssl = settings.value("verify_ssl", True, type=bool)
     source = settings.value("source", SOURCE_LIVE, type=str)
-    parquet_url = settings.value("parquet_url", "", type=str)
     settings.endGroup()
+    api_key = api_key_for(site)
 
     # First run: seed from .env so the plugin works out of the box.
     if not api_key:
         defaults = env_defaults()
         site = site or defaults["site"]
         api_key = defaults["api_key"]
-    if not parquet_url:
-        parquet_url = env_defaults().get("parquet_url", "")
+    parquet_url = env_defaults().get("parquet_url", "")
     # An unknown value in QSettings means live, not a broken panel: this is
     # read on every start, and a profile written by a future version should
     # degrade to the source that always works.
@@ -129,23 +147,169 @@ def load():
             "parquet_url": parquet_url}
 
 
-def save(site, api_key, verify_ssl=True, source=None, parquet_url=None):
+def save(site, api_key, verify_ssl=True, source=None):
     """Persist the connection settings.
 
-    `source` and `parquet_url` default to None meaning "leave as they are",
-    so the existing two-argument callers keep working unchanged.
+    `source` defaults to None meaning "leave as it is", so the existing
+    two-argument callers keep working unchanged. The key is filed under
+    `site`, so a project on another tenant does not send this one's key. A
+    parquet URL is not saved here: its token goes to
+    `remember_parquet_token`, its address to the project
+    (`save_project_source`).
     """
     settings = QSettings()
     settings.beginGroup(GROUP)
     settings.setValue("site", site)
-    settings.setValue("api_key", api_key)
     settings.setValue("verify_ssl", verify_ssl)
     if source is not None:
         settings.setValue("source", source if source in SOURCES
                           else SOURCE_LIVE)
-    if parquet_url is not None:
-        settings.setValue("parquet_url", parquet_url)
     settings.endGroup()
+    remember_api_key(site, api_key)
+
+
+# -------------------------------------------- credentials, by site/address
+
+# Each book is one JSON object, {site: key} or {address: token}. One value
+# rather than a key per entry because a site or address is a URL, and
+# QSettings reads every "/" in a key as a group: "https://acct/.../facility_a"
+# would be stored as five nested groups and come back in pieces.
+TOKENS_KEY = "parquet_tokens"
+API_KEYS_KEY = "api_keys"
+
+# In the project file: <properties><equis_loader>...</equis_loader>.
+PROJECT_SCOPE = GROUP
+PROJECT_SOURCE = "source"
+PROJECT_ADDRESS = "parquet_address"
+PROJECT_SITE = "site"
+PROJECT_FACILITY = "facility_id"
+# The facility's name, for saying which one when it cannot be found; the id
+# is what selects it.
+PROJECT_FACILITY_NAME = "facility_name"
+
+
+def site_key(site):
+    """One spelling per site: `https://x.equisonline.com/` is `.../x...com`."""
+    return (site or "").strip().rstrip("/")
+
+
+def _load_book(name):
+    raw = QSettings().value("%s/%s" % (GROUP, name), "", type=str)
+    try:
+        book = json.loads(raw) if raw else {}
+    except ValueError:
+        # A hand-edited or truncated value costs the person a paste, not
+        # the panel.
+        return {}
+    if not isinstance(book, dict):
+        return {}
+    return {str(k): str(v) for k, v in book.items() if k and v}
+
+
+def _save_book(name, book, before):
+    if book != before:
+        QSettings().setValue("%s/%s" % (GROUP, name),
+                             json.dumps(book, sort_keys=True))
+
+
+def load_parquet_tokens():
+    """{address: token} for every signed source this person has opened."""
+    return _load_book(TOKENS_KEY)
+
+
+def remember_parquet_token(url):
+    """Record the token `url` carries, if any, under its address."""
+    book = load_parquet_tokens()
+    _save_book(TOKENS_KEY, parquet_address.remember(book, url), book)
+
+
+def api_key_for(site):
+    """The API key this person holds for `site`, or ""."""
+    return _load_book(API_KEYS_KEY).get(site_key(site), "")
+
+
+def remember_api_key(site, api_key):
+    """File `api_key` under `site`; an empty key forgets the site's.
+
+    Forgetting on empty matches what the panel did before, when one saved
+    key was overwritten by whatever the field held at Connect.
+    """
+    site = site_key(site)
+    if not site:
+        return
+    book = _load_book(API_KEYS_KEY)
+    updated = dict(book)
+    if api_key:
+        updated[site] = api_key
+    else:
+        updated.pop(site, None)
+    _save_book(API_KEYS_KEY, updated, book)
+
+
+def _migrate_api_key():
+    """File a key saved by an earlier version under the site saved with it.
+
+    Earlier versions kept one key, for whatever site was last connected.
+    """
+    settings = QSettings()
+    key = "%s/api_key" % GROUP
+    if not settings.contains(key):
+        return
+    legacy = settings.value(key, "", type=str)
+    site = settings.value("%s/site" % GROUP, "", type=str)
+    if legacy and site_key(site) and not api_key_for(site):
+        remember_api_key(site, legacy)
+    settings.remove(key)
+
+
+def _migrate_parquet_url():
+    """Move a URL saved by an earlier version into the token book.
+
+    Earlier versions kept the whole last-opened URL, token included, in
+    QSettings. Its token is kept, so a project naming that address opens
+    without a paste; the URL itself is removed, so it no longer fills the
+    field of a project it has nothing to do with.
+    """
+    settings = QSettings()
+    key = "%s/parquet_url" % GROUP
+    if not settings.contains(key):
+        return
+    legacy = settings.value(key, "", type=str)
+    if legacy:
+        remember_parquet_token(legacy)
+    settings.remove(key)
+
+
+def load_project_source(project=None):
+    """(source, address) the project records; None for what it does not.
+
+    A project that has never opened a source records neither, and the
+    caller falls back to the person's defaults - not to another project's.
+    """
+    project = project or QgsProject.instance()
+    source, ok = project.readEntry(PROJECT_SCOPE, PROJECT_SOURCE, "")
+    source = source if ok and source in SOURCES else None
+    address, ok = project.readEntry(PROJECT_SCOPE, PROJECT_ADDRESS, "")
+    address = address.strip() if ok and address.strip() else None
+    return source, address
+
+
+def save_project_source(source, url=None, project=None):
+    """Record in the project which source it maps and, for parquet, where.
+
+    Only the ADDRESS of `url` is written; the token never reaches the
+    project file. Re-opening the same source does not mark the project
+    modified: writeEntry with the value already there is not a change to
+    QGIS (4.2.3, checked by tools/test_project_source.py, which passed with
+    a compare-before-write here removed).
+    """
+    project = project or QgsProject.instance()
+    project.writeEntry(PROJECT_SCOPE, PROJECT_SOURCE,
+                       source if source in SOURCES else SOURCE_LIVE)
+    if url is not None:
+        address, _token = parquet_address.split(url)
+        if address:
+            project.writeEntry(PROJECT_SCOPE, PROJECT_ADDRESS, address)
 
 
 def cache_root():
@@ -264,3 +428,37 @@ def cache_max_bytes():
 def open_cache():
     """The cache instance the plugin should use."""
     return EquisCache(cache_root(), max_bytes=cache_max_bytes())
+
+
+def load_project_live(project=None):
+    """(site, facility_id, facility_name) the project records, None for each
+    it does not.
+
+    The facility id is EQuIS's, so it means something only on that site:
+    the caller selects it only when connected to the same one.
+    """
+    project = project or QgsProject.instance()
+    out = []
+    for key in (PROJECT_SITE, PROJECT_FACILITY, PROJECT_FACILITY_NAME):
+        value, ok = project.readEntry(PROJECT_SCOPE, key, "")
+        out.append(value.strip() if ok and value.strip() else None)
+    site, facility_id, name = out
+    return (site_key(site) or None), facility_id, name
+
+
+def save_project_live(site, facility, project=None):
+    """Record that the project maps `facility` on `site`, from EQuIS live.
+
+    Called when a facility is chosen - the act that says what the project
+    maps. Connecting alone records nothing new (see the dialog's
+    _on_connect). The API key is never written; the site names whose key
+    to use.
+    """
+    project = project or QgsProject.instance()
+    project.writeEntry(PROJECT_SCOPE, PROJECT_SOURCE, SOURCE_LIVE)
+    project.writeEntry(PROJECT_SCOPE, PROJECT_SITE, site_key(site))
+    if facility and facility.get("id") is not None:
+        project.writeEntry(PROJECT_SCOPE, PROJECT_FACILITY,
+                           str(facility["id"]))
+        project.writeEntry(PROJECT_SCOPE, PROJECT_FACILITY_NAME,
+                           facility.get("name") or "")

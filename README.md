@@ -87,15 +87,42 @@ which writes to
 ## Connecting
 
 The panel needs a site URL and an EQuIS API key (a JWT). On first run it seeds
-both from a `.env` file next to the plugin or one directory above it:
+both from a `.env` file next to the plugin or one directory above it, and a
+parquet source's URL too if one is given:
 
 ```
 api_key: eyJhbGciOi...
 equis_site: https://yoursite.equisonline.com
+parquet_url: https://<account>.blob.core.windows.net/<container>/<facility>?sv=...&sp=r...
 ```
 
-Credentials entered in the panel are saved to QSettings, so `.env` is only a
-convenience for the first launch. Keep `.env` out of version control.
+Credentials entered in the panel are saved in your own QGIS settings (the
+profile's `QGIS4.ini`), so `.env` is only a convenience for the first
+launch: its key and site are used when the project names no site and you
+have no saved key, and its parquet URL when the project records no parquet
+source. A project's own site takes only a key saved for that site, never
+the `.env`'s. Keep `.env` out of version control.
+
+**What a map shows is saved with the QGIS project; credentials stay with
+you.** The project records its source (live or parquet), the EQuIS site and
+facility, and a parquet source's address. Opening it fills the panel to
+match: on the live path, connecting chooses the project's facility (if
+nothing else is chosen, and only on the project's own site); a parquet
+source is filled in, and opening it is still **Open**. The API key and a
+signed URL's token - the `?sp=...&sig=...` part - are **never written into
+the project**: they stay in your own QGIS settings, the key looked up by
+site and the token by address, so a `.qgz` can be shared without handing
+out access. Someone opening a shared project without a key or token for it
+is told so and pastes it once; it is remembered for that site or address
+from then on, and the parquet field offers every address you hold a token
+for as you type. A token's expiry is shown under the field, as the key's
+is: amber within a week, red once it has passed.
+
+A project that records none of this uses your last site and source. The
+first time this version runs, the single key and parquet URL earlier
+versions saved are moved: the key is filed under its site, the URL's token
+under its address, and the URL itself is dropped. An earlier version of
+the plugin run afterwards finds no saved key, and falls back to `.env`.
 
 The account needs **Creator on Reports** for the live query path, which
 creates one report of its own per facility (see [What it writes to your
@@ -725,7 +752,13 @@ giving the manifest's folder or URL. Every filter in the panel applies to it
 as to a live fetch, dates and QC included; the rows are read with DuckDB.
 
 **Opening one** needs only that path or URL. A source without `DETECT_FLAG`
-is refused: without it every result would read as a non-detect.
+is refused: without it every result would read as a non-detect. For a
+signed URL, whoever publishes the source hands out a read-only one (the
+pipeline's `parquet_cache`); paste it once and its token is remembered on
+this computer, while the project keeps only the address before the `?` (see
+[Connecting](#connecting)). When that token expires the field says so in
+red, and a failed open names the expiry: the publisher issues a new URL, and
+pasting it replaces the old token for every project using that address.
 
 **Producing one** is what [`pipeline/`](pipeline/README.md) does, against a
 tenant you hold an API key for:
@@ -930,7 +963,8 @@ equis_loader/
   sparkline.py       small SVG sparklines (no QGIS imports)
   timeseries.py      the embedded matplotlib plot
   maptool.py         click a point -> location code
-  settings.py        QSettings + .env fallback, cache location
+  settings.py        QSettings + .env fallback, cache location, the project's source
+  parquet_address.py a parquet URL's address vs token, its expiry (no QGIS imports)
   -- experimental --
   store.py           the DuckDB store, parquet sources (no QGIS imports)
   pivot.py           one row per sample, every analyte (no QGIS imports)
