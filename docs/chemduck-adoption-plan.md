@@ -296,9 +296,17 @@ One is a ChemDuck defect, found by the parity test: item 5.
    but `insert_results` still inserts its results, so the foreign key
    refuses the whole load with a message naming only a sample id. The
    plugin maps both rows. Facility A has neither, so the case is the live
-   report path's. It has been raised in ChemDuck's
-   `docs/qgis-plugin-request-load-undated.md`, and the parity test records
-   it as a known refusal that fails once the load succeeds.
+   report path's. *Done 2026-11-24, ChemDuck #18* (vendored at `b81dd01`).
+   The request document this item once cited was never filed; #18 was
+   the request. Both columns may be NULL, the loader keeps the sample, and
+   `load_report` counts them. The parity fixture's UNDATED and
+   BLANK-MATRIX moved from a facility of their own each into its cases,
+   and both agree under both aggregations: a dated result is the more
+   recent, the undated one still counts for a maximum, and a matrix
+   filter leaves the blank one out. The pipeline never publishes a blank
+   matrix (its survey puts such a sample in no slice), so the fixture's
+   blank-matrix partition carries no matrix label, which ChemDuck's
+   publish would hold to the rows.
 6. **No depth or unit filter on `aggregate_points`.** *Found 2026-11-05*,
    when the plugin's row scope gained both (Facility A's sediment: depths
    in cm beside m, and 3,401 leachate results in mg/L beside 635,904 in
@@ -311,10 +319,26 @@ One is a ChemDuck defect, found by the parity test: item 5.
    - **Depth.** `depth_units` is kept but never converted, so a bound in
      metres can't be read against points written in cm.
 
-   To raise with ChemDuck: a whole-interval depth bound in one unit,
-   converted by exact length factors, with no-depth rows out, and a list
-   of result units to keep. Both apply before selection. Needed before
-   phase 2, when the panel's map comes from ChemDuck.
+   *Done 2026-11-24, ChemDuck #18* (vendored at `b81dd01`): `p_depth_min`,
+   `p_depth_max`, `p_depth_units` and `p_reported_units` on every engine
+   macro, applied before selection, with the plugin's rules (a whole
+   interval inside the bounds, exact length factors, rounded to 9 places,
+   no depth out; units trimmed and case-sensitive, '' for none). The
+   adapter passes the scope through instead of refusing it. The parity
+   test now holds the two sides to the same listed differences under a
+   depth filter and a unit filter, and two checks show what each filter
+   changes. A 0-0.5 m filter leaves only PROFILE's 0.5 m samples, so its
+   `points` difference goes. A ug/L filter turns MIXED-SOLID-UNITS, which
+   both sides refused, into agreement. Dropping either filter in the
+   adapter fails the test.
+   - **One difference remains by design.** ChemDuck compares the unit its
+     source reported (`REPORT_RESULT_UNIT` in its ARII mapping), and the
+     store coalesces `RESULT_UNIT` first. On a row where the two differ,
+     one tick can keep different rows. Facility A hasn't been checked for
+     such rows.
+   - **The cost, measured in ChemDuck's changelog.** With no filter, a call
+     is within noise of before. A depth filter adds 13-15 ms to
+     `point_counts` on a 96,000-result fixture.
 
 ## The design after adoption
 
@@ -482,7 +506,8 @@ raised with ChemDuck.
 > non-detect, no undated sample.
 >
 > **Found by it:**
-> - ChemDuck's load refuses a sample with no date or no matrix (open item 5);
+> - ChemDuck's load refuses a sample with no date or no matrix (open item 5,
+>   fixed by ChemDuck #18 on 2026-11-24);
 > - ChemDuck converts units at load (decision 9);
 > - ChemDuck refuses a solid's unit on water even when it's the variable's
 >   only unit;

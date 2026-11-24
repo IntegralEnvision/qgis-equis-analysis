@@ -162,6 +162,86 @@ CREATE OR REPLACE MACRO depth_in_range(
 );
 
 -- ============================================================================
+-- 1.9b depth_in_scope / units_in_scope - The row scope's depth and units
+-- ============================================================================
+-- The QGIS plugin's row scope, applied by point_scope and sample_scope so
+-- every engine sees it. A depth filter is (p_depth_min, p_depth_max,
+-- p_depth_units), either bound NULL for an open end; p_depth_units turns it
+-- on. A row is in when its WHOLE interval lies inside the bounds, not when
+-- it merely overlaps them: a 0-10 ft composite is mostly material from
+-- below a 0-2 ft range. Depths are compared in the filter's unit, converted
+-- by exact length factors and rounded to 9 places, so 30 cm meets a bound
+-- of 0.3 m. A row with no depth is out of every depth filter, as an undated
+-- one is out of every date range. A unit with no length factor is never
+-- guessed at: it meets only a filter in that same unit. The interval is
+-- (top, bottom), either standing in for the other when one is missing,
+-- turned round when written bottom first.
+--
+-- One facility's sediment held 331,986 results in cm beside 1,624 in m:
+-- bare numbers take the top 5 cm of one and the top 5 m of the other.
+
+CREATE OR REPLACE MACRO depth_unit_name(u) AS (
+    COALESCE(
+        MAP {'meter': 'm', 'meters': 'm', 'metre': 'm', 'metres': 'm',
+             'centimeter': 'cm', 'centimeters': 'cm', 'centimetre': 'cm',
+             'centimetres': 'cm', 'millimeter': 'mm', 'millimeters': 'mm',
+             'millimetre': 'mm', 'millimetres': 'mm', 'feet': 'ft', 'foot': 'ft',
+             'inch': 'in', 'inches': 'in'}[lower(trim(COALESCE(u, '')))],
+        lower(trim(COALESCE(u, ''))))
+);
+
+-- What a depth in u is multiplied by to read in target; NULL when they
+-- cannot be compared (one has no length factor and they differ).
+CREATE OR REPLACE MACRO depth_unit_factor(u, target) AS (
+    CASE WHEN depth_unit_name(u) = depth_unit_name(target) THEN CAST(1 AS DOUBLE)
+         ELSE CAST(MAP {'m': 1.0, 'cm': 0.01, 'mm': 0.001, 'ft': 0.3048, 'in': 0.0254}
+                       [depth_unit_name(u)] AS DOUBLE)
+              / CAST(MAP {'m': 1.0, 'cm': 0.01, 'mm': 0.001, 'ft': 0.3048, 'in': 0.0254}
+                         [depth_unit_name(target)] AS DOUBLE)
+    END
+);
+
+CREATE OR REPLACE MACRO depth_in_scope(top_depth, bottom_depth, depth_units,
+                                       p_depth_min, p_depth_max, p_depth_units) AS (
+    p_depth_units IS NULL
+    OR (COALESCE(top_depth, bottom_depth) IS NOT NULL
+        AND depth_unit_factor(depth_units, p_depth_units) IS NOT NULL
+        AND (p_depth_min IS NULL
+             OR round(least(COALESCE(top_depth, bottom_depth), COALESCE(bottom_depth, top_depth))
+                      * depth_unit_factor(depth_units, p_depth_units), 9)
+                >= round(CAST(p_depth_min AS DOUBLE), 9))
+        AND (p_depth_max IS NULL
+             OR round(greatest(COALESCE(top_depth, bottom_depth), COALESCE(bottom_depth, top_depth))
+                      * depth_unit_factor(depth_units, p_depth_units), 9)
+                <= round(CAST(p_depth_max AS DOUBLE), 9)))
+);
+
+-- p_reported_units: the units to keep, as the source reported them (before
+-- any conversion at load), trimmed and compared case-SENSITIVELY, '' for a
+-- result with none; NULL keeps every unit. It applies before the unit check,
+-- so a solid's stray leachate result in mg/L can be dropped rather than have
+-- its variable refused.
+CREATE OR REPLACE MACRO units_in_scope(reported_units, p_reported_units) AS (
+    p_reported_units IS NULL
+    OR list_contains(list_transform(CAST(p_reported_units AS VARCHAR[]), lambda u: trim(u)),
+                     trim(COALESCE(reported_units, '')))
+);
+
+-- The call's own mistakes, refused by name: a bound without its unit would
+-- be compared as though every row's numbers meant the same thing.
+CREATE OR REPLACE MACRO row_scope_check(caller, p_depth_min, p_depth_max, p_depth_units,
+                                        p_reported_units) AS (
+    CASE
+        WHEN p_depth_units IS NULL AND (p_depth_min IS NOT NULL OR p_depth_max IS NOT NULL)
+            THEN error(caller || ': a depth bound needs p_depth_units, the unit it is in')
+        WHEN p_reported_units IS NOT NULL AND len(CAST(p_reported_units AS VARCHAR[])) = 0
+            THEN error(caller || ': p_reported_units is empty; name the units to keep, or '
+                       || 'pass NULL for every unit')
+        ELSE TRUE
+    END
+);
+
+-- ============================================================================
 -- 1.10 duplicate_aggregate - Duplicate resolution
 -- ============================================================================
 -- Resolves duplicate measurements using specified aggregation method

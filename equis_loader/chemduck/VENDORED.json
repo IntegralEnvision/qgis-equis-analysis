@@ -1,10 +1,10 @@
 {
  "note": "Written by tools/vendor_chemduck.py. Do not edit these files: re-vendor, and tools/test_chemduck_vendor.py checks them.",
  "repository": "https://github.com/IntegralEnvision/chemduck.git",
- "commit": "6d294a8fa5ccd0233cc633885246adde38e114ca",
- "subject": "Merge pull request #16 from IntegralEnvision/consumer-speed-2",
+ "commit": "b81dd01088d60c8d726af782f532d36e347249d7",
+ "subject": "Merge pull request #18 from IntegralEnvision/qgis-scope-and-undated",
  "version": "0.2.0",
- "vendored": "2026-11-16",
+ "vendored": "2026-11-24",
  "files": {
   "__init__.py": {
    "bytes": 2852,
@@ -23,16 +23,16 @@
    "sha256": "166b084dedffab57bbc3d9b4355e5ebbed7a2ceffc078dc5149a19dc15070b64"
   },
   "load_data.py": {
-   "bytes": 107496,
-   "sha256": "161c7ddba41713b47cbbdb2830a1b3562cb6977264e59da6a88974384d784d7b"
+   "bytes": 108653,
+   "sha256": "c3317a562d4b7959a415246b41a5be001dc84e309a124b53f1f5c0636d519fcb"
   },
   "sql/01_tables.sql": {
-   "bytes": 27401,
-   "sha256": "d405dba1577dfe961bd0469c5b09d86918b7bb6911b7e410c65e3e73c73cefc7"
+   "bytes": 27877,
+   "sha256": "8430c81359c360c5375a9188bf61855fa85366d25a0c699631f6528ba1231bf0"
   },
   "sql/02_macros.sql": {
-   "bytes": 35780,
-   "sha256": "4ad521c33e64b49b11cbb2a0f0ed4ffb5539a2b993f107917ed2fc48738fa1de"
+   "bytes": 40279,
+   "sha256": "4130b7703fbc6b191f384b28a6b04dab48d9a7b3d623236e747e178f79c9353d"
   },
   "sql/03_views.sql": {
    "bytes": 29116,
@@ -55,8 +55,8 @@
    "sha256": "1c0f61d5c0f44831bf15ac80aded08866b6adbfd038a866795226e67ca88b23f"
   },
   "sql/08_aggregate_points.sql": {
-   "bytes": 59555,
-   "sha256": "0f2fda04077b614e0ff8928049036ae8654971c61a043ee48f434d2f63fd3b4a"
+   "bytes": 63472,
+   "sha256": "b0d7ea25feddaac0f50f750ce9787d1f0824da074958400a0e6faf3e77c8a769"
   },
   "sql/08_aggregate_results.sql": {
    "bytes": 18161,
@@ -67,8 +67,8 @@
    "sha256": "0b265847faf23b494cf3d87e58de545c055ef54f44e580c5833db099bc961327"
   },
   "sql/10_sample_results.sql": {
-   "bytes": 25675,
-   "sha256": "e8d0aaaf52f28e6c6640467e5956bd85b9bbf00abde9e91b401c9043dcf9ef8b"
+   "bytes": 28135,
+   "sha256": "36ee16dafa490b739c5c3a907128bd8b3ca7df79a311aaa64a21ee117a0e667f"
   },
   "sql/optional/spatial.sql": {
    "bytes": 881,

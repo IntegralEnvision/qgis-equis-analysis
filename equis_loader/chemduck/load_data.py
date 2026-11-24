@@ -1123,17 +1123,31 @@ def insert_samples(conn, mapping, exprs, staging_cols, allow_conflicts=False):
             {exprs['sample_datetime_expr']} AS sample_datetime
         FROM staging
         WHERE "{exprs['sample_id_col']}" IS NOT NULL
-          AND {exprs['sample_date_expr']} IS NOT NULL
-          AND {col_or_null(exprs['matrix_col'])} IS NOT NULL
+        -- A row that dates the sample, or names its matrix, before one that
+        -- does not: the date and matrix were required here, so a sample
+        -- took them from whichever of its rows had them.
         QUALIFY ROW_NUMBER() OVER (
             PARTITION BY CAST("{exprs['sample_id_col']}" AS VARCHAR)
-            ORDER BY _src_row
+            ORDER BY {exprs['sample_date_expr']} IS NULL,
+                     {col_or_null(exprs['matrix_col'])} IS NULL, _src_row
         ) = 1
         ON CONFLICT (sample_id) DO NOTHING
     """)
 
     sample_count = conn.execute("SELECT COUNT(*) FROM samples").fetchone()[0]
     print(f"  Samples: {sample_count:,}")
+    # Kept, and counted: a sample with no date or no matrix used to be
+    # skipped, and its results then refused the whole load by the foreign
+    # key, naming only a sample id.
+    undated, matrixless = conn.execute(
+        "SELECT count(*) FILTER (WHERE sample_date IS NULL), "
+        "count(*) FILTER (WHERE matrix IS NULL) FROM samples").fetchone()
+    conn.execute("DELETE FROM load_report WHERE category = 'samples'")
+    conn.executemany("INSERT OR REPLACE INTO load_report VALUES (?, ?, ?, ?)", [
+        ('samples', 'samples with no date', undated,
+         'outside every date bound; most recent only where nothing is dated'),
+        ('samples', 'samples with no matrix', matrixless,
+         'each its own point, outside every matrix filter')])
     return sample_count
 
 
@@ -1199,6 +1213,10 @@ def record_nd_multiplier(conn, exprs, source='staging'):
 SCOPE_COLUMNS = {
     'matrix': ('samples', 'matrix'),
     'sample_type': ('samples', 'sample_type'),
+    # the row scope's depth and unit filters (point_scope, sample_scope)
+    'top_depth': ('samples', 'top_depth'),
+    'bottom_depth': ('samples', 'bottom_depth'),
+    'units': ('results', 'units'),
     'fraction': ('results', 'fraction'),
     'meas_basis': ('results', 'meas_basis'),
     'method_code': ('results', 'method_code'),

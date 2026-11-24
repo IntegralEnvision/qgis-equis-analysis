@@ -55,6 +55,11 @@
 --                               detection_limit, and display_factor says so
 --   p_reportable_only BOOLEAN - leave out results not reportable; NULL = the
 --                               dataset's choice (aggregate_points)
+--   p_depth_min, p_depth_max DOUBLE, p_depth_units VARCHAR - the samples whose
+--                               whole interval lies inside the bounds, in
+--                               that unit (depth_in_scope); no depth is out
+--   p_reported_units VARCHAR[] - the results whose unit as the source
+--                               reported it is listed (units_in_scope)
 --
 -- A filter on a column the source lacks matches everything; every row's
 -- filters_ignored names it (as aggregate_points).
@@ -84,9 +89,14 @@ CREATE OR REPLACE MACRO sample_scope(
     p_matrices := NULL,
     p_display_factor := NULL,
     p_reportable_only := NULL,
+    p_depth_min := NULL,
+    p_depth_max := NULL,
+    p_depth_units := NULL,
+    p_reported_units := NULL,
     p_caller := 'sample_results'
 ) AS TABLE
-WITH params AS (
+WITH absent AS (SELECT absent_columns() AS cols),
+params AS (
     SELECT CASE
         WHEN p_units IN ('refuse', 'flag') THEN p_units
         ELSE error(p_caller || ': p_units must be refuse or flag, not '
@@ -99,8 +109,16 @@ WITH params AS (
     source_lacks('sample_type') AS no_sample_type,
     source_lacks('method_code') AS no_method,
     source_lacks('matrix') AS no_matrix,
-    filters_ignored(p_matrix, p_fraction, p_sample_types, p_method_class,
-                    reportable_scope(p_reportable_only)) AS ignored
+    -- the row scope (depth_in_scope, units_in_scope in 02_macros.sql)
+    row_scope_check(p_caller, p_depth_min, p_depth_max, p_depth_units,
+                    p_reported_units) AS row_check,
+    list_contains(absent.cols, 'top_depth') AND list_contains(absent.cols, 'bottom_depth')
+        AS no_depth,
+    list_contains(absent.cols, 'units') AS no_units,
+    list_concat(filters_ignored(p_matrix, p_fraction, p_sample_types, p_method_class,
+                                reportable_scope(p_reportable_only)),
+                row_scope_ignored(p_depth_units, p_reported_units, absent.cols)) AS ignored
+    FROM absent
 ),
 -- The scan's filters read only columns and constants, so they reach the
 -- source (a parquet scan in the hybrid consumer reads only the analytes
@@ -110,11 +128,11 @@ WITH params AS (
 filtered AS (
     SELECT
         v.sample_id, v.location_id, v.x, v.y, v.matrix, v.sample_date, v.sample_datetime,
-        v.top_depth, v.bottom_depth, v.position, v.sample_type,
+        v.top_depth, v.bottom_depth, v.depth_units, v.position, v.sample_type,
         v.analyte, v.fraction, v.meas_basis,
         v.result, v.detected, v.qualifier, v.detection_limit, v.units, v.result_id,
         v.date_analyzed, v.method_class, v.method_code, v.reportable, v.test_rank,
-        v.unit_source,
+        v.unit_source, v.reported_units,
         nd_policy_choice(p_nd_policy, p_nd_policy_version, pr.nd_policy, pr.nd_policy_version,
                          ds.ds_policy, ds.ds_version) AS pol
     FROM v_results_core v
@@ -148,6 +166,11 @@ scoped AS (
            OR CASE WHEN p_sample_types IS NULL THEN in_normal_scope(f.sample_type)
                    ELSE in_sample_scope(f.sample_type, p_sample_types) END)
       AND (f.reportable IS DISTINCT FROM FALSE OR NOT params.rep_only)
+      -- before the unit check, as in point_scope
+      AND params.row_check
+      AND (params.no_depth OR depth_in_scope(f.top_depth, f.bottom_depth, f.depth_units,
+                                             p_depth_min, p_depth_max, p_depth_units))
+      AND (params.no_units OR units_in_scope(f.reported_units, p_reported_units))
 ),
 -- The units of each variable, grouped and joined back: as count(DISTINCT)
 -- OVER a window it took 0.11 s of a 0.35 s km_quartiles call at the test
@@ -185,7 +208,11 @@ CREATE OR REPLACE MACRO sample_results(
     p_method_class := NULL,
     p_matrices := NULL,
     p_display_factor := NULL,
-    p_reportable_only := NULL
+    p_reportable_only := NULL,
+    p_depth_min := NULL,
+    p_depth_max := NULL,
+    p_depth_units := NULL,
+    p_reported_units := NULL
 ) AS TABLE
 WITH ranked AS (
     SELECT
@@ -207,7 +234,9 @@ WITH ranked AS (
                       p_nd_policy := p_nd_policy, p_nd_policy_version := p_nd_policy_version,
                       p_units := p_units, p_method_class := p_method_class,
                       p_matrices := p_matrices, p_display_factor := p_display_factor,
-                      p_reportable_only := p_reportable_only) f
+                      p_reportable_only := p_reportable_only,
+                      p_depth_min := p_depth_min, p_depth_max := p_depth_max,
+                      p_depth_units := p_depth_units, p_reported_units := p_reported_units) f
     LEFT JOIN v_nd_policies p ON p.name = f.pol.name AND p.version = COALESCE(f.pol.version, p.latest_version)
     WHERE CASE WHEN p.name IS NULL THEN CAST(error('sample_results: no non-detect policy '
                    || f.pol.name || COALESCE(' version ' || f.pol.version, '')
@@ -250,7 +279,11 @@ CREATE OR REPLACE MACRO sample_results_refused(
     p_units := 'refuse',
     p_method_class := NULL,
     p_matrices := NULL,
-    p_reportable_only := NULL
+    p_reportable_only := NULL,
+    p_depth_min := NULL,
+    p_depth_max := NULL,
+    p_depth_units := NULL,
+    p_reported_units := NULL
 ) AS TABLE
 SELECT analyte, var_matrix AS matrix, fraction, meas_basis, method_class,
        CASE WHEN bool_or(contra) THEN 'contradicts matrix' ELSE 'mixed units' END AS reason,
@@ -265,6 +298,8 @@ FROM (
                       p_nd_policy := p_nd_policy, p_nd_policy_version := p_nd_policy_version,
                       p_units := p_units, p_method_class := p_method_class,
                       p_matrices := p_matrices, p_reportable_only := p_reportable_only,
+                      p_depth_min := p_depth_min, p_depth_max := p_depth_max,
+                      p_depth_units := p_depth_units, p_reported_units := p_reported_units,
                       p_caller := 'sample_results_refused')
     WHERE um = 'refuse' AND (units_mixed OR units_contradict)
     GROUP BY ALL
@@ -314,7 +349,11 @@ CREATE OR REPLACE MACRO sample_cell_maps(
     p_method_class := NULL,
     p_matrices := NULL,
     p_display_factor := NULL,
-    p_reportable_only := NULL
+    p_reportable_only := NULL,
+    p_depth_min := NULL,
+    p_depth_max := NULL,
+    p_depth_units := NULL,
+    p_reported_units := NULL
 ) AS TABLE
 SELECT
     sample_id,
@@ -352,7 +391,11 @@ FROM sample_results(
     p_method_class := p_method_class,
     p_matrices := p_matrices,
     p_display_factor := p_display_factor,
-    p_reportable_only := p_reportable_only)
+    p_reportable_only := p_reportable_only,
+    p_depth_min := p_depth_min,
+    p_depth_max := p_depth_max,
+    p_depth_units := p_depth_units,
+    p_reported_units := p_reported_units)
 GROUP BY sample_id;
 
 -- ============================================================================
@@ -479,7 +522,11 @@ CREATE OR REPLACE MACRO km_quartiles(
     p_units := 'refuse',
     p_method_class := NULL,
     p_matrices := NULL,
-    p_reportable_only := NULL
+    p_reportable_only := NULL,
+    p_depth_min := NULL,
+    p_depth_max := NULL,
+    p_depth_units := NULL,
+    p_reported_units := NULL
 ) AS TABLE
 WITH cells AS (
     SELECT COALESCE(matrix_combine_class('km_quartiles', p_matrix, p_matrices), s.matrix) AS matrix,
@@ -498,7 +545,9 @@ WITH cells AS (
                         p_end_date := p_end_date, p_locations := p_locations,
                         p_nd_policy := p_nd_policy, p_nd_policy_version := p_nd_policy_version,
                         p_units := p_units, p_method_class := p_method_class,
-                        p_matrices := p_matrices, p_reportable_only := p_reportable_only) s
+                        p_matrices := p_matrices, p_reportable_only := p_reportable_only,
+                        p_depth_min := p_depth_min, p_depth_max := p_depth_max,
+                        p_depth_units := p_depth_units, p_reported_units := p_reported_units) s
 ),
 km_cells AS (
     -- a name of its own: query_table reads a CTE before a table of that name

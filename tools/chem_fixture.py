@@ -188,26 +188,23 @@ def _cases():
         ("ONLY-BLANK", "a location sampled only by an equipment blank",
          [r("ONLY-BLANK", "EB1", "2020-01-01", 0.2, "Y", SAMPLE_TYPE_CODE="EB")],
          {"most_recent": {"qc_samples"}, "maximum": {"qc_samples"}}),
+        # Each refused ChemDuck's whole load until ChemDuck #18 (found here
+        # 2026-10-29): its samples table required a date and a matrix, and
+        # the results of a skipped sample broke the foreign key. They were
+        # kept in facilities of their own until then.
+        ("UNDATED", "a sample with no date: a dated result is the more recent, and "
+                    "the undated one still counts for the maximum",
+         [r("UNDATED", "UD1", None, 9.0, "Y"),
+          r("UNDATED", "UD2", "2020-01-01", 2.0, "Y")],
+         {"most_recent": AGREE, "maximum": AGREE}),
+        ("BLANK-MATRIX", "a sample with no matrix: a filter on matrix leaves it out",
+         [r("BLANK-MATRIX", "BM1", "2021-01-01", 9.0, "Y", matrix=None),
+          r("BLANK-MATRIX", "BM2", "2020-01-01", 1.5, "Y")],
+         {"most_recent": AGREE, "maximum": AGREE}),
     ]
 
 
 CASES = _cases()
-
-
-# Rows ChemDuck can't load today, each in a facility of its own: found
-# 2026-10-29, raised with ChemDuck. Its samples table requires a date and a
-# matrix (load_data.py, insert_samples' WHERE) and its results insert does
-# not, so the foreign key refuses the whole load. The plugin maps both
-# rows: an undated result only fills an empty slot, and a filter on matrix
-# leaves the blank one out.
-REFUSED = [
-    ("UNDATED", "a sample with no date",
-     [result("UNDATED", "UD1", None, 9.0, "Y"),
-      result("UNDATED", "UD2", "2020-01-01", 2.0, "Y")]),
-    ("BLANK-MATRIX", "a sample with no matrix",
-     [result("BLANK-MATRIX", "BM1", "2021-01-01", 9.0, "Y", matrix=None),
-      result("BLANK-MATRIX", "BM2", "2020-01-01", 1.5, "Y")]),
-]
 
 
 def rows():
@@ -242,8 +239,18 @@ def write(folder, rows_=None):
             "COPY (SELECT * FROM fixture WHERE coalesce(MATRIX_CODE, '_') = ? "
             "AND coalesce(FRACTION, '_') = ?) TO '%s' (FORMAT parquet)"
             % path.replace("\\", "/").replace("'", "''"), [matrix, fraction]).fetchone()[0]
-        partitions.append({"path": relative, "matrix": matrix, "fraction": fraction,
-                           "rows": n, "bytes": os.path.getsize(path)})
+        entry = {"path": relative, "matrix": matrix, "fraction": fraction,
+                 "rows": n, "bytes": os.path.getsize(path)}
+        if matrix == "_":
+            # No matrix to claim. ChemDuck's publish holds a partition's
+            # label to its rows, and '_' is no row's matrix; without a label
+            # it reads the file's from the rows. The pipeline never writes
+            # this case: its survey puts a sample with no matrix in no
+            # slice. A blank fraction keeps its '_': the hive column
+            # `fraction` stands in for the rows' blank FRACTION, so it is
+            # what the rows say.
+            del entry["matrix"]
+        partitions.append(entry)
     con.close()
     manifest = {"facility": "fixture", "version": 1, "rows": len(rows_),
                 "partitions": partitions}
