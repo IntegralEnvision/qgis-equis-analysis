@@ -188,6 +188,16 @@ try:
     check("and named as the likely cause when the open fails",
           "token expired on 2020-01-01" in panel.status_label.text(),
           panel.status_label.text())
+    # A failure's own words name the URL, signature and all (DuckDB's do:
+    # tools/test_parquet_source.py). The status line - and the overlay,
+    # which reads it - shows the address, never the token.
+    panel._on_parquet_failed(
+        "HTTP GET error on '%s/matrix=WS/fraction=N/part-0000.parquet?%s'"
+        % (ADDRESS, expired.split("?", 1)[1]))
+    check("a failure naming the signed URL shows no token",
+          "sig=" not in panel.status_label.text()
+          and ADDRESS + "/matrix=WS/fraction=N/part-0000.parquet?<token>"
+          in panel.status_label.text(), panel.status_label.text())
     settings_store.remember_parquet_token(SIGNED)
     project.read(qgs)
     check("a live token says until when",

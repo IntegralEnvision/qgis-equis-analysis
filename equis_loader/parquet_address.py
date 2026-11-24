@@ -98,6 +98,37 @@ def needs_token(book, text):
 # a date, or a date and time ending in Z, with or without seconds. A
 # fraction of a second (some tools write seven digits) is dropped before
 # parsing; strptime's %f takes at most six.
+# A signed query string: from its `?` through a `sig=` and on to the end of
+# the URL. A URL ends at whitespace or a quote, which is how one sits in an
+# error message - DuckDB's "HTTP GET error on 'https://...?sv=...&sig=...'",
+# a repr'd list of partition files, a urllib message. Only a query that
+# carries a signature is cut: an EQuIS API URL's `?$filter=...` is no
+# credential, and it is often the useful part of a message.
+_SIGNED_QUERY = re.compile(
+    r"\?[^\s'\"<>?]*?(?<![A-Za-z])sig(?:=|%3D)[^\s'\"<>]*", re.IGNORECASE)
+# A signature on its own, left after the URL around it was cut or quoted
+# apart, a token with no URL in front of it, or a URL percent-encoded into
+# another (`%26sig%3D...`, where the `6` defeats a word boundary - hence
+# "no letter before" rather than \b).
+_BARE_SIGNATURE = re.compile(r"(?<![A-Za-z])sig(?:=|%3D)[^&\s'\"<>%]+",
+                             re.IGNORECASE)
+REDACTED = "<token>"
+
+
+def redact(text):
+    """`text` with every SAS token in it replaced by `?<token>`.
+
+    For anything that leaves the panel as text: the status line, the QGIS
+    log, the error a web page is handed. A failed open used to show the
+    whole URL, signature and all, and CONTRIBUTING asks people to paste
+    exactly that text into a public issue. What remains - the address and
+    the error - is what a reader needs; the expiry, which is the usual
+    cause, is said separately (dialog._on_parquet_failed).
+    """
+    text = _SIGNED_QUERY.sub("?" + REDACTED, "" if text is None else str(text))
+    return _BARE_SIGNATURE.sub("sig=" + REDACTED, text)
+
+
 _EXPIRY_FORMATS = ("%Y-%m-%dT%H:%M:%SZ", "%Y-%m-%dT%H:%MZ", "%Y-%m-%d")
 
 

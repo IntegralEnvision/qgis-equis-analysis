@@ -1331,8 +1331,10 @@ class EquisDialog(QDockWidget):
                 and parquet_address.needs_token(tokens, address)):
             self._set_status(
                 "This project's parquet source has no token on this "
-                "computer. If it is signed, paste the full URL (with its "
-                "?sp=...&sig=... part) once; it is remembered for this "
+                # Not "?sp=...&sig=...": _set_status redacts anything
+                # shaped like a signature, this example included.
+                "computer. If it is signed, paste the full URL, everything "
+                "after its ? included, once; it is remembered for this "
                 "address, never written into the project.",
                 Qgis.MessageLevel.Warning)
         elif (source != settings_store.SOURCE_PARQUET and site
@@ -1380,6 +1382,10 @@ class EquisDialog(QDockWidget):
             Qgis.MessageLevel.Success: "#1b7f33",
         }
         self.status_label.setStyleSheet("color: %s;" % colors.get(level, "#333333"))
+        # Every status passes here, and a parquet failure's text names its
+        # URL - which, for a signed source, ends in the token. The overlay
+        # reads its status from this label, so it is cut once, here.
+        message = parquet_address.redact(message)
         self.status_label.setText(message)
         self._status_level = {Qgis.MessageLevel.Warning: "warning",
                               Qgis.MessageLevel.Critical: "critical",
@@ -1910,7 +1916,8 @@ class EquisDialog(QDockWidget):
             % format(rows, ",d"), Qgis.MessageLevel.Success)
         QgsMessageLog.logMessage(
             "Parquet source opened: %s rows from %s"
-            % (format(rows, ",d"), url), "EQuIS", Qgis.Info)
+            % (format(rows, ",d"), parquet_address.split(url)[0]),
+            "EQuIS", Qgis.Info)
         # Fold the connection away exactly as a successful Connect does.
         self._advance_to(self.connect_box, self.selection_box)
         self._update_actions()
@@ -2790,7 +2797,8 @@ class EquisDialog(QDockWidget):
             os.makedirs(os.path.dirname(path), exist_ok=True)
         except OSError as exc:
             QgsMessageLog.logMessage(
-                "No place to build the report store: %s" % exc,
+                "No place to build the report store: %s"
+                % parquet_address.redact(exc),
                 "EQuIS", Qgis.Info)
             return
         task = BuildStoreTask(table, path)
@@ -2824,7 +2832,7 @@ class EquisDialog(QDockWidget):
         # the accelerator is not their problem to solve.
         QgsMessageLog.logMessage(
             "Report store unavailable, using the in-memory path: %s"
-            % message, "EQuIS", Qgis.Info)
+            % parquet_address.redact(message), "EQuIS", Qgis.Info)
 
     def _discard_store(self):
         """Drop the store whenever the rows it describes are replaced."""
@@ -2880,7 +2888,8 @@ class EquisDialog(QDockWidget):
         # fetch 1.5 KB of manifest cannot fetch the parquet either, so the
         # panel's own reads will say so.
         QgsMessageLog.logMessage(
-            "Could not re-read the parquet manifest: %s" % message, "EQuIS", Qgis.Info)
+            "Could not re-read the parquet manifest: %s"
+            % parquet_address.redact(message), "EQuIS", Qgis.Info)
 
     def _on_manifest_checked(self, task, text):
         if task is not self._manifest_check_task:
@@ -3513,7 +3522,8 @@ class EquisDialog(QDockWidget):
 
     @staticmethod
     def _chart_log(message):
-        QgsMessageLog.logMessage("panel: chart %s" % message, "equis-web",
+        QgsMessageLog.logMessage("panel: chart %s" % parquet_address.redact(message),
+                                 "equis-web",
                                  Qgis.MessageLevel.Info)
 
     def _close_linked_views(self):
@@ -5414,7 +5424,8 @@ class EquisDialog(QDockWidget):
     @staticmethod
     def _preview_log(message):
         # Beside the chart's lines, so one tab shows both in order.
-        QgsMessageLog.logMessage("interactive: %s" % message, "equis-web",
+        QgsMessageLog.logMessage("interactive: %s" % parquet_address.redact(message),
+                                 "equis-web",
                                  Qgis.MessageLevel.Info)
 
     def _preview_question(self):
@@ -6839,7 +6850,8 @@ class EquisDialog(QDockWidget):
         clicked something and has no way to tell whether it worked.
         """
         self._set_status(message, Qgis.MessageLevel.Warning)
-        QgsMessageLog.logMessage(message, "EQuIS", Qgis.MessageLevel.Warning)
+        QgsMessageLog.logMessage(parquet_address.redact(message), "EQuIS",
+                                 Qgis.MessageLevel.Warning)
 
     def _scope_label(self, scope=None):
         """The filters a plot was drawn under, in the layer names' own words.

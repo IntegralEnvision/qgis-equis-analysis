@@ -28,6 +28,7 @@ from qgis.PyQt.QtCore import QCoreApplication, QTimer
 from . import web_view
 from .brush_layer import BrushLayer
 from . import bivariate
+from . import parquet_address
 from .analysis import Session, scatter_options, column_meta
 from .pivot import build_pivot
 from .store import DETECT_TRUE
@@ -41,7 +42,8 @@ LOCATION_FIELD = "code"
 
 
 def _log(message, level=None):
-    QgsMessageLog.logMessage(str(message), LOG_TAG,
+    # A parquet source's errors name its URL, token and all.
+    QgsMessageLog.logMessage(parquet_address.redact(message), LOG_TAG,
                              level if level is not None else Qgis.Info)
 
 
