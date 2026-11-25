@@ -681,6 +681,55 @@ published before it.
 *Done when:* a nightly run publishes sidecars that `open_consumer` accepts,
 and `test_run_nightly.py` checks the step and its failure stops.
 
+> *The pipeline side, done 2026-11-25*, three points settled differently
+> from the list above:
+> - **The step** is `parquet_source/chemduck_sidecars.py`, step 5 of
+>   `run_nightly.py`: after `publish_manifest.py`, which it needs, and
+>   before the upload, which sends `chemduck/` (its `sidecars.json` last)
+>   ahead of `manifest.json`. On only where `pipeline.json` has
+>   `"chemduck": {"x": ..., "y": ...}`: the coordinate columns are a
+>   setting, never guessed.
+> - **ChemDuck is a second vendored copy**, `pipeline/parquet_source/
+>   chemduck/`, written by `tools/vendor_chemduck.py` beside the plugin's
+>   from the same commit, with the same record.
+>   `tools/test_chemduck_vendor.py` fails if the two differ by a byte. The
+>   pipeline imports no plugin code, and installing ChemDuck from its
+>   private repository would need credentials on every machine that runs a
+>   night. `duckdb` and `pyyaml` are an extra, `pipeline[chemduck]`, not
+>   dependencies of every facility.
+> - **Settled differently: the manifest does NOT list the sidecars.**
+>   `sidecars.json` records the SHA-256 of the manifest it was built from;
+>   listing the folder in that manifest would change it after the hash was
+>   taken, and a reader could never tell current sidecars from stale ones.
+>   The folder sits at a fixed path, `chemduck/`, beside the manifest.
+> - **Settled differently: a failure doesn't stop the night.** The data
+>   is still published. The sidecars aren't uploaded, and the ones already
+>   uploaded stay, which a reader recognises as stale by that hash. The
+>   plugin reads the store, which needs no sidecars, so a ChemDuck refusal
+>   must not cost it tonight's data. A refused build leaves the previous
+>   local folder whole (it is built beside it and swapped in).
+> - **Settled differently: units are reported, not held to.** ChemDuck
+>   converts any pair the pipeline left unconverted (no EQuIS factor) by
+>   its own factors, and its mapping has no setting to stop that. The step
+>   reads ChemDuck's `load_report` and prints each such conversion as an
+>   ATTENTION line; the night publishes and exits 1. Making it a refusal
+>   waits on decision 9, or on ChemDuck offering "source factors only".
+>
+> Tests: `pipeline/tests/test_chemduck_sidecars.py` (15 checks, a real
+> publish: the folder, the manifest hash, `open_consumer` answering over the
+> partitions, the ATTENTION line, a refused publish leaving the old folder,
+> the config refusals, no plugin import) and `test_run_nightly.py` (8 new
+> checks: the order, the arguments, a failure going on without the
+> sidecars, a stale folder never uploaded, the upload order, a night that
+> rebuilt nothing building none). Also checked: the package installed
+> outside the checkout ships ChemDuck's SQL and YAML.
+>
+> **Not done here:** a night on a real facility (none on this machine,
+> and its time on the first facility, 57.7 s, was measured by the parity
+> test's publish); and the plugin's side - fetching `chemduck/` over http,
+> checking its hash against the manifest it read, and `open_consumer` with
+> partition URLs (it takes them; its sidecar folder must be local).
+
 ## Decisions to take before phase 2
 
 1. **What the non-detect picker means.** ChemDuck's default shows a selected

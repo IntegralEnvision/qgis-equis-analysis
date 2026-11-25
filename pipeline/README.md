@@ -32,8 +32,9 @@ python -m parquet_source.create_slice_reports --facility <id> --root C:\data\<na
 
 - **Python 3.8+, `pyarrow` and `numpy`**, which the install brings
   (`pyproj` too with `pip install -e "pipeline[crs]"`, for an ArcGIS CRS
-  other than EPSG:4326 without a PROJJSON file). Nothing else: the steps
-  use the standard library for HTTP.
+  other than EPSG:4326 without a PROJJSON file; `duckdb` and `pyyaml` with
+  `pip install -e "pipeline[chemduck]"`, for ChemDuck's sidecars, below).
+  Nothing else: the steps use the standard library for HTTP.
 - **Installing elsewhere**: `pip install
   "git+https://github.com/IntegralEnvision/qgis-equis-analysis@<commit>#subdirectory=pipeline"`,
   always pinned to a commit. Each step is then `python -m
@@ -59,8 +60,10 @@ python -m parquet_source.create_slice_reports --facility <id> --root C:\data\<na
   every slice should share.
 - **Check it works**: `python pipeline/tests/test_slice_pipeline.py`,
   `python pipeline/tests/test_unit_convert.py`,
-  `python pipeline/tests/test_run_nightly.py` and
-  `python pipeline/tests/test_arcgis_export.py`, offline, in a few seconds.
+  `python pipeline/tests/test_run_nightly.py`,
+  `python pipeline/tests/test_arcgis_export.py` and
+  `python pipeline/tests/test_chemduck_sidecars.py` (skipped without the
+  `chemduck` extra), offline, in a few seconds.
 
 Each facility gets its own data directory (`--root data/<name>`): the
 manifests, `units.json`, `pipeline.json` and the parquet all live there.
@@ -101,7 +104,8 @@ run_nightly.py                scheduled from then on, e.g. hourly      see below
    others. Add the optional keys by hand; later creates keep them:
    `"name"` (the facility name published in `manifest.json`; default: the
    data directory's name), `"provision_pending"` (default true), `"arcgis"` (default: whether
-   `arcgis.json` exists), and `"upload"` (below).
+   `arcgis.json` exists), `"chemduck"` (off unless present; below) and
+   `"upload"` (below).
 5. **Schedule `run_nightly.py`.** The create recorded the facility's load
    signal and armed the new slices, so the first check after their agents
    have run builds the cells. Until then they read `waiting`.
@@ -145,17 +149,19 @@ and missed four later loads (read 2026-10-23).
 
 | Step | Script | If it fails |
 |---|---|---|
-| 1. arm on new data; collect and repack finished cells | `nightly_slices.py` | the run stops; nothing is published. If no cell was rebuilt, steps 3-5 are skipped |
+| 1. arm on new data; collect and repack finished cells | `nightly_slices.py` | the run stops; nothing is published. If no cell was rebuilt, steps 3-6 are skipped |
 | 2. reports for slices re-binning added | `create_slice_reports.py --pending` | reported; the run goes on, and those cells wait |
 | 3. GeoParquet for ArcGIS Pro, if configured | `arcgis_export.py` | reported; the run goes on |
 | 4. the published manifest | `publish_manifest.py` | the run stops; nothing is uploaded |
-| 5. upload, if configured | (built in) | the run stops |
+| 5. ChemDuck's sidecars, if configured | `chemduck_sidecars.py` | reported; the run goes on, and the data is uploaded without new sidecars |
+| 6. upload, if configured | (built in) | the run stops |
 
 **Exit code** 0 means every step ran and every slice produced output, or
 there was nothing to do. 1 means the run completed but something needs a
 look: a slice stored nothing or stored an error, a cell was KEPT, a slice
 was armed over 6 hours ago and has not run (`OVERDUE`) or could not be
-armed, or step 2 or 3 failed. 2 means a step that stops the run failed, or
+armed, step 2, 3 or 5 failed, or ChemDuck converted a unit by its own
+factor (step 5; see ChemDuck's sidecars, below). 2 means a step that stops the run failed, or
 the run was refused. The summary reports each step on its own line, and a
 step that did not run says *not run*, never *failed*. Output is mirrored to
 `data/<name>/_logs/` (30 days), and a lock file stops two runs overlapping.
@@ -197,9 +203,9 @@ parquet_cache_rw: https://<account>.blob.core.windows.net/<container>?sv=...&sp=
 `prefix` is an optional folder in the container, for more than one facility
 per container. The URL never goes in `pipeline.json`, which is tracked; a
 config carrying a token is refused. The older split form, `{"base":
-<https URL>, "sas_env": <variable holding only the token>}`, still works. Partitions go up first, then `arcgis/`, then `manifest.json`
-**last**, so a reader never follows a manifest to a file that is not there
-yet. A file whose MD5 matches the blob already there is skipped.
+<https URL>, "sas_env": <variable holding only the token>}`, still works. Partitions go up first, then `arcgis/`, then `chemduck/`
+(its `sidecars.json` last), then `manifest.json` **last**, so a reader
+never follows a manifest to a file that is not there yet. A file whose MD5 matches the blob already there is skipped.
 
 **Scheduling.** Hourly is reasonable: an idle check costs the tenant five
 small reads. A load is then armed within the hour and, if the agents run
@@ -291,6 +297,43 @@ datum it was given, so set the real one in `data/<name>/arcgis.json`
 (`{"x":..., "y":..., "crs": "EPSG:<code>"}`). Its existence turns the step
 on in `run_nightly.py`. Unchanged cells are left alone, so Pro's caches
 stay valid.
+
+## Optional: ChemDuck's sidecars
+
+`chemduck_sidecars.py --root data/<name>` writes `data/<name>/chemduck/`:
+the small tables ChemDuck derives from the partitions (locations, samples,
+catalogues, its settings and load report), its SQL, and
+`sql/results_view.sql`, which makes `results` a view over the partitions
+themselves. With them a reader opens the facility as ChemDuck in about a
+second and reads results straight from the partitions; without them it
+must load every row first. Deriving them reads every result once (57.7 s
+on the first facility, 2026-10-29), which is why they are built here, once
+per publish, and not by each reader. They are written by ChemDuck's own
+`publish`, from the copy vendored in `parquet_source/chemduck/` at the
+plugin's pinned commit, so a publish and the plugin reading it run the
+same rules. Turn it on in `pipeline.json`, after
+`pip install -e "pipeline[chemduck]"`:
+
+```json
+"chemduck": {"x": "LONGITUDE", "y": "LATITUDE"}
+```
+
+`x` and `y` are the WGS84 longitude and latitude columns, never guessed;
+ChemDuck refuses anything else. `"memory_limit"` (DuckDB's, default
+`"8GB"`) is optional.
+
+- **The folder is not listed in `manifest.json`.** Its `sidecars.json`
+  records the hash of the manifest it was built from
+  (`source_manifest.sha256`), and listing the folder would change that
+  manifest. A reader compares the two, and so tells current sidecars from
+  stale ones.
+- **A failure doesn't stop the night.** The partitions and manifest are
+  still uploaded; the folder is not, and the one already uploaded stays,
+  stale by that hash. A refused build leaves the local folder as it was.
+- **Units.** The collect converts with EQuIS's factors and leaves a pair
+  with no EQuIS factor alone. ChemDuck converts what is left by its own
+  factors, and has no setting to stop it. Each such conversion is an
+  `ATTENTION` line and the night exits 1: published, needing a look.
 
 ## Further reading
 

@@ -29,15 +29,17 @@ python tools/analysis_preview.py       # the Analysis tab in a browser, no QGIS 
 python tools/profile_chemduck.py --manifest <facility>/manifest.json --out <dir>   # ChemDuck through a plugin session: the open per statement, every click, DuckDB profiles (--explain); run under plain Python AND QGIS
 
 # The parquet export pipeline: plain Python + pyarrow, imports no plugin code
+# (ChemDuck's sidecars add duckdb + pyyaml, and its own vendored ChemDuck)
 python pipeline/tests/test_slice_pipeline.py  # pipeline bookkeeping (pyarrow)
 python pipeline/tests/test_unit_convert.py    # collect-time unit conversion
 python pipeline/tests/test_arcgis_export.py   # GeoParquet for ArcGIS Pro: files, CRS, refusals
 python pipeline/tests/test_run_nightly.py     # the unattended check: order, stops, upload, launch
+python pipeline/tests/test_chemduck_sidecars.py   # ChemDuck's sidecars beside the manifest (pipeline[chemduck])
 python tools/test_arcgis_parity.py      # that export's non-detect columns vs ReportStore (duckdb)
 python -m parquet_source.run_nightly --root data/<facility>   # one facility's check (after pip install -e pipeline; the old path still works)
 
 python tools/vendor_deps.py --target win --python 312   # build a dep bundle
-python tools/vendor_chemduck.py --commit <sha>          # vendor ChemDuck (committed; default: re-vendor the pin)
+python tools/vendor_chemduck.py --commit <sha>          # vendor ChemDuck into the plugin AND the pipeline (committed; default: re-vendor the pin)
 python tools/test_chemduck_vendor.py                    # that copy: hashes, version, DuckDB tested, installs, ships
 python tools/package.py                                 # plain plugin zip
 python tools/package.py --bundle win_amd64-cp312        # zip with duckdb in it

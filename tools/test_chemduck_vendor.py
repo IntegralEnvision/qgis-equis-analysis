@@ -48,14 +48,14 @@ def check(label, condition, detail=""):
         FAILURES.append(label)
 
 
-def on_disk():
+def on_disk(folder=VENDORED):
     found = set()
-    for base, dirs, files in os.walk(VENDORED):
+    for base, dirs, files in os.walk(folder):
         dirs[:] = [d for d in dirs if d != "__pycache__"]
         for name in files:
             if name == "VENDORED.json" or name.endswith((".pyc", ".pyo")):
                 continue
-            found.add(os.path.relpath(os.path.join(base, name), VENDORED)
+            found.add(os.path.relpath(os.path.join(base, name), folder)
                       .replace("\\", "/"))
     return found
 
@@ -99,6 +99,19 @@ def main():
                  "equis_arii_parquet_mapping.yaml", "sql/08_aggregate_points.sql",
                  "sql/10_sample_results.sql"):
         check("%s is vendored" % name, name in files)
+
+    # --- the pipeline's copy is the same commit, byte for byte ---------------
+    # It publishes the sidecars the plugin reads (adoption plan, phase 6), so
+    # a copy at another commit would publish by other rules.
+    pipeline_copy = os.path.join(ROOT, "pipeline", "parquet_source", "chemduck")
+    same = []
+    for name in sorted(set(files) | {"VENDORED.json"}):
+        here, there = os.path.join(VENDORED, name), os.path.join(pipeline_copy, name)
+        if not os.path.isfile(there) or open(here, "rb").read() != open(there, "rb").read():
+            same.append(name)
+    extra = sorted(on_disk(pipeline_copy) - set(files))
+    check("the pipeline's copy is the same files and record, nothing added",
+          not same and not extra, "differ: %s; added: %s" % (same[:5], extra[:5]))
 
     # --- this plugin's copy, imports no QGIS -------------------------------
     # Imports, not mentions: ChemDuck's comments name "the QGIS plugin" it

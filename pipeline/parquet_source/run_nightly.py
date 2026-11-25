@@ -41,7 +41,7 @@ THE STEPS, AND WHAT A FAILURE STOPS
                                    cells whose slices have all run. A failure
                                    stops the run: the manifest may be
                                    mid-change. If no cell was rebuilt, steps
-                                   3-5 are skipped.
+                                   3-6 are skipped.
   2. create_slice_reports.py --pending
                                    reports for slices step 1 added. Without
                                    this their cells stay KEPT (yesterday's)
@@ -49,10 +49,20 @@ THE STEPS, AND WHAT A FAILURE STOPS
                                    reported and the night goes on.
   3. arcgis_export.py              when configured. Reported, goes on.
   4. publish_manifest.py           a failure stops the upload.
-  5. upload                        partitions, then arcgis/, then
-                                   manifest.json LAST, so a reader never
-                                   follows a manifest to a file not yet
-                                   there. Unchanged files are skipped by MD5.
+  5. chemduck_sidecars.py          when pipeline.json has "chemduck".
+                                   ChemDuck's sidecars into <root>/chemduck/,
+                                   built from the manifest step 4 wrote. A
+                                   failure is reported and the night goes on
+                                   WITHOUT them: the data is still published,
+                                   and the sidecars already uploaded stay, a
+                                   reader telling them stale by the manifest
+                                   hash in their sidecars.json. A ChemDuck
+                                   unit conversion is reported (exit 1).
+  6. upload                        partitions, then arcgis/, then chemduck/
+                                   (sidecars.json last), then manifest.json
+                                   LAST, so a reader never follows a
+                                   manifest to a file not yet there.
+                                   Unchanged files are skipped by MD5.
 
 EXIT CODE: 0 everything ran and every slice produced output, or there was
 nothing to do; 1 the run completed but something needs a look (a slice
@@ -84,10 +94,14 @@ import urllib.request
 # package as this process, installed or not.
 PACKAGE_PARENT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
+from . import chemduck_sidecars
 from .slice_store import (
     CONFIG_NAME, MANIFEST_NAME, Manifest, find_env_file, read_env_file,
     utc_now,
 )
+
+# The night's steps, in order, as the summary lists them.
+STEPS = ("nightly", "pending", "arcgis", "publish", "chemduck", "upload")
 
 LOCK_NAME = "_nightly.lock"
 LOG_DIR = "_logs"
@@ -149,6 +163,12 @@ def load_config(root):
     config.setdefault("template", None)
     if "arcgis" not in config:
         config["arcgis"] = os.path.isfile(os.path.join(root, "arcgis.json"))
+    # Off unless configured: the sidecars need duckdb and pyyaml, which the
+    # rest of the pipeline doesn't, and coordinate columns nobody may guess.
+    config.setdefault("chemduck", None)
+    if config["chemduck"] is not None and not isinstance(config["chemduck"], dict):
+        raise Refused("\"chemduck\" in %s is an object, {\"x\": <longitude column>, "
+                      "\"y\": <latitude column>}." % CONFIG_NAME)
     return config
 
 
@@ -370,7 +390,9 @@ def upload_file(base, sas, relative, path, content_type):
     return "uploaded"
 
 
-def upload(log, root, base, config, sas):
+def upload(log, root, base, config, sas, sidecars=False):
+    """`sidecars`: send <root>/chemduck/ too - only when tonight's step
+    built it, never a folder left from a night whose step failed."""
     with open(os.path.join(root, "manifest.json"), encoding="utf-8") as handle:
         published = json.load(handle)
     files = [(p["path"], "application/octet-stream") for p in published["partitions"]]
@@ -382,6 +404,11 @@ def upload(log, root, base, config, sas):
                 files.append((relative.replace(os.sep, "/"),
                               "application/json" if name.endswith(".json")
                               else "application/octet-stream"))
+    if sidecars:
+        for relative in chemduck_sidecars.files(root):
+            files.append((relative, "application/json" if relative.endswith(".json")
+                          else "text/plain; charset=utf-8" if relative.endswith(".sql")
+                          else "application/octet-stream"))
     files.append(("manifest.json", "application/json"))     # LAST
     counts = {"uploaded": 0, "unchanged": 0}
     for relative, content_type in files:
@@ -397,8 +424,7 @@ def upload(log, root, base, config, sas):
 def night(root, config, log, no_upload=False, trigger=False):
     """Run the steps; (steps, notes, exit code). Never raises for a step."""
     facility = str(config["facility"])
-    steps = {name: NOT_RUN for name in
-             ("nightly", "pending", "arcgis", "publish", "upload")}
+    steps = {name: NOT_RUN for name in STEPS}
     notes = []
     started = utc_now()
 
@@ -440,7 +466,7 @@ def night(root, config, log, no_upload=False, trigger=False):
     if not rebuilt:
         # Nothing new to publish. The usual outcome of a check: no new data,
         # or slices armed and not yet run. Uploading would send nothing new.
-        for name in ("arcgis", "publish", "upload"):
+        for name in ("arcgis", "publish", "chemduck", "upload"):
             steps[name] = SKIPPED
         notes.append("no cell rebuilt; nothing published.")
         degraded = (any(v == FAILED for v in steps.values()) or bool(empty)
@@ -468,6 +494,22 @@ def night(root, config, log, no_upload=False, trigger=False):
         notes.append("publish_manifest.py exited %d; nothing was uploaded." % code)
         return steps, notes, 2
 
+    # After the manifest, which ChemDuck reads and hashes; before the upload,
+    # which sends the folder ahead of manifest.json.
+    attention = []
+    if config.get("chemduck"):
+        code, lines = run_script(log, "chemduck_sidecars.py", ["--root", root])
+        steps["chemduck"] = OK if code == 0 else FAILED
+        if code != 0:
+            notes.append("chemduck_sidecars.py exited %d; the data is published "
+                         "without new sidecars.%s" % (
+                             code, " " + lines[-1].strip() if lines else ""))
+        attention = [line.split(chemduck_sidecars.ATTENTION, 1)[1].strip()
+                     for line in lines if chemduck_sidecars.ATTENTION in line]
+        notes.extend(attention)
+    else:
+        steps["chemduck"] = SKIPPED
+
     if no_upload or not config.get("upload"):
         steps["upload"] = SKIPPED
     else:
@@ -479,7 +521,8 @@ def night(root, config, log, no_upload=False, trigger=False):
             return steps, notes, 2
         log.line("$ upload to %s" % base)
         try:
-            counts = upload(log, root, base, config, sas)
+            counts = upload(log, root, base, config, sas,
+                            sidecars=steps["chemduck"] == OK)
             steps["upload"] = OK
             log.line("   %d uploaded, %d unchanged"
                      % (counts["uploaded"], counts["unchanged"]))
@@ -489,7 +532,8 @@ def night(root, config, log, no_upload=False, trigger=False):
             notes.append("upload failed: %s" % str(exc).replace(sas, "<sas>"))
             return steps, notes, 2
 
-    degraded = any(v == FAILED for v in steps.values()) or bool(empty) or bool(kept)
+    degraded = (any(v == FAILED for v in steps.values()) or bool(empty) or bool(kept)
+                or bool(attention))
     return steps, notes, 1 if degraded else 0
 
 
@@ -513,7 +557,7 @@ def main(argv=None):
                                            args.trigger)
                 log.line()
                 log.line("summary")
-                for name in ("nightly", "pending", "arcgis", "publish", "upload"):
+                for name in STEPS:
                     log.line("   %-8s %s" % (name, steps[name]))
                 for note in notes:
                     log.line("   - %s" % note)

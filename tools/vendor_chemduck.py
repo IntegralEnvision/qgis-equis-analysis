@@ -1,4 +1,5 @@
-"""Copy ChemDuck into the plugin at one commit: equis_loader/chemduck/.
+"""Copy ChemDuck into the plugin at one commit: equis_loader/chemduck/,
+and the same bytes into the pipeline: pipeline/parquet_source/chemduck/.
 
 ChemDuck holds the chemistry rules as SQL (docs/chemduck-adoption-plan.md).
 It is pure Python and SQL, ~400 KB, needing only duckdb and pyyaml, so it is
@@ -19,6 +20,16 @@ tools/test_chemduck_vendor.py holds them to.
 
 Upgrade deliberately: a new commit changes the rules the plugin maps with,
 so it goes with the parity test (adoption plan, phase 1).
+
+TWO COPIES, ONE PIN. The pipeline publishes ChemDuck's sidecars beside each
+facility's manifest (adoption plan, phase 6), and the plugin reads them, so
+the two must run the same ChemDuck. The pipeline imports no plugin code -
+it runs on its own, with `pip install -e pipeline`, wherever a facility's
+data lives - so it can't import equis_loader.chemduck; and ChemDuck's
+repository is private, so installing it from there would need credentials
+on every machine that runs a night. Both copies are written here, from one
+commit, with one record, and tools/test_chemduck_vendor.py holds the second
+to the first.
 """
 import argparse
 import datetime
@@ -34,6 +45,9 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
 TARGET = os.path.join(ROOT, "equis_loader", "chemduck")
 RECORD = os.path.join(TARGET, "VENDORED.json")
+# The pipeline's copy (see the docstring): the same files and record.
+PIPELINE_TARGET = os.path.join(ROOT, "pipeline", "parquet_source", "chemduck")
+TARGETS = (TARGET, PIPELINE_TARGET)
 PACKAGE = "chemduck/"
 
 
@@ -67,9 +81,15 @@ def main():
 
     # Replace only what this tool wrote: a directory without its record is
     # someone else's, and is not deleted on a guess.
-    if os.path.isdir(TARGET) and not os.path.isfile(RECORD):
-        raise SystemExit("%s exists but holds no VENDORED.json; not replacing it."
-                         % TARGET)
+    for target in TARGETS:
+        if os.path.isdir(target) and not os.path.isfile(
+                os.path.join(target, "VENDORED.json")):
+            raise SystemExit("%s exists but holds no VENDORED.json; not replacing it."
+                             % target)
+    previous = None
+    if os.path.isfile(RECORD):
+        with open(RECORD, encoding="utf-8") as handle:
+            previous = json.load(handle)
 
     names = [n for n in git(source, "ls-tree", "-r", "--name-only", commit, "--",
                             PACKAGE).decode().splitlines()
@@ -84,13 +104,14 @@ def main():
         raise SystemExit("No __version__ in %s's __init__.py." % commit[:7])
     version = found.group(1).decode()
 
-    if os.path.isdir(TARGET):
-        shutil.rmtree(TARGET)
-    for name, blob in blobs.items():
-        path = os.path.join(TARGET, *name.split("/"))
-        os.makedirs(os.path.dirname(path), exist_ok=True)
-        with open(path, "wb") as handle:
-            handle.write(blob)
+    for target in TARGETS:
+        if os.path.isdir(target):
+            shutil.rmtree(target)
+        for name, blob in blobs.items():
+            path = os.path.join(target, *name.split("/"))
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            with open(path, "wb") as handle:
+                handle.write(blob)
 
     remote = subprocess.run(["git", "-C", source, "remote", "get-url", "origin"],
                             capture_output=True, text=True).stdout.strip()
@@ -102,18 +123,23 @@ def main():
         "commit": commit,
         "subject": subject,
         "version": version,
-        "vendored": datetime.date.today().isoformat(),
+        # The day this commit was first vendored: re-vendoring the same pin
+        # (into a new copy, say) changes no byte, so it changes no date.
+        "vendored": (previous["vendored"] if previous and previous.get("commit") == commit
+                     and previous.get("vendored") else datetime.date.today().isoformat()),
         "files": {name: {"bytes": len(blob),
                          "sha256": hashlib.sha256(blob).hexdigest()}
                   for name, blob in sorted(blobs.items())},
     }
-    with open(RECORD, "w", encoding="utf-8", newline="\n") as handle:
-        json.dump(record, handle, indent=1, sort_keys=False)
-        handle.write("\n")
+    for target in TARGETS:
+        with open(os.path.join(target, "VENDORED.json"), "w", encoding="utf-8",
+                  newline="\n") as handle:
+            json.dump(record, handle, indent=1, sort_keys=False)
+            handle.write("\n")
     print("Vendored ChemDuck %s at %s (%s): %d files, %s bytes, into %s"
           % (version, commit[:7], subject, len(blobs),
              format(sum(len(b) for b in blobs.values()), ","),
-             os.path.relpath(TARGET, ROOT)))
+             " and ".join(os.path.relpath(t, ROOT) for t in TARGETS)))
     return 0
 
 
