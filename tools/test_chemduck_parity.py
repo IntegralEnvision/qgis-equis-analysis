@@ -244,6 +244,13 @@ class Comparison(object):
                 if same(dict(cell, date=p["date"]), p) and any(
                         close(r[0], cell["value"]) for r in self.rows(location, day(p["date"]))):
                     return causes
+        # The same result in another unit: ChemDuck converted it at load and
+        # the plugin did not. Without a unit filter the plugin's guard asks
+        # first (above); with one (ChemDuck #18) the guard has nothing to ask,
+        # so the conversion shows here, one cell at a time.
+        if any("chemduck" in str(p.get("unit_source") or "") and p["unit"] != cell["unit"]
+               for p in candidates):
+            return causes | {"units_converted"}
         point = candidates[0]
         cause = self._why(location, cell, point)
         return causes | {cause}
@@ -398,22 +405,6 @@ def fixture_checks():
             print("    %-12s %-5s %s" % (how, nd, dict(sorted(tally.items()))))
         scope_checks(store, chem)
         store.close()
-
-        # --- what ChemDuck refuses to load today -------------------------------
-        for location, text, case_rows in fx.REFUSED:
-            sub = fx.write(os.path.join(folder, location), case_rows)
-            probe = ReportStore.from_manifest(os.path.dirname(sub))
-            plugin = probe.aggregate("Arsenic", matrix=("WG",), fraction=("T",))
-            try:
-                ch.Chem.load(probe.con, sub)
-                refused = ""
-            except Exception as exc:          # noqa: BLE001 - that is the finding
-                refused = "%s: %s" % (type(exc).__name__, str(exc).splitlines()[0][:120])
-            check("known: ChemDuck refuses a load with %s (raised; the plugin maps it, "
-                  "value %s)" % (text, plugin.get(location, {}).get("value")),
-                  bool(refused) and location in plugin,
-                  refused or "it loads now: move %s into CASES" % location)
-            probe.close()
     finally:
         shutil.rmtree(folder, ignore_errors=True)
 
@@ -423,9 +414,9 @@ def scope_checks(store, chem):
     reaches ChemDuck's call: a date window changes the answer on both, and
     a sample-type scope that takes in field duplicates removes the one
     difference they made."""
-    def scoped(start=None, end=None, types=None):
-        store.set_row_scope(start, end, types)
-        chem.set_row_scope(start, end, types)
+    def scoped(start=None, end=None, types=None, depth=None, units=None):
+        store.set_row_scope(start, end, types, depth, units)
+        chem.set_row_scope(start, end, types, depth, units)
         found = collections.Counter()
         cells = {}
 
@@ -455,21 +446,33 @@ def scope_checks(store, chem):
         check("... and leaves the equipment blank out of both (ONLY-BLANK on neither map)",
               not any(key[3] == "ONLY-BLANK" for key in cells))
 
-        # The store's depth and unit filters (2026-10-30) have no ChemDuck
-        # parameter. The adapter must refuse them by name, never answer
-        # unfiltered beside a filtered store.
-        for label, scope, word in (
-                ("a depth filter", dict(depth=(0, 0.3, "m")), "depth"),
-                ("a unit filter", dict(units=["mg/kg"]), "unit")):
-            store.set_row_scope(**scope)
-            chem.set_row_scope(**scope)
-            try:
-                chem.points("Arsenic", matrix=("WG",), fraction=("T",))
-                refused = ""
-            except ValueError as exc:
-                refused = str(exc)
-            check("%s is refused by the adapter, naming it and open item 6" % label,
-                  word in refused and "open item 6" in refused, refused or "it answered")
+        # The store's depth and unit filters (2026-10-30) reach ChemDuck
+        # as its row scope (#18). Until then the adapter refused them by
+        # name, rather than answer unfiltered beside a filtered store.
+        found, cells = scoped(depth=(0, 0.5, "m"))
+        loose = sorted(c for c in found if c not in INTENDED)
+        check("under a depth filter, every difference is still a listed one", not loose,
+              ", ".join(loose))
+        mapped = {key[3] for key in cells}
+        left = {cause for causes in cells.values() for cause in causes}
+        check("0-0.5 m leaves PROFILE's two 0.5 m samples and nothing undepthed, on both "
+              "maps: one point, so no 'points' difference; only its equal non-detects' "
+              "tie under maximum is left",
+              mapped == {"PROFILE"} and left == {"tie_later_date"},
+              "%s; %s" % (sorted(mapped), sorted(left)))
+
+        found, cells = scoped(units=["ug/L"])
+        loose = sorted(c for c in found if c not in INTENDED)
+        check("under a unit filter, every difference is still a listed one", not loose,
+              ", ".join(loose))
+        solid = {k: v for k, v in cells.items() if k[3] == "MIXED-SOLID-UNITS"}
+        check("a ug/L filter drops MIXED-SOLID-UNITS' ug/kg result on both sides, so the "
+              "map both refused agrees", solid and not any(solid.values()),
+              str(solid) or "not compared")
+        iron = {cause for k, v in cells.items() if k[3] == "MIXED-UNITS" for cause in v}
+        check("... and keeps MIXED-UNITS' ug/L result on both: the plugin maps it as "
+              "reported, ChemDuck in the unit it converted to at load", iron == {
+                  "units_converted"}, sorted(iron))
     finally:
         store.set_row_scope()
         chem.set_row_scope()

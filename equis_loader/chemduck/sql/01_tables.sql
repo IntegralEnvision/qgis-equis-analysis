@@ -167,8 +167,15 @@ CREATE TABLE IF NOT EXISTS locations (
 CREATE TABLE IF NOT EXISTS samples (
     sample_id VARCHAR PRIMARY KEY,
     location_id VARCHAR NOT NULL REFERENCES locations(location_id),
-    sample_date DATE NOT NULL,
-    matrix VARCHAR NOT NULL,
+    -- Either may be unknown: an undated sample is outside every date bound
+    -- and the last choice for most recent; a matrixless one is its own
+    -- point, outside every matrix filter. Required, they refused the whole
+    -- load - the sample was skipped and its results then broke the foreign
+    -- key - where the QGIS plugin maps both. A database made before keeps
+    -- NOT NULL (DuckDB cannot drop it under the results' foreign key); it
+    -- could never have held such a sample.
+    sample_date DATE,
+    matrix VARCHAR,
     top_depth DOUBLE,
     bottom_depth DOUBLE,
     depth DOUBLE,  -- computed or reported depth

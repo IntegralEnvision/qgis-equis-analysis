@@ -221,6 +221,29 @@ CREATE OR REPLACE MACRO filters_ignored(p_matrix, p_fraction, p_sample_types, p_
              THEN ['p_reportable_only'] ELSE [] END)
 );
 
+-- absent_columns(): source_columns_absent as a list, read once. The row
+-- scope's checks take it rather than calling source_lacks per column: each
+-- source_lacks is a scalar subquery DuckDB plans on every call, used or
+-- not, and three more of them took point_counts from 24-27 ms to 53-54 ms
+-- on a 96,000-result fixture (1 thread, 2026-11-24).
+CREATE OR REPLACE MACRO absent_columns() AS (
+    COALESCE((SELECT string_split(value, ',') FROM chemduck_settings
+              WHERE key = 'source_columns_absent'), CAST([] AS VARCHAR[]))
+);
+
+-- row_scope_ignored: the row scope's depth and unit filters on a source
+-- without the column (no depth at all, or no units), listed as
+-- filters_ignored lists the others; `absent` is absent_columns(). Its own
+-- macro so filters_ignored's callers outside the row scope are untouched.
+CREATE OR REPLACE MACRO row_scope_ignored(p_depth_units, p_reported_units, absent) AS (
+    list_concat(
+        CASE WHEN p_depth_units IS NOT NULL AND list_contains(absent, 'top_depth')
+                  AND list_contains(absent, 'bottom_depth')
+             THEN ['p_depth_units'] ELSE [] END,
+        CASE WHEN p_reported_units IS NOT NULL AND list_contains(absent, 'units')
+             THEN ['p_reported_units'] ELSE [] END)
+);
+
 -- display_factor_check - a call's p_display_factor, refused below zero.
 CREATE OR REPLACE MACRO display_factor_check(caller, p_display_factor) AS (
     CASE WHEN p_display_factor IS NULL OR p_display_factor >= 0 THEN CAST(p_display_factor AS DOUBLE)
@@ -242,16 +265,26 @@ CREATE OR REPLACE MACRO display_factor_check(caller, p_display_factor) AS (
 
 CREATE OR REPLACE MACRO point_scope(p_caller, p_analyte, p_matrix, p_fraction, p_start_date,
                                     p_end_date, p_sample_types, p_method_class, p_matrices,
-                                    p_locations, p_reportable_only) AS TABLE
-WITH scope AS (
+                                    p_locations, p_reportable_only, p_depth_min, p_depth_max,
+                                    p_depth_units, p_reported_units) AS TABLE
+WITH absent AS (SELECT absent_columns() AS cols),
+scope AS (
     SELECT
     -- D6: the class the listed matrices share, or an error saying why not
     matrix_combine_class(p_caller, p_matrix, p_matrices) AS combine_class,
     reportable_scope(p_reportable_only) AS rep_only,
-    source_lacks('fraction') AS no_fraction,
-    source_lacks('sample_type') AS no_sample_type,
-    source_lacks('method_code') AS no_method,
-    source_lacks('matrix') AS no_matrix
+    -- from one read (absent_columns), not a subquery per column
+    list_contains(absent.cols, 'fraction') AS no_fraction,
+    list_contains(absent.cols, 'sample_type') AS no_sample_type,
+    list_contains(absent.cols, 'method_code') AS no_method,
+    list_contains(absent.cols, 'matrix') AS no_matrix,
+    -- the row scope (depth_in_scope, units_in_scope in 02_macros.sql)
+    row_scope_check(p_caller, p_depth_min, p_depth_max, p_depth_units,
+                    p_reported_units) AS row_check,
+    list_contains(absent.cols, 'top_depth') AND list_contains(absent.cols, 'bottom_depth')
+        AS no_depth,
+    list_contains(absent.cols, 'units') AS no_units
+    FROM absent
 )
 SELECT
     v.location_id, v.x, v.y, v.project,
@@ -295,7 +328,13 @@ WHERE v.analyte = p_analyte
   AND (scope.no_sample_type
        OR CASE WHEN p_sample_types IS NULL THEN in_normal_scope(v.sample_type)
                ELSE in_sample_scope(v.sample_type, p_sample_types) END)
-  AND (v.reportable IS DISTINCT FROM FALSE OR NOT scope.rep_only);
+  AND (v.reportable IS DISTINCT FROM FALSE OR NOT scope.rep_only)
+  -- before the unit check, so a unit left out is never counted against
+  -- its variable
+  AND scope.row_check
+  AND (scope.no_depth OR depth_in_scope(v.top_depth, v.bottom_depth, v.depth_units,
+                                        p_depth_min, p_depth_max, p_depth_units))
+  AND (scope.no_units OR units_in_scope(v.reported_units, p_reported_units));
 
 CREATE OR REPLACE MACRO units_by_variable(p_rows, p_caller) AS TABLE
 WITH unit_counts AS (
@@ -373,6 +412,15 @@ END;
 -- point_series) makes every sample its own point: its re-runs are resolved
 -- as above, events are never combined.
 --
+-- The row scope (depth_in_scope and units_in_scope in 02_macros.sql),
+-- applied before anything is selected or its units checked: p_depth_min,
+-- p_depth_max and p_depth_units keep the samples whose whole interval lies
+-- inside the bounds, in the filter's unit (no depth is out);
+-- p_reported_units keeps the results whose unit as the source reported it
+-- is listed. A source with no depth or no unit column ignores the filter,
+-- and filters_ignored names it. An undated sample is outside every date
+-- bound, and the last choice for most recent.
+--
 -- p_reportable_only: TRUE leaves out results the source marks not
 -- reportable; NULL (the default) is the dataset's choice, recorded at load
 -- (TRUE where the source carries a reportable column). A filter on a column
@@ -425,9 +473,14 @@ CREATE OR REPLACE MACRO aggregate_points(
     p_locations := NULL,
     p_display_factor := NULL,
     p_reportable_only := NULL,
-    p_each_sample := FALSE
+    p_each_sample := FALSE,
+    p_depth_min := NULL,
+    p_depth_max := NULL,
+    p_depth_units := NULL,
+    p_reported_units := NULL
 ) AS TABLE
-WITH params AS (
+WITH absent AS (SELECT absent_columns() AS cols),
+params AS (
     SELECT CASE
         WHEN p_event_agg IN ('most_recent', 'maximum') THEN p_event_agg
         WHEN p_event_agg IN ('statistic', 'mean') THEN 'statistic'
@@ -441,8 +494,10 @@ WITH params AS (
                    || ' (units are converted at load, never here)')
     END AS um,
     display_factor_check('aggregate_points', p_display_factor) AS dfac_call,
-    filters_ignored(p_matrix, p_fraction, p_sample_types, p_method_class,
-                    reportable_scope(p_reportable_only)) AS ignored
+    list_concat(filters_ignored(p_matrix, p_fraction, p_sample_types, p_method_class,
+                                reportable_scope(p_reportable_only)),
+                row_scope_ignored(p_depth_units, p_reported_units, absent.cols)) AS ignored
+    FROM absent
 ),
 -- The policies, each with a small key. A row carries the key, not the
 -- policy's columns: three of them are structs, and carrying seven columns
@@ -461,7 +516,8 @@ filtered AS (
                          ds.ds_policy, ds.ds_version) AS pol
     FROM point_scope('aggregate_points', p_analyte, p_matrix, p_fraction, p_start_date,
                      p_end_date, p_sample_types, p_method_class, p_matrices, p_locations,
-                     p_reportable_only) v
+                     p_reportable_only, p_depth_min, p_depth_max, p_depth_units,
+                     p_reported_units) v
     LEFT JOIN project pr ON pr.project_name = v.project
     CROSS JOIN v_nd_dataset_policy ds
     CROSS JOIN params
@@ -960,7 +1016,11 @@ CREATE OR REPLACE MACRO rollup_points(
     p_matrices := NULL,
     p_locations := NULL,
     p_display_factor := NULL,
-    p_reportable_only := NULL
+    p_reportable_only := NULL,
+    p_depth_min := NULL,
+    p_depth_max := NULL,
+    p_depth_units := NULL,
+    p_reported_units := NULL
 ) AS TABLE
 WITH params AS (
     SELECT CASE
@@ -986,7 +1046,9 @@ pts AS (
                           p_units := p_units, p_method_class := p_method_class,
                           p_matrices := p_matrices, p_locations := p_locations,
                           p_display_factor := p_display_factor,
-                          p_reportable_only := p_reportable_only) a
+                          p_reportable_only := p_reportable_only,
+                          p_depth_min := p_depth_min, p_depth_max := p_depth_max,
+                          p_depth_units := p_depth_units, p_reported_units := p_reported_units) a
     LEFT JOIN v_nd_policies pol ON pol.name || '@' || pol.version = a.nd_policy
 ),
 ranked AS (
@@ -1043,7 +1105,11 @@ CREATE OR REPLACE MACRO point_series(
     p_nd_policy_version := NULL,
     p_units := 'refuse',
     p_display_factor := NULL,
-    p_reportable_only := NULL
+    p_reportable_only := NULL,
+    p_depth_min := NULL,
+    p_depth_max := NULL,
+    p_depth_units := NULL,
+    p_reported_units := NULL
 ) AS TABLE
 SELECT location_id, x, y, matrix, top_depth, bottom_depth, position, depth,
        fraction, meas_basis, analyte, method_class,
@@ -1057,7 +1123,9 @@ FROM aggregate_points(p_analyte, p_event_agg := 'most_recent', p_matrix := p_mat
                       p_nd_policy := p_nd_policy, p_nd_policy_version := p_nd_policy_version,
                       p_units := p_units, p_method_class := p_method_class,
                       p_locations := p_locations, p_display_factor := p_display_factor,
-                      p_reportable_only := p_reportable_only, p_each_sample := TRUE)
+                      p_reportable_only := p_reportable_only, p_each_sample := TRUE,
+                      p_depth_min := p_depth_min, p_depth_max := p_depth_max,
+                      p_depth_units := p_depth_units, p_reported_units := p_reported_units)
 ORDER BY location_id, matrix, top_depth, bottom_depth, position, fraction, meas_basis,
          method_class, sample_date, sample_datetime, sample_id;
 
@@ -1086,7 +1154,11 @@ CREATE OR REPLACE MACRO point_counts(
     p_method_class := NULL,
     p_matrices := NULL,
     p_locations := NULL,
-    p_reportable_only := NULL
+    p_reportable_only := NULL,
+    p_depth_min := NULL,
+    p_depth_max := NULL,
+    p_depth_units := NULL,
+    p_reported_units := NULL
 ) AS TABLE
 WITH params AS (
     SELECT CASE
@@ -1104,7 +1176,8 @@ pc_rows AS (
            hash(s.matrix, s.fraction, s.meas_basis, s.analyte, s.method_class) AS vkey
     FROM point_scope('point_counts', p_analyte, p_matrix, p_fraction, p_start_date,
                      p_end_date, p_sample_types, p_method_class, p_matrices, p_locations,
-                     p_reportable_only) s
+                     p_reportable_only, p_depth_min, p_depth_max, p_depth_units,
+                     p_reported_units) s
     CROSS JOIN params
 )
 SELECT count(DISTINCT r.location_id) AS n_locations,
