@@ -4,7 +4,8 @@ Every chemistry question that moves to ChemDuck goes through here, and
 nothing else in the plugin writes ChemDuck SQL. Phase 1 is a shadow: the
 adapter opens ChemDuck beside the plugin's own store and answers the map's
 question, and only the parity test (tools/test_chemduck_parity.py) and a
-debug log read the answer. The panel still maps ReportStore's.
+debug log (chem_parity.shadow_map, when the setting `chemduck_shadow` is
+on) read the answer. The panel still maps ReportStore's.
 
 Like store.py this imports no QGIS: it takes a DuckDB connection and paths
 from its caller, so it is tested under a plain interpreter.
@@ -17,13 +18,16 @@ positions and method classes are kept apart (its shared rules D1 and D3) -
 and the adapter does not roll them up: how a map shows a location with
 several points is decision 2 of the plan, not this module's to take.
 """
-import contextlib
-import io
+import csv
+import os
+import tempfile
 
 from . import chemduck
 from . import report_data as rd
 
 SCHEMA = "chemduck"
+# DuckDB threads for the shadow's own database (Chem.shadow).
+SHADOW_THREADS = 4
 
 # The plugin codes fractions as EQuIS does; ChemDuck's ARII mapping names
 # them ('T' -> 'Total', 'D' -> 'Dissolved') and passes other codes through,
@@ -37,11 +41,29 @@ EVENT_AGG = {rd.MOST_RECENT: "most_recent", rd.MAXIMUM: "maximum"}
 DISPLAY_FACTOR = {rd.ND_HALF: 0.5, rd.ND_FULL: 1.0}
 
 
+def _no_print(*_args, **_kwargs):
+    pass
+
+
+# ChemDuck prints a line per SQL file it loads and per load step; in QGIS
+# that lands in the Python console. Until it logs through `logging` (the
+# plan's open item 4), its modules get a print of their own that says
+# nothing: a module's global `print` is found before the builtin, so this
+# silences ChemDuck and nothing else, on whatever thread it runs. Not
+# contextlib.redirect_stdout, as this did until 2026-11-25: that swaps
+# sys.stdout for the WHOLE PROCESS, and the shadow loads on a worker, so
+# whatever the main thread printed meanwhile - the Python console's own
+# output - vanished with ChemDuck's. tools/test_chem_shadow_ui.py found it
+# when two of its own checks never appeared. (ChemDuck's publish still
+# redirects stdout itself; the plugin doesn't run publish.)
+chemduck.load_data.print = _no_print
+chemduck.arii_hybrid.print = _no_print
+
+
 def _quiet(fn, *args, **kwargs):
-    # ChemDuck prints a line per SQL file it loads; in QGIS that lands in
-    # the Python console. Until it logs through `logging`, swallow it here.
-    with contextlib.redirect_stdout(io.StringIO()):
-        return fn(*args, **kwargs)
+    """fn, with ChemDuck silenced (above). Kept as the one door callers use,
+    so a later ChemDuck that logs needs a change here only."""
+    return fn(*args, **kwargs)
 
 
 class Chem(object):
@@ -69,6 +91,89 @@ class Chem(object):
         publish wrote, the way Chemrooms opens it in the browser."""
         _quiet(chemduck.open_consumer, con, folder, partition_files, schema=schema)
         return cls(con, schema)
+
+    @classmethod
+    def shadow(cls, source, path, threads=SHADOW_THREADS):
+        """ChemDuck over the panel's rows in a DuckDB file of its own: the
+        phase 1 shadow, built off the UI thread when the debug setting is on.
+
+        source: a ReportTable (a live report, a saved one, an agent's
+        output), written to a CSV as the report gave it, so ChemDuck maps
+        the report's own columns and not the store's parsed ones; or a
+        LOCAL manifest.json, read as the pipeline published it.
+
+        WHY ITS OWN DATABASE, not schema `chemduck` of the store's
+        connection as the plan's design has it. The shadow watches; it must
+        not be able to slow or break what it watches. In the store's
+        database ChemDuck's load would take the store's connection for the
+        length of a load (89 s for 557,691 rows, 2026-10-29), its threads
+        setting would be the store's (decision 8, not taken), and a pending
+        result on either side hides the other's tables (CLAUDE.md). Here a
+        failure closes a file nobody else reads. The design's one database
+        is phase 2's, once ChemDuck answers for the map.
+
+        threads: this database's alone, so it can be ChemDuck's measured
+        best (4, docs/duckdb-thread-cap.md in ChemDuck) without taking
+        decision 8 for the store.
+        """
+        from .store import duckdb_module
+        duckdb = duckdb_module()
+        if os.path.exists(path):
+            # A file from a previous session, or a cancelled build: never
+            # merged into (ChemDuck refuses a second load into a schema).
+            os.unlink(path)
+        con = duckdb.connect(path)
+        try:
+            if threads:
+                con.execute("SET threads = %d" % int(threads))
+            if isinstance(source, (str, os.PathLike)):
+                chem = cls.load(con, str(source))
+            else:
+                chem = cls._load_table(con, source)
+        except BaseException:
+            con.close()
+            try:
+                os.unlink(path)
+            except OSError:
+                pass
+            raise
+        chem.path = path
+        return chem
+
+    @classmethod
+    def _load_table(cls, con, table):
+        # Through a CSV and not a relation: a relation is read through its
+        # Arrow stream, which needs pyarrow, and the plugin's own DuckDB
+        # bundle has none. ChemDuck reads a CSV as text (all_varchar), so
+        # the report's cells reach its mapping as the report wrote them.
+        handle, csv_path = tempfile.mkstemp(suffix=".csv", prefix="equis_chem_")
+        os.close(handle)
+        try:
+            with open(csv_path, "w", newline="", encoding="utf-8") as stream:
+                writer = csv.writer(stream)
+                writer.writerow(table.headers)
+                writer.writerows(table.rows)
+            return cls.load(con, csv_path)
+        finally:
+            try:
+                os.unlink(csv_path)
+            except OSError:
+                pass
+
+    def close(self):
+        """Close the connection, and remove the shadow's file if it has one."""
+        try:
+            self.cur.close()
+        except Exception:                      # noqa: BLE001 - closing anyway
+            pass
+        self.con.close()
+        path = getattr(self, "path", None)
+        if path:
+            for name in (path, path + ".wal"):
+                try:
+                    os.unlink(name)
+                except OSError:
+                    pass
 
     def set_row_scope(self, start=None, end=None, sample_types=None,
                       depth=None, units=None):

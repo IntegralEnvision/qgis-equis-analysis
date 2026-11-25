@@ -290,7 +290,11 @@ One is a ChemDuck defect, found by the parity test: item 5.
 4. **`load_schema` prints a line per SQL file** ("Loading 03_views.sql...").
    In QGIS that goes to the Python console's stdout. The adapter
    (`chem._quiet`) silences it until ChemDuck logs through `logging`.
-   That's a small request, not a blocker.
+   That's a small request, not a blocker. *2026-11-25:* the silencing
+   moved from `redirect_stdout`, which is process-wide and swallowed the
+   main thread's output while the shadow loaded on a worker, to a no-op
+   `print` set on ChemDuck's own modules. That is still a workaround;
+   `logging` is the fix.
 5. **A sample with no date, or no matrix, stops ChemDuck's load.** *Found
    2026-10-29* by the parity fixture. `insert_samples` drops such a sample,
    but `insert_results` still inserts its results, so the foreign key
@@ -514,9 +518,52 @@ raised with ChemDuck.
 > - a call costs 0.11 s on one thread and 0.4–0.85 s on fourteen, even on 40
 >   rows (decision 8).
 >
-> *Still to do in this phase:* the debug log of adapter beside store for
-> each map built, and the report-rows path (`Chem.load` in the worker that
-> builds the store).
+> *The shadow, done 2026-11-25.* With the setting
+> `equis_loader/chemduck_shadow` on (no widget; off by default), the panel
+> loads ChemDuck in the background whenever it gets rows, and logs each
+> aggregate map built to the "EQuIS ChemDuck" tab: the store's answer
+> beside ChemDuck's, with every difference counted by cause, and the time
+> each side took. An example from the fixture: "Arsenic (most_recent, half
+> ND, matrix WG, fraction T): 22 locations; agree 13; non_reportable 2;
+> points 2; ... store 0.08 s, ChemDuck 0.21 s, causes 0.52 s."
+> - **The causes are the parity test's.** Its comparison moved into
+>   `equis_loader/chem_parity.py`, which the test now imports, so the log
+>   and the test can't disagree about what a difference means. A
+>   difference no cause explains ends the line in "N UNEXPLAINED", with
+>   where.
+> - **Both paths.** A report (live, saved or an agent's) loads from its
+>   `ReportTable`, written to a CSV as the report gave it. A local parquet
+>   source loads from its manifest. An http source isn't opened: ChemDuck
+>   loads a manifest from a path, so that waits on phase 6's sidecars, and
+>   the log says so (with the address, never the token).
+> - **Its own DuckDB file, not schema `chemduck` of the store's
+>   connection** as the design has it. The shadow watches; in the store's
+>   database a load would hold the store's connection for its length, set
+>   its threads (decision 8, not taken) and risk the pending-result trap.
+>   The one database is phase 2's. The shadow's database runs at 4 threads.
+> - **Not compared, and said so:** a map with no matrix chosen (ChemDuck
+>   keeps each matrix apart), an analytic-method filter, several
+>   fractions, excluded non-detects (decision 1), a map built while the
+>   shadow loads or before the store lands. On the live path the layer
+>   comes from the table, and the comparison is against the store, which
+>   the parity gate holds to the table.
+> - **A budget.** Explaining a difference can query the store's rows, on
+>   the UI thread; past 2 s the rest are counted as "not explained (time
+>   budget)", never as agreeing.
+> - **Found by it:** `chem._quiet` silenced ChemDuck with
+>   `contextlib.redirect_stdout`, which swaps `sys.stdout` for the whole
+>   process. On a worker that swallowed whatever the main thread printed
+>   during a load, the Python console's output included: 17 of 92 lines
+>   arrived in the test. ChemDuck's modules now get a `print` of their own
+>   instead (open item 4).
+>
+> Tests: `tools/test_chem_shadow.py` (plain Python, 16 checks: the CSV
+> shadow answers as the parquet one; on the live path every fixture
+> location differs as declared; the skips, the budget, the scope, the
+> threads) and `tools/test_chem_shadow_ui.py` (QGIS 4.2.3, 19 checks,
+> through the panel's own build button, a load superseded by another
+> included: each load has a file of its own). Not yet run: the shadow on
+> Facility A, whose data isn't on this machine.
 
 ### Phase 2 — maps
 

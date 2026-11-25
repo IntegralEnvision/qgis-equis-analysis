@@ -14,6 +14,7 @@ import datetime
 import os
 import re
 import threading
+import time
 
 from qgis.core import (Qgis, QgsApplication, QgsFeatureRequest,
                        QgsMessageLog, QgsProject, QgsTask)
@@ -110,6 +111,7 @@ from .tasks import (
     CACHE,
     CACHE_FALLBACK,
     CACHED_SUFFIX,
+    ChemShadowTask,
     EIA,
     cached_layer_name,
     FetchFacilitiesTask,
@@ -396,6 +398,13 @@ class EquisDialog(QDockWidget):
         # and `_analysis` below is the ONE place that decides which answers.
         self._report_store = None
         self._store_task = None
+        # ChemDuck's shadow of the same rows (chem.Chem), and the task
+        # loading it: on only with the debug setting, never read by anything
+        # the user sees (docs/chemduck-adoption-plan.md, phase 1). Goes with
+        # the store, in _discard_store.
+        self._chem_shadow = None
+        self._chem_shadow_task = None
+        self._chem_shadow_serial = 0
         # The linked-views controller, built only when asked for. QtWebEngine
         # and the built web bundle can both be absent on a perfectly valid
         # install, so nothing outside this feature may assume it exists.
@@ -1881,6 +1890,7 @@ class EquisDialog(QDockWidget):
         self._apply_row_scope()
         self._schedule_analysis_warmup()
         self._parquet_url = url
+        self._start_chem_shadow(url)
         # Recorded only once it opened: a mistyped token saved on the
         # attempt would replace the one that works. The token goes to this
         # person's settings and the address to the project, which QGIS then
@@ -2750,6 +2760,12 @@ class EquisDialog(QDockWidget):
                     selection.start, selection.end, selection.sample_types,
                     selection.depth, selection.units):
                 changed = True
+        # The shadow too, so it is asked what the store was asked; outside
+        # `changed`, which says whether the rows the PANEL shows changed.
+        if self._chem_shadow is not None:
+            self._chem_shadow.set_row_scope(
+                selection.start, selection.end, selection.sample_types,
+                selection.depth, selection.units)
         return changed
 
     def _on_rows_rescoped(self, what):
@@ -2806,6 +2822,113 @@ class EquisDialog(QDockWidget):
         task.failed.connect(self._on_store_failed)
         self._store_task = task
         QgsApplication.taskManager().addTask(task)
+        self._start_chem_shadow(table)
+
+    # ------------------------------------------------- ChemDuck's shadow
+
+    def _start_chem_shadow(self, source):
+        """Load ChemDuck beside the store, if the debug setting asks.
+
+        `source` is the report's ReportTable, or a parquet source's URL, of
+        which only a local one is read: ChemDuck loads a manifest from a
+        path, and an http source waits on phase 6, when the pipeline
+        publishes ChemDuck's sidecars beside the manifest. Said in the log,
+        so an empty log is never mistaken for agreement.
+        """
+        if not settings_store.load_chemduck_shadow():
+            return
+        if isinstance(source, str):
+            folder = ReportStore._local_path(source) or (
+                source if "://" not in source else None)
+            if folder is None:
+                self._log_shadow("not opened: %s is not local. ChemDuck reads a local "
+                                 "manifest; an http source waits on the pipeline "
+                                 "publishing its sidecars (the plan's phase 6)."
+                                 % parquet_address.split(source)[0])
+                return
+            source = os.path.join(folder, ReportStore.MANIFEST_NAME)
+        # A file per load: a load superseded while it runs still holds its
+        # file (Windows won't delete an open one), and closes it - removing
+        # it - when it lands. One shared name would refuse the new load, or
+        # lose the current shadow's file to the stale one's close.
+        self._chem_shadow_serial += 1
+        try:
+            path = os.path.join(settings_store.cache_root(), "chemduck_shadow_%d_%d.duckdb"
+                                % (os.getpid(), self._chem_shadow_serial))
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+        except OSError as exc:
+            self._log_shadow("no place for its file: %s" % exc)
+            return
+        task = ChemShadowTask(source, path)
+        task.finishedOk.connect(lambda _r, t=task: self._on_chem_shadow_ready(t))
+        task.failed.connect(lambda message, t=task: self._on_chem_shadow_failed(t, message))
+        self._chem_shadow_task = task
+        self._log_shadow("loading...")
+        QgsApplication.taskManager().addTask(task)
+
+    def _on_chem_shadow_ready(self, task):
+        if task is not self._chem_shadow_task:
+            # Rows replaced while it loaded: the panel has moved on.
+            if task.chem is not None:
+                task.chem.close()
+            return
+        self._chem_shadow_task = None
+        self._chem_shadow = task.chem
+        self._apply_row_scope()
+        self._log_shadow("ready: %s results loaded in %.1f s."
+                         % (format(task.rows or 0, ",d"), task.seconds or 0))
+
+    def _on_chem_shadow_failed(self, task, message):
+        if task is not self._chem_shadow_task:
+            return
+        self._chem_shadow_task = None
+        self._log_shadow("failed to load: %s" % parquet_address.redact(message))
+
+    def _discard_chem_shadow(self):
+        if self._chem_shadow_task is not None:
+            # A load in flight can't be stopped; its result is closed when
+            # it lands, since it is no longer the current task.
+            self._chem_shadow_task = None
+        if self._chem_shadow is not None:
+            try:
+                self._chem_shadow.close()
+            except Exception:                  # noqa: BLE001 - closing anyway
+                pass
+            self._chem_shadow = None
+
+    def _log_shadow(self, text):
+        QgsMessageLog.logMessage(
+            text if text.startswith("ChemDuck shadow") else "ChemDuck shadow: " + text,
+            "EQuIS ChemDuck", Qgis.Info)
+
+    def _shadow_map(self, analyte, how, summary, store_seconds):
+        """Log ChemDuck's answer beside the map just built. Never raises:
+        the shadow must not cost the user the map it watches."""
+        if not settings_store.load_chemduck_shadow():
+            return
+        try:
+            from . import chem_parity
+            report = {"chemical": analyte["chemical"], "how": how,
+                      "nd": self._non_detect_mode(), "matrix": self._matrix_mode(),
+                      "fraction": self._fraction_mode()}
+            if self._chem_shadow is None:
+                report["skipped"] = ("still loading" if self._chem_shadow_task is not None
+                                     else "not loaded for this source")
+            elif self._report_store is None:
+                report["skipped"] = "the store has not landed yet"
+            else:
+                # The store, whatever the layer was built from: on the live
+                # path that is the table (_layer_source), whose answer the
+                # parity gate holds to the store's, and the causes are
+                # checked against the store's rows.
+                report = chem_parity.shadow_map(
+                    self._report_store, self._chem_shadow, analyte["chemical"], how,
+                    self._non_detect_mode(), self._matrix_mode(), self._fraction_mode(),
+                    self._method_mode(), plugin=summary)
+            self._log_shadow(chem_parity.describe(report, store_seconds))
+        except Exception as exc:               # noqa: BLE001 - see docstring
+            self._log_shadow("%s failed: %s: %s" % (analyte.get("chemical"),
+                                                    type(exc).__name__, exc))
 
     def _on_store_ready(self, task):
         if task is not self._store_task:
@@ -2845,6 +2968,7 @@ class EquisDialog(QDockWidget):
         if self._report_store is not None:
             self._report_store.close()
             self._report_store = None
+        self._discard_chem_shadow()
         # The parquet marker goes with the store it describes. Left set,
         # _needs_fetch would keep answering "no fetch needed" after a switch
         # back to EQuIS, and the live path would never fetch again.
@@ -2974,6 +3098,10 @@ class EquisDialog(QDockWidget):
         was = (getattr(old, "manifest", None) or {}).get("rows")
         self._report_store = store
         old.close()
+        # The shadow holds the previous publish's rows; it would compare a
+        # map of the new files with the old ones.
+        self._discard_chem_shadow()
+        self._start_chem_shadow(self._parquet_url)
         self._apply_row_scope()
         rows = store.analytes()
         self._offered_analytes = [(row.get("cas_rn") or "", row.get("chemical") or "")
@@ -5165,6 +5293,7 @@ class EquisDialog(QDockWidget):
                                "{:,}".format(UNAGGREGATED_ROW_LIMIT), dropped,
                                "" if dropped == 1 else "s"))
                 else:
+                    began = time.perf_counter()
                     summary = source.aggregate(
                         analyte["chemical"], analyte["cas_rn"], how=how,
                         non_detect=self._non_detect_mode(),
@@ -5173,6 +5302,9 @@ class EquisDialog(QDockWidget):
                         method=self._method_mode(),
                         fields=bool(report_fields),
                     )
+                    # Only with the debug setting on; a line in the log.
+                    self._shadow_map(analyte, how, summary,
+                                     time.perf_counter() - began)
                 # The symbology is part of the name: two views of one chemical
                 # can now coexist, and two identically named layers in the
                 # panel would be indistinguishable. So is the matrix, for the

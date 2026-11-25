@@ -811,6 +811,47 @@ class BuildStoreTask(_BaseTask):
         return True
 
 
+class ChemShadowTask(_BaseTask):
+    """Load ChemDuck's shadow of the panel's rows, off the UI thread.
+
+    Phase 1 of docs/chemduck-adoption-plan.md, on only with the debug
+    setting (settings.load_chemduck_shadow). `source` is the ReportTable of
+    a report or a local manifest.json (chem.Chem.shadow). A load is tens of
+    seconds on a real report (89 s for 557,691 rows, 2026-10-29), which is
+    why it is here.
+
+    Its connection is created here and used on the main thread afterwards,
+    crossing threads once, as FetchManifestTask's does. It is a database of
+    its own, so nothing else reads it meanwhile.
+    """
+
+    def __init__(self, source, path):
+        super().__init__("Loading ChemDuck's shadow of the data")
+        # Not `source`: _BaseTask's, where a result came from (live, cache).
+        self.rows_from = source
+        self.path = path
+        self.chem = None
+        self.seconds = None
+        self.rows = None
+
+    def run(self):
+        import time
+        began = time.perf_counter()
+        try:
+            from .chem import Chem
+            chem = Chem.shadow(self.rows_from, self.path)
+            self.rows = chem.cur.execute("SELECT count(*) FROM results").fetchone()[0]
+        except Exception as exc:               # noqa: BLE001 - logged, never shown
+            return self._fail("%s: %s" % (type(exc).__name__, str(exc).splitlines()[0]
+                                          if str(exc) else ""))
+        self.seconds = time.perf_counter() - began
+        if self.isCanceled():
+            chem.close()
+            return False
+        self.chem = chem
+        return True
+
+
 class AnalysisTask(_BaseTask):
     """Answer one Analysis-chooser choice off the UI thread.
 
