@@ -1,0 +1,78 @@
+{
+ "note": "Written by tools/vendor_chemduck.py. Do not edit these files: re-vendor, and tools/test_chemduck_vendor.py checks them.",
+ "repository": "https://github.com/IntegralEnvision/chemduck.git",
+ "commit": "b81dd01088d60c8d726af782f532d36e347249d7",
+ "subject": "Merge pull request #18 from IntegralEnvision/qgis-scope-and-undated",
+ "version": "0.2.0",
+ "vendored": "2026-11-24",
+ "files": {
+  "__init__.py": {
+   "bytes": 2852,
+   "sha256": "617d3089e07505eda2ad92680de679cec467f4eaeffc77f82669164d22ddb5d3"
+  },
+  "arii_hybrid.py": {
+   "bytes": 34957,
+   "sha256": "0c0cb6e193596d43aa6410bb59b97a2f317955b024014dcb18146c5663874b01"
+  },
+  "eav_helpers.py": {
+   "bytes": 3740,
+   "sha256": "1ff3e19a654918aaef9625b2b798bb6b2fa158c62e6fab8004998bde989103ea"
+  },
+  "equis_arii_parquet_mapping.yaml": {
+   "bytes": 7807,
+   "sha256": "166b084dedffab57bbc3d9b4355e5ebbed7a2ceffc078dc5149a19dc15070b64"
+  },
+  "load_data.py": {
+   "bytes": 108653,
+   "sha256": "c3317a562d4b7959a415246b41a5be001dc84e309a124b53f1f5c0636d519fcb"
+  },
+  "sql/01_tables.sql": {
+   "bytes": 27877,
+   "sha256": "8430c81359c360c5375a9188bf61855fa85366d25a0c699631f6528ba1231bf0"
+  },
+  "sql/02_macros.sql": {
+   "bytes": 40279,
+   "sha256": "4130b7703fbc6b191f384b28a6b04dab48d9a7b3d623236e747e178f79c9353d"
+  },
+  "sql/03_views.sql": {
+   "bytes": 29116,
+   "sha256": "d6ef26412ae16abc0c4d934b82bf9f6670ae1a9ef4c2eb913442023b2830ca6a"
+  },
+  "sql/04_extended_tables.sql": {
+   "bytes": 5529,
+   "sha256": "2b1f3b98fe39120e66a49485211ef34e040309c9ac72a0484d9cf714f5c1dd55"
+  },
+  "sql/05_extended_views.sql": {
+   "bytes": 11863,
+   "sha256": "12e3582ed33592326b9bad0d18497ff846ef24ac8de140c08510f3da5d91ffc1"
+  },
+  "sql/06_eav_views.sql": {
+   "bytes": 753,
+   "sha256": "852db2d830e95d4d6674cfdb7568bcaed30221ff1a0c0e9364f12360ac21c3d7"
+  },
+  "sql/07_catalogs.sql": {
+   "bytes": 3729,
+   "sha256": "1c0f61d5c0f44831bf15ac80aded08866b6adbfd038a866795226e67ca88b23f"
+  },
+  "sql/08_aggregate_points.sql": {
+   "bytes": 63472,
+   "sha256": "b0d7ea25feddaac0f50f750ce9787d1f0824da074958400a0e6faf3e77c8a769"
+  },
+  "sql/08_aggregate_results.sql": {
+   "bytes": 18161,
+   "sha256": "94421c75bd89b72a3de718699c337e3d1d6d75b302c63ce97d08b646f11d5f60"
+  },
+  "sql/09_desurvey.sql": {
+   "bytes": 19610,
+   "sha256": "0b265847faf23b494cf3d87e58de545c055ef54f44e580c5833db099bc961327"
+  },
+  "sql/10_sample_results.sql": {
+   "bytes": 28135,
+   "sha256": "36ee16dafa490b739c5c3a907128bd8b3ca7df79a311aaa64a21ee117a0e667f"
+  },
+  "sql/optional/spatial.sql": {
+   "bytes": 881,
+   "sha256": "dbf9c91c2e389b4a606d906272f621fdf7735cd5ccca0ea6938b81fa413051df"
+  }
+ }
+}

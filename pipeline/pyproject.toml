@@ -18,6 +18,15 @@ dependencies = ["pyarrow", "numpy"]
 [project.optional-dependencies]
 # A CRS other than EPSG:4326 for the ArcGIS output, without a PROJJSON file.
 crs = ["pyproj"]
+# ChemDuck's sidecars (chemduck_sidecars.py), for a facility whose
+# pipeline.json has a "chemduck" section. The vendored ChemDuck's own needs;
+# it refuses a DuckDB outside its SUPPORTED_DUCKDB.
+chemduck = ["duckdb>=1.5.4", "pyyaml>=6.0"]
 
 [tool.setuptools]
-packages = ["parquet_source"]
+# parquet_source.chemduck is ChemDuck, vendored at the plugin's pin by the
+# repository's tools/vendor_chemduck.py; never edited here.
+packages = ["parquet_source", "parquet_source.chemduck"]
+
+[tool.setuptools.package-data]
+"parquet_source.chemduck" = ["sql/*.sql", "sql/optional/*.sql", "*.yaml", "VENDORED.json"]

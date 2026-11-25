@@ -154,6 +154,8 @@ def test_order():
     check("night: steps that had nothing to do say skipped, not failed",
           steps["pending"] == rn.SKIPPED and steps["upload"] == rn.SKIPPED,
           steps)
+    check("night: no \"chemduck\" in the config, no sidecars, said as skipped",
+          steps["chemduck"] == rn.SKIPPED, steps)
 
 
 def test_nothing_rebuilt():
@@ -256,6 +258,73 @@ def test_publish_failure_stops_upload():
           steps["upload"] == rn.NOT_RUN and code == 2, (steps, code))
 
 
+# ------------------------------------------------------------ sidecars
+CHEMDUCK_CONFIG = dict(BASE_CONFIG, chemduck={"x": "LONGITUDE", "y": "LATITUDE"})
+
+
+def make_sidecars(root):
+    """Stands in for chemduck_sidecars.py: the folder it leaves."""
+    folder = os.path.join(root, "chemduck")
+    os.makedirs(os.path.join(folder, "sql"), exist_ok=True)
+    for name, text in (("locations.parquet", "PAR1 fake"), ("sql/results_view.sql", "--"),
+                       ("sidecars.json", "{}")):
+        with open(os.path.join(folder, *name.split("/")), "w") as handle:
+            handle.write(text)
+
+
+def test_chemduck_step():
+    root = make_root(CHEMDUCK_CONFIG)
+    fake = Fake(root, effects={"nightly_slices.py": mark_run("ok", 5),
+                               "chemduck_sidecars.py": make_sidecars})
+    steps, notes, code = night(root, fake)
+    check("sidecars: after the manifest they are built from",
+          fake.scripts() == ["nightly_slices.py", "publish_manifest.py",
+                             "chemduck_sidecars.py"], fake.scripts())
+    check("sidecars: given the root",
+          fake.calls[-1][1] == ["--root", root], fake.calls[-1])
+    check("sidecars: a clean night exits 0", steps["chemduck"] == rn.OK and code == 0,
+          (steps, notes))
+
+    fake = Fake(root, effects={"nightly_slices.py": mark_run("ok", 5)},
+                codes={"chemduck_sidecars.py": 2},
+                lines={"chemduck_sidecars.py": [
+                    "chemduck_sidecars: ManifestError: Parquet files disagree"]})
+    steps, notes, code = night(root, fake)
+    check("sidecars: a failure is reported and the night goes on (exit 1)",
+          steps["chemduck"] == rn.FAILED and steps["publish"] == rn.OK and code == 1,
+          (steps, code))
+    check("sidecars: the note says the data went out without them, and why",
+          any("without new sidecars" in n and "ManifestError" in n for n in notes), notes)
+
+    fake = Fake(root, effects={"nightly_slices.py": mark_run("ok", 5)},
+                lines={"chemduck_sidecars.py": [
+                    "units: as_reported 3",
+                    "ATTENTION: ChemDuck converted 1 row(s) by its own factor, not "
+                    "EQuIS's: Iron | aqueous | lab: ug/L -> mg/L x 0.001 (chemduck)"]})
+    steps, notes, code = night(root, fake)
+    check("sidecars: a ChemDuck unit conversion publishes, is noted, and exits 1",
+          steps["chemduck"] == rn.OK and code == 1
+          and any(n.startswith("ChemDuck converted") and "Iron" in n for n in notes),
+          (steps, code, notes))
+
+    # A fresh root: the one above holds a partition dated this same second,
+    # which a night started now counts as rebuilt.
+    idle = make_root(CHEMDUCK_CONFIG)
+    fake = Fake(idle)
+    steps, notes, code = night(idle, fake)
+    check("sidecars: a night that rebuilt nothing builds none",
+          "chemduck_sidecars.py" not in fake.scripts() and steps["chemduck"] == rn.SKIPPED,
+          (fake.scripts(), steps))
+
+    try:
+        rn.load_config(make_root(dict(BASE_CONFIG, chemduck="yes")))
+        refused = ""
+    except rn.Refused as exc:
+        refused = str(exc)
+    check("sidecars: a \"chemduck\" that isn't an object is refused",
+          "chemduck" in refused, refused[:80])
+
+
 # --------------------------------------------------------------- upload
 class Blobs(http.server.BaseHTTPRequestHandler):
     store, order, refuse = {}, [], False
@@ -334,6 +403,50 @@ def test_upload():
         check("upload: nor in the log", "SECRET" not in log_text)
     finally:
         Blobs.refuse = False
+        rn.blob_url = real_blob_url
+        server.shutdown()
+        del os.environ["TEST_SAS"]
+
+
+def test_sidecar_upload():
+    server = http.server.HTTPServer(("127.0.0.1", 0), Blobs)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    real_blob_url = rn.blob_url
+    rn.blob_url = lambda base, rel, sas: real_blob_url(
+        "http://127.0.0.1:%d/c/x" % server.server_port, rel, sas)
+    os.environ["TEST_SAS"] = "sv=1&sig=SECRET"
+    Blobs.store.clear()
+    del Blobs.order[:]
+    try:
+        config = dict(CHEMDUCK_CONFIG, upload={
+            "base": "https://a.blob.core.windows.net/c/x", "sas_env": "TEST_SAS"})
+        root = make_root(config)
+        fake = Fake(root, effects={"nightly_slices.py": mark_run("ok", 5),
+                                   "chemduck_sidecars.py": make_sidecars})
+        steps, notes, code = night(root, fake)
+        order = [key.split("/c/x/", 1)[1] for key in Blobs.order]
+        sidecars = [key for key in order if key.startswith("chemduck/")]
+        check("sidecar upload: the folder goes up with the night",
+              steps["upload"] == rn.OK and len(sidecars) == 3, order)
+        check("sidecar upload: after the partitions, before manifest.json",
+              order and order[-1] == "manifest.json" and order.index(sidecars[0])
+              > max(i for i, key in enumerate(order) if key.endswith(".parquet")
+                    and not key.startswith("chemduck/")), order)
+        check("sidecar upload: sidecars.json last of the folder",
+              sidecars and sidecars[-1] == "chemduck/sidecars.json", sidecars)
+
+        # Tonight's step fails; last night's folder is still on disk. It
+        # must not go up beside a manifest it doesn't describe.
+        Blobs.store.clear()
+        del Blobs.order[:]
+        fake = Fake(root, effects={"nightly_slices.py": mark_run("ok", 5)},
+                    codes={"chemduck_sidecars.py": 2})
+        steps, notes, code = night(root, fake)
+        order = [key.split("/c/x/", 1)[1] for key in Blobs.order]
+        check("sidecar upload: after a failed step, no sidecar goes up, the data does",
+              steps["upload"] == rn.OK and order and order[-1] == "manifest.json"
+              and not any(key.startswith("chemduck/") for key in order), order)
+    finally:
         rn.blob_url = real_blob_url
         server.shutdown()
         del os.environ["TEST_SAS"]
@@ -454,7 +567,9 @@ if __name__ == "__main__":
         test_empty_slice_degrades()
         test_pending()
         test_publish_failure_stops_upload()
+        test_chemduck_step()
         test_upload()
+        test_sidecar_upload()
         test_sas_url()
         test_lock()
         test_launch()

@@ -1,0 +1,197 @@
+# EQuIS Analytical Results II (ARII) Parquet to ChemDuck Field Mapping
+# For ARII output written as Parquet, either one file or several listed in a
+# manifest.json (version 1: {"partitions": [{"path": ..., "rows": ...}]}).
+# Same column names as the EQuIS XLSX/CSV exports. Limits and values are
+# typed DOUBLEs; dates are text (see source.date_formats). What X_COORD /
+# Y_COORD hold depends on the facility: at the test facility they equal LONGITUDE /
+# LATITUDE, elsewhere they may be projected, so consumers that need WGS84
+# (chemrooms) choose the coordinate columns per source rather than by name.
+
+# The dataset's non-detect policy (nd_policies; README "Non-detect
+# policies"). Unset = chemduck_default. The loader records the version
+# current at load, so the dataset keeps its numbers when the policy changes.
+# nd_policy: chemduck_default
+# nd_policy: {name: half_dl_average, version: 1}
+
+# Declared sample rules (README "Measurement points, events and sample
+# rules"): positions and QC that a facility records only in sample codes.
+# Per facility; for example:
+# position_rules:
+#   - {column: SYS_SAMPLE_CODE, pattern: '_(Superficial|P15|P50|Deep)$'}
+# qc_rules:
+#   - {column: SYS_SAMPLE_CODE, pattern: '^(.*)_(?:R[0-9]+|BD)$', sample_type: FR}
+
+# Source format settings
+source:
+  format: parquet
+  # ARII writes SAMPLE_DATE / ANALYSIS_DATE / LEACHATE_DATE as text
+  # ('3/1/2016 12:00:00 AM'), and the slicing pipeline keeps the string, so a
+  # plain cast reads every date as NULL and the loader drops every sample
+  # (measured on the test facility's WS/D partition, 2026-10-15: 501 locations, 0 samples, then a
+  # foreign-key failure). Tried in order; the order is the QGIS plugin's
+  # report_data.DATE_FORMATS so the two read a date the same way. A typed
+  # TIMESTAMP column also parses (it renders as '%Y-%m-%d %H:%M:%S').
+  date_formats:
+    - '%m/%d/%Y %I:%M:%S %p'
+    - '%m/%d/%Y %I:%M %p'
+    - '%m/%d/%Y %H:%M:%S'
+    - '%m/%d/%Y %H:%M'
+    - '%m/%d/%Y'
+    - '%Y-%m-%dT%H:%M:%S'
+    - '%Y-%m-%d %H:%M:%S'
+    - '%Y-%m-%d'
+    - '%d-%b-%y'
+    - '%d-%b-%Y'
+
+# Locations table mapping
+locations:
+  location_id: SYS_LOC_CODE
+  x: X_COORD            # projected, in the project CRS
+  y: Y_COORD
+  loc_type: LOC_TYPE
+  loc_desc: LOC_NAME
+  aquifer: null
+  region: null
+  dataset: null
+  project: FACILITY_CODE
+  study: null
+  study_description: null
+  elev_ground: null     # Z_COORD_AVG is the sample interval midpoint, not ground
+  elev_measuring: null
+
+# Location / sample / result attributes (stored in EAV tables)
+# Anything not mapped here is auto-classified unless --no-auto-classify.
+location_attributes: []
+# Pinned: the auto-classifier would file these as location attributes when a
+# dataset happens to hold one value per location.
+sample_attributes:
+  - COMPOSITE_YN
+  - TASK_CODE_2
+# Kept per result so non-detect handling and method identity can be rebuilt
+# (docs/domain-rules-remediation.md §2 and §5). Each entry adds up to one EAV
+# row per result, so add more only when something reads them.
+result_attributes:
+  - RESULT_NUMERIC        # lab's value in RESULT_UNIT; NULL for non-detects
+  - RESULT_UNIT
+  - PREP_METHOD
+
+# Samples table mapping
+samples:
+  sample_id: SYS_SAMPLE_CODE
+  location_id: SYS_LOC_CODE
+  sample_date: SAMPLE_DATE  # time of day is kept as the SAMPLETIME attribute
+  matrix: MATRIX_CODE
+  top_depth: START_DEPTH
+  bottom_depth: END_DEPTH
+  depth: null  # computed as (top + bottom) / 2
+  depth_units: DEPTH_UNIT
+  sample_type: SAMPLE_TYPE_CODE
+  composite_type: null
+  event: TASK_CODE
+  sample_material: null
+  parent_sample_id: PARENT_SAMPLE_CODE  # QA/QC chain link
+
+# Results table mapping
+results:
+  # result_id is auto-generated
+  sample_id: SYS_SAMPLE_CODE
+  analyte: CHEMICAL_NAME
+  anl_sm_mb: null
+  analyte_group: ANALYTE_TYPE
+  cas_number: CAS_RN
+  result: REPORT_RESULT_VALUE  # non-detects carry the reported limit
+  units: REPORT_RESULT_UNIT
+  std_units: REPORT_RESULT_UNIT
+  method_detection_limit: REPORT_METHOD_DETECTION_LIMIT
+  reporting_limit: REPORT_REPORTING_LIMIT
+  quantitation_limit: REPORT_QUANTITATION_LIMIT
+  upper_quantitation_limit: null
+  dilution_factor: DILUTION_FACTOR
+  modeled_relative_uncertainty: null
+  detected: DETECT_FLAG
+  estimated: null  # derived from qualifiers containing 'J'
+  tic: null
+  qualifier: INTERPRETED_QUALIFIERS
+  lab_name: LAB_NAME_CODE
+  lab_sample_id: LAB_SAMPLE_ID
+  method_code: ANALYTIC_METHOD
+  date_analyzed: ANALYSIS_DATE
+  lab_package_id: LAB_SDG
+  validation_level: APPROVAL_CODE
+  lab_flags: LAB_QUALIFIERS
+  validator_flags: VALIDATOR_QUALIFIERS
+  meas_basis: null
+  fraction: FRACTION  # Total/Dissolved (T/D in source)
+  # Which of a sample's results in one method class counts (shared rules D3):
+  # the reportable designation first, then test_type_precedence below.
+  report_limit: REPORT_RESULT_LIMIT  # the limit REPORT_RESULT_VALUE was built from
+  reportable: REPORTABLE_RESULT  # Yes / No
+  test_type: TEST_TYPE           # INITIAL, REEXTRACT, DILUTION, ...
+
+# The limit that stands for a non-detect, first to last (shared rules D4):
+# the one the report used, then the individual limits. A non-detect none of
+# them gives has no value.
+limit_chain: [report, reporting, method_detection, quantitation]
+
+# A sample's analyses in one method class, first to last; a blank TEST_TYPE
+# counts as INITIAL, an unlisted one after every listed one.
+test_type_precedence: [INITIAL]
+
+# Units (shared rules D5): converted once, at load or publish, into one
+# canonical unit per (analyte, matrix class, method class) - the unit most
+# rows can be put in - and refused at query time where a variable still has
+# more than one. REPORT_RESULT_UNIT is already EQuIS's reporting unit (EQuIS
+# converted the laboratory's unit with its own factors), recorded here:
+units_reported_as: EQuIS reporting units (REPORT_RESULT_UNIT)
+# EQuIS factors the export did not apply come before ChemDuck's
+# unit_conversions; a pin fixes a variable's unit. For example:
+# unit_conversions:
+#   - {from: umhos/cm, to: uS/cm, factor: 1.0}
+# canonical_units:
+#   - {matrix_class: aqueous, units: ug/L}
+#   - {analyte: Iron, matrix_class: solid, units: mg/kg}
+
+# Method classes this source adds to the seeded ones (method_classes table),
+# e.g. a laboratory's own codes; a code nothing matches is its own class and
+# is listed in load_report for curation.
+# method_classes:
+#   - {pattern: 'ICM[0-9]+B', method_class: lab}
+
+# Redundant source columns excluded from auto-classification
+unmapped:
+  - FACILITY_ID         # numeric key for FACILITY_CODE
+  - SAMPLE_ID           # numeric key for SYS_SAMPLE_CODE
+  - SAMPLEDATE          # reformatted SAMPLE_DATE
+  - LONGITUDE           # X_COORD / Y_COORD in geographic coordinates
+  - LATITUDE
+  - LAB_MATRIX_CODE     # duplicate of MATRIX_CODE
+  - REPORT_RESULT_TEXT  # text form of REPORT_RESULT_VALUE
+  - RESULT_TEXT         # text form of RESULT_NUMERIC
+  - ORGANIC_YN          # property of the analyte, not of a result
+  - RESULT_TYPE_CODE    # TRG / FLD; analyte_group already marks field parameters
+  - TEST_ID             # EQuIS test key; one per lab test, not per result
+  - ANALYSIS_LOCATION   # LB / FI / FL
+  # Raw DT_RESULT limits in DETECTION_LIMIT_UNIT, as text; the REPORT_*
+  # limits above are the same limits in the report unit.
+  - METHOD_DETECTION_LIMIT
+  - REPORTING_DETECTION_LIMIT
+  - QUANTITATION_LIMIT
+  - DETECTION_LIMIT_UNIT
+  # GC column for dual-column confirmation; 'NA' for non-GC methods. Move to
+  # result_attributes for datasets with organics.
+  - COLUMN_NUMBER
+
+# Value transformations
+transforms:
+  detected:
+    'Y': true
+    'N': false
+    '': null
+
+  # Estimated flag derived from qualifier containing 'J'
+  estimated_from_qualifier: true
+
+  fraction:
+    'T': 'Total'
+    'D': 'Dissolved'
+    '': null
