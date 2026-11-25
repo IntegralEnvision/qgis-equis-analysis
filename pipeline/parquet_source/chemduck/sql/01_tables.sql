@@ -72,14 +72,20 @@ CREATE TABLE IF NOT EXISTS nd_policies (
 );
 ALTER TABLE nd_policies ADD COLUMN IF NOT EXISTS event_grain VARCHAR DEFAULT 'timestamp';
 
+-- replicates (docs/ism-and-uncertainty-spec.md §6.2): the field replicates
+-- of one replicate set, whatever their dates, after reruns and before
+-- same_day. Its estimators: select (rank_across, as same_day selects), mean,
+-- and the 95% UCLs ucl95_t, ucl95_cheb and ucl95_auto (t when CV <= 1, else
+-- Chebyshev). A policy with no replicates rule - every seeded one - selects.
 CREATE TABLE IF NOT EXISTS nd_policy_rules (
     policy VARCHAR NOT NULL,
     version INTEGER NOT NULL,
     stage VARCHAR NOT NULL
-        CHECK (stage IN ('reruns', 'same_day', 'over_time', 'across_points', 'sum')),
+        CHECK (stage IN ('reruns', 'replicates', 'same_day', 'over_time', 'across_points', 'sum')),
     estimator VARCHAR NOT NULL
         CHECK (estimator IN ('select', 'pool', 'mean', 'median', 'max', 'min',
-                             'km_mean', 'km_median', 'sum', 'refuse', 'combine')),
+                             'km_mean', 'km_median', 'sum', 'refuse', 'combine',
+                             'ucl95_t', 'ucl95_cheb', 'ucl95_auto')),
     nd_factor DOUBLE CHECK (nd_factor >= 0),
     km_floor VARCHAR CHECK (km_floor IN ('lowest_detect', 'half_lowest_detect', 'zero')),
     all_nd VARCHAR NOT NULL
@@ -97,7 +103,26 @@ CREATE TABLE IF NOT EXISTS nd_policy_rules (
     CHECK (estimator NOT IN ('km_mean', 'km_median') OR all_nd <> 'estimator'),
     CHECK (estimator <> 'sum' OR stage = 'sum'),
     CHECK (stage <> 'sum' OR estimator IN ('sum', 'refuse')),
-    CHECK (estimator NOT IN ('mean', 'median', 'max', 'min', 'sum') OR nd_factor IS NOT NULL)
+    CHECK (estimator NOT IN ('ucl95_t', 'ucl95_cheb', 'ucl95_auto') OR stage = 'replicates'),
+    CHECK (stage <> 'replicates' OR estimator IN ('select', 'mean', 'ucl95_t', 'ucl95_cheb', 'ucl95_auto')),
+    CHECK (estimator NOT IN ('mean', 'median', 'max', 'min', 'sum', 'ucl95_t', 'ucl95_cheb',
+                             'ucl95_auto') OR nd_factor IS NOT NULL)
+);
+
+-- nd_policy_brackets - the alternatives a policy declares for one choice
+-- (docs/ism-and-uncertainty-spec.md §8). The policy's own rule gives the
+-- headline value; a bracket-aware macro (ism_decisions) evaluates every
+-- alternative and reports the range and whether the decision holds under
+-- all of them. Kept apart from nd_policy_rules, so no existing policy
+-- changes. parameter: 'nd_factor' (values as numbers, e.g. ['0', '0.5',
+-- '1']) or 'ucl' (values 'ucl95_t', 'ucl95_cheb').
+CREATE TABLE IF NOT EXISTS nd_policy_brackets (
+    policy VARCHAR NOT NULL,
+    version INTEGER NOT NULL,
+    stage VARCHAR NOT NULL CHECK (stage IN ('replicates')),
+    parameter VARCHAR NOT NULL CHECK (parameter IN ('nd_factor', 'ucl')),
+    alternatives VARCHAR[] NOT NULL,
+    PRIMARY KEY (policy, version, stage, parameter)
 );
 
 -- The seeded policies (docs/shared-rules-decisions-response.md, D7). A
@@ -158,8 +183,15 @@ CREATE TABLE IF NOT EXISTS locations (
     study VARCHAR,
     study_description VARCHAR,
     elev_ground DOUBLE,     -- ground surface elevation (ft or m above datum)
-    elev_measuring DOUBLE   -- top-of-casing / measuring point elevation
+    elev_measuring DOUBLE,  -- top-of-casing / measuring point elevation
+    -- an SU's DU (EQuIS PARENT_LOC_CODE); docs/ism-and-uncertainty-spec.md §4.1
+    parent_location_id VARCHAR,
+    -- 'point' or 'area' (NULL = point); an area's x/y is a point inside it,
+    -- its centroid where the load computed one, so point consumers still work
+    spatial_support VARCHAR
 );
+ALTER TABLE locations ADD COLUMN IF NOT EXISTS parent_location_id VARCHAR;
+ALTER TABLE locations ADD COLUMN IF NOT EXISTS spatial_support VARCHAR;
 
 -- ============================================================================
 -- 1.2 samples - Individual sampling events
@@ -190,10 +222,21 @@ CREATE TABLE IF NOT EXISTS samples (
     -- vertical position by label (surface, mid, bottom, a source's own
     -- vocabulary), set by a mapping's position_rules; NULL = unknown, its
     -- own value, never merged with a known position (shared rules D1)
-    position VARCHAR
+    position VARCHAR,
+    -- what the result represents in space (docs/ism-and-uncertainty-spec.md
+    -- §4.2): 'discrete', 'composite' or 'ism', set by a project's
+    -- support_rules; NULL = discrete. Part of the measurement point.
+    support VARCHAR,
+    -- the field replicates of one DU/SU in one event, and this one's number
+    -- (replicate_rules); laboratory replicates are never members
+    replicate_set VARCHAR,
+    replicate_no INTEGER
 );
 ALTER TABLE samples ADD COLUMN IF NOT EXISTS sample_datetime TIMESTAMP;
 ALTER TABLE samples ADD COLUMN IF NOT EXISTS position VARCHAR;
+ALTER TABLE samples ADD COLUMN IF NOT EXISTS support VARCHAR;
+ALTER TABLE samples ADD COLUMN IF NOT EXISTS replicate_set VARCHAR;
+ALTER TABLE samples ADD COLUMN IF NOT EXISTS replicate_no INTEGER;
 
 -- ============================================================================
 -- load_report - What a load's declared rules did, as data
@@ -530,3 +573,256 @@ CREATE TABLE IF NOT EXISTS result_attributes (
 );
 
 -- Index will be created after data load for better performance
+
+-- ============================================================================
+-- ISM records (docs/ism-and-uncertainty-spec.md §4)
+-- ============================================================================
+-- Sparse by design: a dataset with no composite or ISM samples leaves every
+-- table below empty, and no engine reads them unless it has to. Masses are
+-- in grams. A column coded from a vocabulary (ism_vocabularies) has a
+-- <column>_source sibling with the source's own words; a word no project
+-- rule maps keeps its words with a NULL code. Every table's `source` says
+-- where its values came from: edd, supplement, field_records,
+-- design_default, or several joined by '+'.
+
+-- An area location's polygon, as WKB in project.crs, and its area. No
+-- geometry type: the core needs no spatial extension (optional/spatial.sql
+-- adds geometry views). The area is stored because the area-weighted
+-- rollup needs it and the core has no geometry functions.
+CREATE TABLE IF NOT EXISTS location_geometries (
+    location_id VARCHAR PRIMARY KEY REFERENCES locations(location_id),
+    geom_wkb BLOB,
+    area DOUBLE,
+    area_units VARCHAR,
+    source VARCHAR
+);
+
+-- One row per composite or ISM field sample: the field data a plan fixes.
+-- Values a project mapping declares for every sample a rule matches carry
+-- source 'design_default', so a design value is never taken for a measurement.
+CREATE TABLE IF NOT EXISTS field_sample_design (
+    sample_id VARCHAR PRIMARY KEY REFERENCES samples(sample_id),
+    design_increments INTEGER,
+    reported_increments INTEGER,
+    increment_layout VARCHAR,
+    increment_layout_source VARCHAR,
+    random_start VARCHAR,
+    tool_type VARCHAR,
+    tool_type_source VARCHAR,
+    tool_diameter_mm DOUBLE,
+    min_core_recovery_pct DOUBLE,
+    target_mass_min_g DOUBLE,
+    target_mass_max_g DOUBLE,
+    field_mass_g DOUBLE,
+    sampling_technique VARCHAR,   -- source text (EQuIS SAMPLE_METHOD)
+    composite_desc VARCHAR,       -- source text (EQuIS COMPOSITE_DESC)
+    hold_status VARCHAR,
+    hold_status_source VARCHAR,
+    hold_until DATE,
+    source VARCHAR
+);
+
+-- One row per increment. Not locations: a map and every per-location count
+-- would gain 30-100 points a sample. sample_id NULL: the source names only
+-- the DU. hole_id: the physical core, which one direct-push boring shares
+-- among the samples of several depth intervals. inside_area: whether the
+-- increment lies inside its location's polygon, computed at load (NULL: no
+-- polygon or no coordinates).
+CREATE TABLE IF NOT EXISTS sample_increments (
+    increment_id VARCHAR PRIMARY KEY,
+    location_id VARCHAR NOT NULL REFERENCES locations(location_id),
+    sample_id VARCHAR,
+    hole_id VARCHAR,
+    increment_no INTEGER,
+    x DOUBLE,
+    y DOUBLE,
+    coord_method VARCHAR,
+    coord_method_source VARCHAR,
+    top_depth DOUBLE,
+    bottom_depth DOUBLE,
+    depth_units VARCHAR,
+    recovery_pct DOUBLE,
+    collected_at TIMESTAMP,
+    mass_g DOUBLE,
+    status VARCHAR,
+    status_source VARCHAR,
+    inside_area BOOLEAN,
+    source VARCHAR
+);
+
+-- One row per laboratory preparation of a field sample: receipt, drying,
+-- disaggregation, sieving and milling, up to the material that is split.
+CREATE TABLE IF NOT EXISTS sample_preparations (
+    prep_id VARCHAR PRIMARY KEY,
+    sample_id VARCHAR NOT NULL REFERENCES samples(sample_id),
+    lab_name VARCHAR,
+    lab_sample_id VARCHAR,
+    sdg VARCHAR,
+    prep_sop VARCHAR,
+    prep_date DATE,
+    n_containers INTEGER,
+    received_wet_mass_g DOUBLE,
+    extraneous_removed VARCHAR,
+    moisture_subsample_mass_g DOUBLE,
+    drying_method VARCHAR,
+    drying_method_source VARCHAR,
+    drying_temp_c DOUBLE,
+    drying_start DATE,
+    drying_end DATE,
+    disaggregation VARCHAR,
+    disaggregation_source VARCHAR,
+    milling VARCHAR,
+    milling_source VARCHAR,
+    milling_duration_min DOUBLE,
+    sieve_opening_mm DOUBLE,
+    particle_size_fraction VARCHAR,  -- the material analysed, e.g. '<2mm'
+    dry_mass_passing_g DOUBLE,
+    oversize_mass_g DOUBLE,
+    oversize_description VARCHAR,
+    observations VARCHAR,
+    deviations VARCHAR,
+    source VARCHAR
+);
+
+-- One row per analytical aliquot: the primary and each laboratory replicate.
+-- sample_id: the sample whose results the aliquot gave (a laboratory
+-- replicate coded as its own LR sample has its own). prep_method_code is
+-- the EDD's one PREP_METHOD; a project's prep_method_rules say whether it
+-- names the ISM processing (ism_prep_code) or the extraction.
+CREATE TABLE IF NOT EXISTS sample_subsamples (
+    subsample_id VARCHAR PRIMARY KEY,
+    prep_id VARCHAR NOT NULL REFERENCES sample_preparations(prep_id),
+    sample_id VARCHAR NOT NULL REFERENCES samples(sample_id),
+    lab_sample_id VARCHAR,
+    prep_role VARCHAR,
+    lab_replicate_no INTEGER,
+    parent_subsample_id VARCHAR,
+    analysis_group VARCHAR,
+    splitting_method VARCHAR,
+    splitting_method_source VARCHAR,
+    slab_depth_cm DOUBLE,
+    n_subsample_increments INTEGER,
+    scoop_type VARCHAR,
+    target_mass_g DOUBLE,
+    mass_g DOUBLE,
+    mass_reported VARCHAR,
+    percent_solids DOUBLE,
+    whole_aliquot_extracted BOOLEAN,
+    prep_method_code VARCHAR,
+    ism_prep_code VARCHAR,
+    extraction_method VARCHAR,
+    source VARCHAR
+);
+
+-- The results that match exactly one aliquot (v_result_subsamples, match
+-- 'one'), with what the engines read of it: the particle-size fraction and
+-- whether the result is a laboratory replicate's coded on its primary's
+-- sample (the engines leave those out: an aliquot is never a field
+-- sample). Written at load from the view, so the engines join one small
+-- table, empty when the dataset has no preparation records.
+CREATE TABLE IF NOT EXISTS result_aliquots (
+    result_id BIGINT PRIMARY KEY,
+    subsample_id VARCHAR NOT NULL,
+    prep_role VARCHAR,
+    particle_size_fraction VARCHAR,
+    lab_replicate_on_primary BOOLEAN
+);
+
+-- A project mapping's analysis_groups (docs/ism-and-uncertainty-spec.md
+-- §4.7), written at load: a result's analysis group is the first rule, by
+-- priority, whose pattern matches its method code or method class whole
+-- (upper-cased, trimmed). v_result_subsamples reads it.
+CREATE TABLE IF NOT EXISTS ism_analysis_groups (
+    priority INTEGER NOT NULL,
+    match_column VARCHAR NOT NULL CHECK (match_column IN ('method_code', 'method_class')),
+    pattern VARCHAR NOT NULL,
+    analysis_group VARCHAR NOT NULL
+);
+
+-- The controlled vocabularies of docs/ism-and-uncertainty-spec.md §4.8, as a
+-- catalog. A project's vocabulary_rules map its own words into these codes.
+CREATE TABLE IF NOT EXISTS ism_vocabularies (
+    vocabulary VARCHAR NOT NULL,
+    code VARCHAR NOT NULL,
+    description VARCHAR,
+    PRIMARY KEY (vocabulary, code)
+);
+
+INSERT OR REPLACE INTO ism_vocabularies VALUES
+    ('support', 'discrete', 'one spot'),
+    ('support', 'composite', 'a few spots combined, fewer increments than ISM asks'),
+    ('support', 'ism', 'the mean of a DU or SU, from 30 or more increments'),
+    ('increment_layout', 'systematic_random', 'a grid with a random start'),
+    ('increment_layout', 'simple_random', 'random positions over the whole unit'),
+    ('increment_layout', 'stratified_random', 'one random position in each cell'),
+    ('increment_layout', 'systematic_fixed', 'a grid with a fixed start'),
+    ('increment_layout', 'judgmental', 'positions chosen by judgment'),
+    ('increment_layout', 'other', NULL),
+    ('tool_type', 'hand_core', NULL),
+    ('tool_type', 'direct_push', NULL),
+    ('tool_type', 'auger', NULL),
+    ('tool_type', 'scoop', NULL),
+    ('tool_type', 'other', NULL),
+    ('drying_method', 'air', NULL),
+    ('drying_method', 'oven', NULL),
+    ('drying_method', 'freeze', NULL),
+    ('drying_method', 'none', 'processed wet, e.g. for volatile analytes'),
+    ('disaggregation', 'mortar_pestle', NULL),
+    ('disaggregation', 'mechanical', NULL),
+    ('disaggregation', 'none', NULL),
+    ('milling', 'none', NULL),
+    ('milling', 'ball_mill', NULL),
+    ('milling', 'ring_and_puck', NULL),
+    ('milling', 'puck_mill', NULL),
+    ('milling', 'other', NULL),
+    ('splitting_method', 'slab_cake_2d', 'many small scoops across a thin layer, on a grid'),
+    ('splitting_method', 'sectorial_splitter', NULL),
+    ('splitting_method', 'rotary_splitter', NULL),
+    ('splitting_method', 'riffle_splitter', NULL),
+    ('splitting_method', 'cone_and_quarter', 'not representative (ISM-2 section 5.3)'),
+    ('splitting_method', 'grab', 'not representative (ISM-2 section 5.3)'),
+    ('splitting_method', 'other', NULL),
+    ('prep_role', 'primary', 'the aliquot whose result reports the sample'),
+    ('prep_role', 'lab_replicate', 'a further aliquot of the same prepared sample'),
+    ('coord_method', 'gps', NULL),
+    ('coord_method', 'survey', NULL),
+    ('coord_method', 'digitised', NULL),
+    ('coord_method', 'planned', 'a design location, not where the increment was taken'),
+    ('status', 'planned', NULL),
+    ('status', 'collected', NULL),
+    ('status', 'refused', 'the tool could not reach depth'),
+    ('status', 'relocated', 'taken away from its planned spot'),
+    ('hold_status', 'none', NULL),
+    ('hold_status', 'held_frozen', 'collected, analysis deferred'),
+    ('hold_status', 'archived', 'kept for possible analysis');
+
+-- ============================================================================
+-- uncertainty_components (docs/ism-and-uncertainty-spec.md §7)
+-- ============================================================================
+-- Evidence about how certain a result or a decision is, as data: reported
+-- by a laboratory, estimated by an analysis layer (basis
+-- 'model:<name>@<version>'), or loaded for reconciliation. The estimates
+-- ChemDuck derives itself (field replicates, laboratory replicates, field
+-- duplicates) are views over the data, never stored: v_uncertainty_components
+-- unions both. includes: the components an estimate already contains, so
+-- result_uncertainty never adds one twice.
+CREATE TABLE IF NOT EXISTS uncertainty_components (
+    component VARCHAR NOT NULL
+        CHECK (component IN ('analytical', 'subsampling', 'preparation', 'field_heterogeneity',
+                             'between_su', 'blank_bias', 'recovery_bias', 'counting')),
+    scope_kind VARCHAR NOT NULL
+        CHECK (scope_kind IN ('result', 'subsample', 'preparation', 'sample', 'batch',
+                              'lab_method_period', 'replicate_set', 'location')),
+    scope_id VARCHAR NOT NULL,
+    analyte VARCHAR,
+    method_class VARCHAR,
+    matrix VARCHAR,
+    kind VARCHAR NOT NULL CHECK (kind IN ('rsd', 'sd', 'bias_factor', 'flag')),
+    estimate DOUBLE,
+    df INTEGER,
+    basis VARCHAR NOT NULL,
+    includes VARCHAR[],
+    note VARCHAR,
+    CHECK (kind <> 'flag' OR (estimate IS NULL AND note IS NOT NULL)),
+    CHECK (kind = 'flag' OR estimate IS NOT NULL)
+);

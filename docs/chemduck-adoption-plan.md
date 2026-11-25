@@ -729,6 +729,24 @@ and `test_run_nightly.py` checks the step and its failure stops.
 > test's publish); and the plugin's side - fetching `chemduck/` over http,
 > checking its hash against the manifest it read, and `open_consumer` with
 > partition URLs (it takes them; its sidecar folder must be local).
+>
+> *Integrator, 2026-11-25.* Integrator's `release --arii` publishes the
+> sidecars through this step. Its rules needed three ChemDuck changes,
+> vendored here at `b5fdcd9`:
+> - **#20: DuckDB 2.0.**
+>   - A macro saved in a v1.0.0-format file lost `struct_update`'s named
+>     arguments.
+>   - A `fetchone()` left a result unfinished and blocked `register()`.
+> - **#21: repeatable sidecars.**
+>   - The catalogue sidecars came out in the threads' order, against
+>     integrator's byte-for-byte releases.
+>   - On DuckDB 2.0.1 an empty `p_reported_units` answered empty instead of
+>     refusing.
+> - **#19: ISM records**, which ride along at that pin.
+>
+> ChemDuck now supports 1.5.4, 1.5.5, 2.0.0 and 2.0.1. The sidecar step
+> refuses any other, so integrator caps its DuckDB at the newest of them,
+> and moving the plugin's pin raises integrator's cap.
 
 ## Decisions to take before phase 2
 

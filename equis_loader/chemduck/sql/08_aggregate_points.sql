@@ -36,6 +36,8 @@
 -- project's, else the dataset's (chemduck_settings), else chemduck_default -
 -- as {name, version}; version NULL means the latest.
 
+-- r_replicates: a policy with no replicates rule (every seeded policy, and
+-- any declared before the stage existed) selects, as same_day does.
 CREATE OR REPLACE VIEW v_nd_policies AS
 SELECT p.name, p.version, p.limit_basis, p.display_factor, p.across_nd_limit, p.reruns_nd_limit,
        p.event_grain,
@@ -48,7 +50,12 @@ SELECT p.name, p.version, p.limit_basis, p.display_factor, p.across_nd_limit, p.
            FILTER (WHERE r.stage = 'same_day') AS r_same_day,
        any_value(struct_pack(est := r.estimator, f := r.nd_factor, fl := r.km_floor,
                              alln := r.all_nd, det := r.detected_rule))
-           FILTER (WHERE r.stage = 'over_time') AS r_over_time
+           FILTER (WHERE r.stage = 'over_time') AS r_over_time,
+       COALESCE(any_value(struct_pack(est := r.estimator, f := r.nd_factor, fl := r.km_floor,
+                                      alln := r.all_nd, det := r.detected_rule))
+                    FILTER (WHERE r.stage = 'replicates'),
+                struct_pack(est := 'select', f := CAST(NULL AS DOUBLE), fl := CAST(NULL AS VARCHAR),
+                            alln := 'estimator', det := 'all')) AS r_replicates
 FROM nd_policies p
 LEFT JOIN nd_policy_rules r ON r.policy = p.name AND r.version = p.version
 GROUP BY p.name, p.version, p.limit_basis, p.display_factor, p.across_nd_limit, p.reruns_nd_limit,
@@ -148,6 +155,47 @@ CREATE OR REPLACE MACRO nd_stage_value(est, f, alln, det, dfac, n_items, win, in
 );
 
 -- ============================================================================
+-- Replicate statistics (docs/ism-and-uncertainty-spec.md §6.2)
+-- ============================================================================
+-- t95(df): the 95th percentile of Student's t with df degrees of freedom
+-- (one-sided), tabled to df 30 and by the Cornish-Fisher expansion beyond.
+-- ucl95(method, n, mean, sd): the 95% UCL on a mean of n values -
+--   ucl95_t     mean + t95(n - 1) * sd / sqrt(n)
+--   ucl95_cheb  mean + sqrt(1/0.05 - 1) * sd / sqrt(n)
+--   ucl95_auto  ucl95_t when the CV (sd / mean) is at most 1, else Chebyshev
+-- NULL for fewer than two values: a singlet has no UCL. ucl95_method names
+-- the formula that applied ('unreplicated' for a singlet).
+
+CREATE OR REPLACE MACRO t95(df) AS (
+    CASE
+        WHEN df IS NULL OR df < 1 THEN NULL
+        WHEN df <= 30 THEN [6.3138, 2.9200, 2.3534, 2.1318, 2.0150, 1.9432, 1.8946, 1.8595,
+                            1.8331, 1.8125, 1.7959, 1.7823, 1.7709, 1.7613, 1.7531, 1.7459,
+                            1.7396, 1.7341, 1.7291, 1.7247, 1.7207, 1.7171, 1.7139, 1.7109,
+                            1.7081, 1.7056, 1.7033, 1.7011, 1.6991, 1.6973][CAST(df AS INTEGER)]
+        ELSE 1.644854 + (1.644854 ^ 3 + 1.644854) / (4.0 * df)
+             + (5 * 1.644854 ^ 5 + 16 * 1.644854 ^ 3 + 3 * 1.644854) / (96.0 * df * df)
+    END
+);
+
+CREATE OR REPLACE MACRO ucl95_method(method, n, mean, sd) AS (
+    CASE
+        WHEN n IS NULL OR n < 2 OR sd IS NULL THEN 'unreplicated'
+        WHEN method = 'ucl95_t' THEN 'ucl95_t'
+        WHEN method = 'ucl95_cheb' THEN 'ucl95_cheb'
+        WHEN mean > 0 AND sd / mean <= 1 THEN 'ucl95_t'
+        ELSE 'ucl95_cheb'
+    END
+);
+
+CREATE OR REPLACE MACRO ucl95(method, n, mean, sd) AS (
+    CASE ucl95_method(method, n, mean, sd)
+        WHEN 'ucl95_t' THEN mean + t95(n - 1) * sd / sqrt(n)
+        WHEN 'ucl95_cheb' THEN mean + sqrt(19.0) * sd / sqrt(n)
+    END
+);
+
+-- ============================================================================
 -- matrix_combine_class - The class p_matrices combine into (shared rules D6)
 -- ============================================================================
 -- NULL without p_matrices; else the one class every listed matrix is curated
@@ -209,7 +257,7 @@ CREATE OR REPLACE MACRO reportable_scope(p_reportable_only) AS (
 );
 
 CREATE OR REPLACE MACRO filters_ignored(p_matrix, p_fraction, p_sample_types, p_method_class,
-                                        p_reportable_only) AS (
+                                        p_reportable_only, p_particle_fractions := NULL) AS (
     list_concat(
         CASE WHEN p_matrix IS NOT NULL AND source_lacks('matrix') THEN ['p_matrix'] ELSE [] END,
         CASE WHEN p_fraction IS NOT NULL AND source_lacks('fraction') THEN ['p_fraction'] ELSE [] END,
@@ -218,7 +266,45 @@ CREATE OR REPLACE MACRO filters_ignored(p_matrix, p_fraction, p_sample_types, p_
         CASE WHEN p_method_class IS NOT NULL AND source_lacks('method_code')
              THEN ['p_method_class'] ELSE [] END,
         CASE WHEN p_reportable_only AND source_lacks('reportable')
-             THEN ['p_reportable_only'] ELSE [] END)
+             THEN ['p_reportable_only'] ELSE [] END,
+        CASE WHEN p_particle_fractions IS NOT NULL AND NOT has_preparations()
+             THEN ['p_particle_fractions'] ELSE [] END)
+);
+
+-- ============================================================================
+-- Support and particle-size fraction (docs/ism-and-uncertainty-spec.md §6.1)
+-- ============================================================================
+-- support_code: a sample's support as calls compare it, trimmed and
+-- lower-cased; NULL is 'discrete'. in_support_scope: whether a call's
+-- p_supports reads it - NULL (the call refuses mixed supports instead, in
+-- units_by_variable) or [] read every support. in_particle_scope: the same
+-- for p_particle_fractions, over the result's particle-size fraction; a
+-- result with none never matches a named fraction (an unknown fraction is
+-- its own value, as an unknown position is in D1). has_preparations: the
+-- load recorded preparation records (chemduck_settings), so the fraction
+-- can be read at all; without them p_particle_fractions matches everything
+-- and filters_ignored names it.
+
+CREATE OR REPLACE MACRO has_preparations() AS (
+    COALESCE((SELECT value = 'true' FROM chemduck_settings WHERE key = 'has_preparations'), FALSE)
+);
+
+CREATE OR REPLACE MACRO support_code(support) AS (
+    COALESCE(NULLIF(lower(trim(support)), ''), 'discrete')
+);
+
+CREATE OR REPLACE MACRO in_support_scope(support, p_supports) AS (
+    p_supports IS NULL
+    OR len(CAST(p_supports AS VARCHAR[])) = 0
+    OR list_contains(list_transform(CAST(p_supports AS VARCHAR[]), lambda s: lower(trim(s))),
+                     support_code(support))
+);
+
+CREATE OR REPLACE MACRO in_particle_scope(psf, p_particle_fractions) AS (
+    p_particle_fractions IS NULL
+    OR len(CAST(p_particle_fractions AS VARCHAR[])) = 0
+    OR list_contains(list_transform(CAST(p_particle_fractions AS VARCHAR[]),
+                                    lambda s: lower(trim(s))), lower(trim(psf)))
 );
 
 -- absent_columns(): source_columns_absent as a list, read once. The row
@@ -263,11 +349,19 @@ CREATE OR REPLACE MACRO display_factor_check(caller, p_display_factor) AS (
 -- units and whether they conflict - refused, naming the variable, its
 -- units and their counts, unless um is 'flag'.
 
+-- ISM (docs/ism-and-uncertainty-spec.md §6.1): p_supports and
+-- p_particle_fractions narrow the call (in_support_scope,
+-- in_particle_scope); each row carries its support, its particle-size
+-- fraction (from result_aliquots, empty without preparation records) and
+-- its replicate set, and the variable's refusal for mixed supports or
+-- fractions is units_by_variable's (sm, fm). A laboratory replicate coded
+-- on its primary's sample is an aliquot, not a field result: never read.
 CREATE OR REPLACE MACRO point_scope(p_caller, p_analyte, p_matrix, p_fraction, p_start_date,
                                     p_end_date, p_sample_types, p_method_class, p_matrices,
                                     p_locations, p_reportable_only, p_depth_min, p_depth_max,
-                                    p_depth_units, p_reported_units) AS TABLE
-WITH absent AS (SELECT absent_columns() AS cols),
+                                    p_depth_units, p_reported_units, p_supports,
+                                    p_particle_fractions) AS TABLE
+WITH absent AS (SELECT absent_columns() AS cols, has_preparations() AS has_prep),
 scope AS (
     SELECT
     -- D6: the class the listed matrices share, or an error saying why not
@@ -283,7 +377,9 @@ scope AS (
                     p_reported_units) AS row_check,
     list_contains(absent.cols, 'top_depth') AND list_contains(absent.cols, 'bottom_depth')
         AS no_depth,
-    list_contains(absent.cols, 'units') AS no_units
+    list_contains(absent.cols, 'units') AS no_units,
+    -- ISM preparation records loaded (docs/ism-and-uncertainty-spec.md §6.1)
+    absent.has_prep
     FROM absent
 )
 SELECT
@@ -298,10 +394,21 @@ SELECT
     v.result, v.detected, v.units, v.std_units, v.result_id, v.method_code, v.date_analyzed,
     v.method_class, v.reportable, v.test_rank,
     v.detection_limit, v.limit_source, v.limit_type,
-    v.reporting_limit, v.method_detection_limit, v.quantitation_limit
+    v.reporting_limit, v.method_detection_limit, v.quantitation_limit,
+    support_code(v.support) AS support,
+    ra.particle_size_fraction,
+    v.replicate_set,
+    -- the variable's refusals of mixed supports and fractions apply when
+    -- the call names none (units_by_variable)
+    p_supports IS NULL AS sm,
+    p_particle_fractions IS NULL AND scope.has_prep AS fm
 FROM v_results_core v
+LEFT JOIN result_aliquots ra ON ra.result_id = v.result_id
 CROSS JOIN scope
 WHERE v.analyte = p_analyte
+  AND in_support_scope(v.support, p_supports)
+  AND (NOT scope.has_prep OR in_particle_scope(ra.particle_size_fraction, p_particle_fractions))
+  AND ra.lab_replicate_on_primary IS NOT TRUE
   AND (p_matrix IS NULL OR v.matrix = p_matrix OR v.matrix IS NULL)
   AND (p_matrix IS NULL OR v.matrix IS NOT NULL OR scope.no_matrix)
   AND (p_matrices IS NULL OR list_contains(CAST(p_matrices AS VARCHAR[]), v.matrix))
@@ -334,8 +441,15 @@ WHERE v.analyte = p_analyte
   AND scope.row_check
   AND (scope.no_depth OR depth_in_scope(v.top_depth, v.bottom_depth, v.depth_units,
                                         p_depth_min, p_depth_max, p_depth_units))
-  AND (scope.no_units OR units_in_scope(v.reported_units, p_reported_units));
+  AND (scope.no_units OR units_in_scope(p_caller, v.reported_units, p_reported_units));
 
+-- The same pass refuses a variable whose rows are of more than one support
+-- when the call named none (sm), or on more than one known particle-size
+-- fraction when it named none (fm): a map or a box plot would put a DU mean
+-- and a single spot, or two sieve fractions, on one scale
+-- (docs/ism-and-uncertainty-spec.md §6.1). p_rows' support and
+-- particle_size_fraction columns; supports outside the vocabulary count by
+-- min/max, and the message names the three it knows.
 CREATE OR REPLACE MACRO units_by_variable(p_rows, p_caller) AS TABLE
 WITH unit_counts AS (
     SELECT vkey, units, count(*) AS n,
@@ -343,7 +457,13 @@ WITH unit_counts AS (
            any_value(analyte || ' in ' || matrix || COALESCE(', ' || fraction, '')
                      || COALESCE(', ' || meas_basis, '')
                      || COALESCE(', method class ' || method_class, '')) AS label,
-           any_value(um) AS um
+           any_value(um) AS um,
+           bool_or(sm) AS sm, bool_or(fm) AS fm,
+           min(support) AS sup_min, max(support) AS sup_max,
+           count(*) FILTER (WHERE support = 'discrete') AS n_discrete,
+           count(*) FILTER (WHERE support = 'composite') AS n_composite,
+           count(*) FILTER (WHERE support = 'ism') AS n_ism,
+           min(particle_size_fraction) AS psf_min, max(particle_size_fraction) AS psf_max
     FROM query_table(p_rows) GROUP BY vkey, units
 )
 SELECT vkey, count(units) AS n_units,
@@ -351,6 +471,19 @@ SELECT vkey, count(units) AS n_units,
 FROM unit_counts
 GROUP BY vkey
 HAVING CASE
+    WHEN bool_or(sm) AND min(sup_min) <> max(sup_max) THEN CAST(error(
+        p_caller || ': ' || any_value(label) || ' has results of more than one support ('
+        || array_to_string(list_filter([
+               CASE WHEN sum(n_discrete) > 0 THEN 'discrete: ' || sum(n_discrete) END,
+               CASE WHEN sum(n_composite) > 0 THEN 'composite: ' || sum(n_composite) END,
+               CASE WHEN sum(n_ism) > 0 THEN 'ism: ' || sum(n_ism) END], lambda s: s IS NOT NULL), ', ')
+        || '), which one scale would mix. Name the supports to read: p_supports := [''ism''] '
+        || 'for DU and SU means, or several to return each as its own point') AS BOOLEAN)
+    WHEN bool_or(fm) AND min(psf_min) <> max(psf_max) THEN CAST(error(
+        p_caller || ': ' || any_value(label) || ' has results on more than one particle-size '
+        || 'fraction (' || min(psf_min) || ', ' || max(psf_max) || '). Name the fractions to read: '
+        || 'p_particle_fractions := [''' || min(psf_min) || '''], or several to return each '
+        || 'as its own point') AS BOOLEAN)
     WHEN any_value(um) = 'refuse' AND (count(units) > 1 OR bool_or(contra)) THEN CAST(error(
         p_caller || ': ' || any_value(label)
         || CASE WHEN bool_or(contra) THEN ' has a unit that contradicts its matrix ('
@@ -477,7 +610,9 @@ CREATE OR REPLACE MACRO aggregate_points(
     p_depth_min := NULL,
     p_depth_max := NULL,
     p_depth_units := NULL,
-    p_reported_units := NULL
+    p_reported_units := NULL,
+    p_supports := NULL,
+    p_particle_fractions := NULL
 ) AS TABLE
 WITH absent AS (SELECT absent_columns() AS cols),
 params AS (
@@ -495,7 +630,7 @@ params AS (
     END AS um,
     display_factor_check('aggregate_points', p_display_factor) AS dfac_call,
     list_concat(filters_ignored(p_matrix, p_fraction, p_sample_types, p_method_class,
-                                reportable_scope(p_reportable_only)),
+                                reportable_scope(p_reportable_only), p_particle_fractions),
                 row_scope_ignored(p_depth_units, p_reported_units, absent.cols)) AS ignored
     FROM absent
 ),
@@ -517,7 +652,7 @@ filtered AS (
     FROM point_scope('aggregate_points', p_analyte, p_matrix, p_fraction, p_start_date,
                      p_end_date, p_sample_types, p_method_class, p_matrices, p_locations,
                      p_reportable_only, p_depth_min, p_depth_max, p_depth_units,
-                     p_reported_units) v
+                     p_reported_units, p_supports, p_particle_fractions) v
     LEFT JOIN project pr ON pr.project_name = v.project
     CROSS JOIN v_nd_dataset_policy ds
     CROSS JOIN params
@@ -527,7 +662,8 @@ withpol AS (
         f.*,
         hash(f.location_id, f.matrix, f.top_depth, f.bottom_depth, f.position,
              f.fraction, f.meas_basis, f.analyte, f.method_class,
-             CASE WHEN p_each_sample THEN f.sample_id END) AS ikey,
+             CASE WHEN p_each_sample THEN f.sample_id END,
+             f.support, f.particle_size_fraction) AS ikey,
         hash(f.matrix, f.fraction, f.meas_basis, f.analyte, f.method_class) AS vkey,
         CASE WHEN p.event_grain = 'date' THEN CAST(f.sample_date AS TIMESTAMP)
              ELSE COALESCE(f.sample_datetime, CAST(f.sample_date AS TIMESTAMP))
@@ -567,12 +703,14 @@ unit_vars AS (
 ident AS (
     SELECT g.*,
            p.name || '@' || p.version AS nd_policy, p.display_factor, p.across_nd_limit,
-           p.r_reruns, p.r_same_day, p.r_over_time, p.event_grain
+           p.r_reruns, p.r_same_day, p.r_over_time, p.r_replicates, p.event_grain
     FROM (
         SELECT ikey,
                any_value(location_id) AS location_id, any_value(x) AS x, any_value(y) AS y,
                any_value(matrix) AS matrix, any_value(top_depth) AS top_depth,
                any_value(bottom_depth) AS bottom_depth, any_value(position) AS position,
+               any_value(support) AS support,
+               any_value(particle_size_fraction) AS particle_size_fraction,
                any_value(fraction) AS fraction,
                any_value(meas_basis) AS meas_basis, any_value(analyte) AS analyte,
                any_value(method_class) AS method_class,
@@ -621,9 +759,11 @@ ident AS (
 ev_n AS (
     SELECT ikey, ev_key, count(*) AS n_ev FROM withpol GROUP BY ikey, ev_key
 ),
--- Stage 1: reruns - the results of one sample.
+-- Stage 1: reruns - the results of one sample. rset: the sample's replicate
+-- set, for the replicates stage; none when every sample is its own point.
 s1_items AS (
     SELECT w.ikey, sample_id, sample_date, w.ev_key, has_time, display_factor, r_reruns, n.n_ev,
+           CASE WHEN p_each_sample THEN NULL ELSE w.replicate_set END AS rset,
            -- reportable first, then the declared test-type precedence, then rank_reruns
            CASE WHEN reportable THEN 0 WHEN reportable IS NULL THEN 1 ELSE 2 END AS rep_rank,
            COALESCE(test_rank, 0) AS tt_rank,
@@ -644,14 +784,24 @@ s1_items AS (
     JOIN ev_n n ON n.ikey = w.ikey AND n.ev_key IS NOT DISTINCT FROM w.ev_key
 ),
 s1 AS (
-    SELECT ikey, sample_id, sample_date, ev_key, has_time, n_ev, v
+    SELECT ikey, sample_id, sample_date, ev_key, has_time, n_ev, rset, v
     FROM s1_items WHERE r_reruns.est = 'pool'
     UNION ALL
-    SELECT ikey, sample_id, sample_date, ev_key, has_time, n_ev,
-           struct_update(nd_stage_value(rule.est, rule.f, rule.alln, rule.det, dfac, n_items,
-                                        win, inps, lims, dets, attrs),
-                         rerun_by := rerun_by) AS v
+    -- The stage's value, sv, with this stage's rerun_by. Rebuilt by
+    -- struct_pack in v's field order, not struct_update(sv, rerun_by := ..):
+    -- DuckDB 2.0 stores a function's named arguments in a v1.0.0-format file
+    -- (the loaders' STORAGE_CONFIG) without their names, and struct_update
+    -- then binds to nothing in a reopened file (tests/test_package.py).
+    SELECT ikey, sample_id, sample_date, ev_key, has_time, n_ev, rset,
+           struct_pack(detected := sv.detected, result := sv.result, lim := sv.lim,
+                       computed := sv.computed, lim_source := sv.lim_source,
+                       lim_type := sv.lim_type, method_code := sv.method_code,
+                       sample_id := sv.sample_id, depth := sv.depth, units := sv.units,
+                       std_units := sv.std_units, rerun_by := rerun_by) AS v
     FROM (
+      SELECT *, nd_stage_value(rule.est, rule.f, rule.alln, rule.det, dfac, n_items,
+                               win, inps, lims, dets, attrs) AS sv
+      FROM (
         SELECT *,
                list_transform(known, lambda item: item.inp) AS inps,
                list_transform(known, lambda item: item.v.lim) AS lims,
@@ -661,7 +811,7 @@ s1 AS (
             FROM (
                 SELECT ikey, sample_id, any_value(sample_date) AS sample_date,
                        any_value(ev_key) AS ev_key, bool_or(has_time) AS has_time,
-                       any_value(n_ev) AS n_ev,
+                       any_value(n_ev) AS n_ev, any_value(rset) AS rset,
                        any_value(r_reruns) AS rule, any_value(display_factor) AS dfac,
                        count(*) AS n_items,
                        CASE
@@ -681,7 +831,7 @@ s1 AS (
                 GROUP BY ikey, sample_id
                 UNION ALL
                 -- alone in its event: what the GROUP BY makes of one row
-                SELECT ikey, sample_id, sample_date, ev_key, has_time, n_ev,
+                SELECT ikey, sample_id, sample_date, ev_key, has_time, n_ev, rset,
                        r_reruns AS rule, display_factor AS dfac,
                        CAST(1 AS BIGINT) AS n_items, CAST(NULL AS VARCHAR) AS rerun_by,
                        v AS win,
@@ -692,7 +842,101 @@ s1 AS (
                 FROM s1_items WHERE r_reruns.est <> 'pool' AND n_ev = 1
             )
         )
+      )
     )
+),
+-- Stage 1b: replicates - the field replicates of one replicate set, whatever
+-- their dates (docs/ism-and-uncertainty-spec.md §6.2). A sample in no set
+-- passes through. A set becomes one event, dated by its latest member, its
+-- value the policy's replicates rule: select (rank_across), mean, or a 95%
+-- UCL. Non-detects enter the statistics at the rule's nd_factor x their
+-- limit - the policy's display_factor under select - and an all-non-detect
+-- set follows all_nd. One key per group (rkey), so the stage adds no
+-- two-column collapse; a dataset with no replicate sets groups nothing.
+rep_items AS (
+    SELECT s1.ikey, s1.rset, s1.sample_id, s1.sample_date, s1.ev_key, s1.has_time, s1.v,
+           i.r_replicates AS rule, i.display_factor AS dfac,
+           rank_across_key(s1.v.detected, s1.v.result, s1.v.lim, s1.ev_key,
+                           s1.sample_id, i.across_nd_limit) AS k,
+           nd_input_value(s1.v.detected, s1.v.result, s1.v.lim, s1.v.computed,
+                          COALESCE(i.r_replicates.f, i.display_factor)) AS inp
+    FROM s1 JOIN ident i ON i.ikey = s1.ikey
+    WHERE s1.rset IS NOT NULL
+),
+rep_agg AS (
+    SELECT any_value(ikey) AS ikey, any_value(rset) AS rset,
+           max(sample_date) AS sample_date, max(ev_key) AS ev_key, bool_or(has_time) AS has_time,
+           any_value(rule) AS rule, any_value(dfac) AS dfac,
+           count(DISTINCT sample_id) AS n_replicates,
+           list(DISTINCT sample_id) AS sample_ids,
+           arg_min(v, k) AS win,
+           list(inp) FILTER (WHERE v.detected IS NOT NULL) AS inps,
+           list(v.lim) FILTER (WHERE v.detected IS NOT NULL) AS lims,
+           list(v.detected) FILTER (WHERE v.detected IS NOT NULL) AS dets,
+           struct_pack(depth := min(v.depth), units := min(v.units),
+                       std_units := min(v.std_units)) AS attrs
+    FROM rep_items
+    GROUP BY hash(ikey, rset)
+),
+rep_stats AS (
+    SELECT *,
+           ucl95_method(CASE WHEN rule.est LIKE 'ucl95%' THEN rule.est ELSE 'ucl95_auto' END,
+                        n_known, rep_mean, rep_sd) AS ucl_method,
+           ucl95(CASE WHEN rule.est LIKE 'ucl95%' THEN rule.est ELSE 'ucl95_auto' END,
+                 n_known, rep_mean, rep_sd) AS ucl
+    FROM (
+        SELECT *, len(inps) AS n_known,
+               list_avg(inps) AS rep_mean,
+               CASE WHEN len(inps) > 1 THEN list_aggregate(inps, 'stddev_samp') END AS rep_sd
+        FROM rep_agg
+    )
+),
+rep_vals AS (
+    SELECT ikey, rset, sample_date, ev_key, has_time,
+           n_replicates, rep_mean, rep_sd,
+           CASE WHEN rep_mean > 0 THEN rep_sd / rep_mean END AS rep_rsd, ucl, ucl_method,
+           CASE WHEN rule.est = 'select' THEN win
+           ELSE struct_pack(
+               detected := CAST(CASE
+                   WHEN len(dets) = 0 THEN NULL
+                   WHEN rule.det = 'all' THEN list_aggregate(dets, 'bool_and')
+                   ELSE list_aggregate(dets, 'bool_or')
+               END AS BOOLEAN),
+               result := CAST(CASE
+                   WHEN len(dets) = 0 THEN NULL
+                   WHEN NOT list_aggregate(dets, 'bool_or') AND rule.alln <> 'estimator'
+                       THEN COALESCE(rule.f, dfac) * nd_rep_limit(rule.alln, lims)
+                   WHEN rule.est = 'mean' THEN rep_mean
+                   -- a set of one has no UCL: its value stands, ucl NULL
+                   ELSE COALESCE(ucl, rep_mean)
+               END AS DOUBLE),
+               lim := CAST(nd_rep_limit(rule.alln, lims) AS DOUBLE),
+               computed := len(dets) > 0,
+               lim_source := CAST(NULL AS VARCHAR), lim_type := CAST(NULL AS VARCHAR),
+               method_code := CAST(NULL AS VARCHAR),
+               sample_id := CAST(NULL AS VARCHAR),
+               depth := attrs.depth, units := attrs.units, std_units := attrs.std_units,
+               rerun_by := CAST(NULL AS VARCHAR))
+           END AS v,
+           sample_ids
+    FROM rep_stats
+),
+rep_by_date AS (
+    SELECT ikey, sample_date, any_value(rset) AS rset, any_value(sample_ids) AS sample_ids,
+           any_value(n_replicates) AS n_replicates, any_value(rep_mean) AS rep_mean,
+           any_value(rep_sd) AS rep_sd, any_value(rep_rsd) AS rep_rsd, any_value(ucl) AS ucl,
+           any_value(ucl_method) AS ucl_method
+    FROM rep_vals GROUP BY ikey, sample_date HAVING count(*) = 1
+),
+-- What stage 2 reads: the samples in no set, and one row per set. A set's
+-- row always takes the grouped path (n_ev 2): another sample of its point
+-- on its date must meet it there.
+sr AS (
+    SELECT ikey, sample_id, sample_date, ev_key, has_time, n_ev, v
+    FROM s1 WHERE rset IS NULL
+    UNION ALL
+    SELECT ikey, v.sample_id AS sample_id, sample_date, ev_key, has_time, CAST(2 AS BIGINT) AS n_ev, v
+    FROM rep_vals
 ),
 -- Stage 2: same_day - the samples of one date.
 s2_items AS (
@@ -701,7 +945,7 @@ s2_items AS (
            rank_across_key(s1.v.detected, s1.v.result, s1.v.lim, s1.ev_key,
                            s1.sample_id, i.across_nd_limit) AS k,
            nd_input_value(s1.v.detected, s1.v.result, s1.v.lim, s1.v.computed, i.r_same_day.f) AS inp
-    FROM s1 JOIN ident i ON i.ikey = s1.ikey
+    FROM sr s1 JOIN ident i ON i.ikey = s1.ikey
 ),
 s2 AS (
     SELECT ikey, sample_date, ev_key, has_time, FALSE AS untimed_tie, v
@@ -899,11 +1143,20 @@ resolved AS (
                WHEN 'lowest_detect' THEN k.lowest
                WHEN 'half_lowest_detect' THEN 0.5 * k.lowest
                ELSE 0.0
-           END AS km_floor_value
+           END AS km_floor_value,
+           -- the replicate set the row's value came from, for a selection
+           rv.rset, rv.n_replicates, rv.rep_mean, rv.rep_sd, rv.rep_rsd, rv.ucl, rv.ucl_method
     FROM ev_parts a
     JOIN ident i ON i.ikey = a.ikey
     JOIN unit_vars uv ON uv.vkey = i.vkey
     LEFT JOIN km_stat k ON k.ikey = a.ikey
+    -- The set an event's value came from: one set per point and date, and,
+    -- for a selection, the set the selected sample belongs to. Kept out of
+    -- the value struct: a field there widens every stage's arg_min (it cost
+    -- ev_agg a fifth more at Facility A, 2026-11-20).
+    LEFT JOIN rep_by_date rv ON rv.ikey = a.ikey AND rv.sample_date IS NOT DISTINCT FROM a.w.sample_date
+         AND a.ea <> 'statistic'
+         AND (a.w.v.sample_id IS NULL OR list_contains(rv.sample_ids, a.w.v.sample_id))
 )
 SELECT
     r.location_id, r.x, r.y, r.matrix,
@@ -960,7 +1213,9 @@ SELECT
     CASE WHEN NOT r.is_stat THEN r.w.lim_type END AS limit_type,
     CASE WHEN r.is_stat THEN r.r_over_time.est END AS stat_method,
     r.nd_policy,
-    'reruns:' || r.r_reruns.est || ' > same_day:' || r.r_same_day.est || ' > '
+    'reruns:' || r.r_reruns.est
+        || CASE WHEN r.n_replicates IS NOT NULL THEN ' > replicates:' || r.r_replicates.est ELSE '' END
+        || ' > same_day:' || r.r_same_day.est || ' > '
         || CASE WHEN r.ea = 'statistic' THEN 'over_time:' || r.r_over_time.est ELSE r.ea END
         AS nd_rule,
     1 AS n_points,
@@ -974,7 +1229,15 @@ SELECT
     -- the factor that drew a selected non-detect
     CASE WHEN NOT r.is_stat AND r.w.detected = FALSE AND NOT r.w.computed
          THEN COALESCE(params.dfac_call, r.display_factor) END AS display_factor,
-    params.ignored AS filters_ignored
+    params.ignored AS filters_ignored,
+    -- ISM (docs/ism-and-uncertainty-spec.md §6): the point's support and
+    -- particle-size fraction, and, where its value came from a replicate
+    -- set, the set's statistics (rep_rsd a fraction; ucl under the policy's
+    -- UCL rule, else ucl95_auto; ucl_method 'unreplicated' for a set of one)
+    r.support,
+    r.particle_size_fraction,
+    r.n_replicates, r.rep_mean, r.rep_sd, r.rep_rsd, r.ucl, r.ucl_method,
+    r.rset AS replicate_set
 FROM resolved r CROSS JOIN params;
 
 -- ============================================================================
@@ -991,11 +1254,23 @@ FROM resolved r CROSS JOIN params;
 --                      (p_top_depth, p_bottom_depth); two matching points
 --                      at one location refuse
 --   'none'             every point its own row
+--   'area_weighted_mean'  each DU from its SUs (locations.parent_location_id):
+--                      sum(a_i x_i) / sum(a_i), a_i the SU's area in
+--                      location_geometries (ITRC ISM-2 §3.2.8). One row per
+--                      DU and point identity (depths, position, support,
+--                      particle-size fraction, variable). Refused when one
+--                      of the DU's SUs has no area, or no value for the
+--                      variable. Its value only: a DU's UCL from its SUs is
+--                      not defined here (docs/ism-and-uncertainty-spec.md
+--                      §6.3, open decision 2). Points at locations with no
+--                      parent are left out.
 --
--- n_points is how many points the location had; rollup names the rule. The
--- other parameters are aggregate_points', passed through (p_units,
--- p_method_class, p_matrices, p_locations, p_display_factor and
--- p_reportable_only included).
+-- n_points is how many points the location had (for area_weighted_mean,
+-- its SUs); rollup names the rule. The other parameters are
+-- aggregate_points', passed through (p_units, p_method_class, p_matrices,
+-- p_locations, p_display_factor, p_reportable_only, p_supports and
+-- p_particle_fractions included). Given several supports, max_over_points
+-- may choose a point of either; the row's support names it.
 
 CREATE OR REPLACE MACRO rollup_points(
     p_analyte,
@@ -1020,14 +1295,17 @@ CREATE OR REPLACE MACRO rollup_points(
     p_depth_min := NULL,
     p_depth_max := NULL,
     p_depth_units := NULL,
-    p_reported_units := NULL
+    p_reported_units := NULL,
+    p_supports := NULL,
+    p_particle_fractions := NULL
 ) AS TABLE
 WITH params AS (
     SELECT CASE
         WHEN p_rollup IS NULL THEN error(
-            'rollup_points: name a rollup (max_over_points, named_position or none); there is no default')
-        WHEN p_rollup NOT IN ('max_over_points', 'named_position', 'none') THEN error(
-            'rollup_points: unknown rollup ' || p_rollup)
+            'rollup_points: name a rollup (max_over_points, named_position, area_weighted_mean '
+            || 'or none); there is no default')
+        WHEN p_rollup NOT IN ('max_over_points', 'named_position', 'none', 'area_weighted_mean')
+            THEN error('rollup_points: unknown rollup ' || p_rollup)
         WHEN p_rollup = 'named_position' AND p_position IS NULL
              AND (p_top_depth IS NULL OR p_bottom_depth IS NULL) THEN error(
             'rollup_points: named_position needs p_position, or p_top_depth and p_bottom_depth')
@@ -1048,7 +1326,9 @@ pts AS (
                           p_display_factor := p_display_factor,
                           p_reportable_only := p_reportable_only,
                           p_depth_min := p_depth_min, p_depth_max := p_depth_max,
-                          p_depth_units := p_depth_units, p_reported_units := p_reported_units) a
+                          p_depth_units := p_depth_units, p_reported_units := p_reported_units,
+                          p_supports := p_supports,
+                          p_particle_fractions := p_particle_fractions) a
     LEFT JOIN v_nd_policies pol ON pol.name || '@' || pol.version = a.nd_policy
 ),
 ranked AS (
@@ -1060,6 +1340,70 @@ ranked AS (
                sample_id, across_nd_limit)) AS rk
     FROM pts
     WINDOW loc AS (PARTITION BY location_id, matrix, fraction, meas_basis, analyte, method_class)
+),
+-- area_weighted_mean: each SU point with its DU and area, then one row per
+-- DU and point identity, refused where an SU is missing a value or an area.
+su_pts AS (
+    SELECT p.*, l.parent_location_id AS du, g.area
+    FROM pts p
+    JOIN locations l ON l.location_id = p.location_id
+    LEFT JOIN location_geometries g ON g.location_id = p.location_id
+    CROSS JOIN params
+    WHERE params.ru = 'area_weighted_mean' AND l.parent_location_id IS NOT NULL
+),
+du_sus AS (
+    SELECT parent_location_id AS du, count(*) AS n_sus,
+           list(location_id ORDER BY location_id) AS sus
+    FROM locations WHERE parent_location_id IS NOT NULL GROUP BY 1
+),
+du_groups AS (
+    SELECT s.du AS location_id, s.matrix, s.top_depth, s.bottom_depth, s.position,
+           s.fraction, s.meas_basis, s.analyte, s.method_class,
+           s.support, s.particle_size_fraction,
+           any_value(d.sus) AS sus,
+           list(DISTINCT s.location_id) AS sus_valued,
+           string_agg(s.location_id, ', ' ORDER BY s.location_id)
+               FILTER (WHERE s.area IS NULL OR s.area <= 0) AS sus_no_area,
+           sum(s.area * s.result) / sum(s.area) AS awm,
+           min(s.anl_sm_mb) AS anl_sm_mb, min(s.analyte_group) AS analyte_group,
+           min(s.cas_number) AS cas_number,
+           bool_and(s.detected) AS detected,
+           min(s.units) AS units, min(s.std_units) AS std_units,
+           any_value(s.n_units) AS n_units, bool_or(s.units_conflict) AS units_conflict,
+           max(s.rep_sample_date) AS rep_sample_date,
+           min(s.first_sample_date) AS first_sample_date,
+           max(s.last_sample_date) AS last_sample_date,
+           sum(s.n_events) AS n_events, sum(s.n_detects) AS n_detects,
+           max(s.detection_limit) AS detection_limit,
+           sum(s.n_unknown_detect) AS n_unknown_detect,
+           any_value(s.nd_policy) AS nd_policy,
+           'area_weighted_mean of ' || count(*) || ' SU point(s) > ' || any_value(s.nd_rule) AS nd_rule,
+           count(*) AS n_points,
+           any_value(s.matrices) AS matrices,
+           string_agg(DISTINCT s.unit_source, ', ') AS unit_source,
+           bool_or(s.below_lowest_detect) AS below_lowest_detect,
+           any_value(s.filters_ignored) AS filters_ignored
+    FROM su_pts s
+    JOIN du_sus d ON d.du = s.du
+    GROUP BY s.du, s.matrix, s.top_depth, s.bottom_depth, s.position, s.fraction, s.meas_basis,
+             s.analyte, s.method_class, s.support, s.particle_size_fraction
+),
+du_rows AS (
+    SELECT g.* EXCLUDE (sus, sus_valued, sus_no_area, awm),
+           CASE
+               WHEN len(g.sus_valued) < len(g.sus) THEN CAST(error(
+                   'rollup_points: area_weighted_mean: DU ' || g.location_id || ' has '
+                   || len(g.sus) || ' SUs but ' || g.analyte || ' values at '
+                   || len(g.sus_valued) || ' ('
+                   || array_to_string(list_filter(g.sus, lambda u: NOT list_contains(g.sus_valued, u)),
+                                      ', ')
+                   || ' missing). Every SU needs a value') AS DOUBLE)
+               WHEN g.sus_no_area IS NOT NULL THEN CAST(error(
+                   'rollup_points: area_weighted_mean: DU ' || g.location_id || ': SU(s) '
+                   || g.sus_no_area || ' have no area in location_geometries') AS DOUBLE)
+               ELSE g.awm
+           END AS result
+    FROM du_groups g
 )
 SELECT r.* EXCLUDE (across_nd_limit, named, n_at_location, n_named, rk, n_points),
        CASE WHEN params.ru = 'none' THEN 1 ELSE r.n_at_location END AS n_points,
@@ -1068,11 +1412,16 @@ FROM ranked r CROSS JOIN params
 WHERE CASE params.ru
     WHEN 'none' THEN TRUE
     WHEN 'max_over_points' THEN r.rk = 1
+    WHEN 'area_weighted_mean' THEN FALSE
     ELSE r.named AND (CASE WHEN r.n_named > 1 THEN CAST(error(
         'rollup_points: ' || r.n_named || ' points at location ' || r.location_id
         || ' match the named position; name a depth interval or a narrower position') AS BOOLEAN)
         ELSE TRUE END)
-END;
+END
+UNION ALL BY NAME
+SELECT d.*, l.x, l.y, 'area_weighted_mean' AS rollup
+FROM du_rows d
+LEFT JOIN locations l ON l.location_id = d.location_id;
 
 -- ============================================================================
 -- point_series - One row per event of each measurement point
@@ -1109,14 +1458,17 @@ CREATE OR REPLACE MACRO point_series(
     p_depth_min := NULL,
     p_depth_max := NULL,
     p_depth_units := NULL,
-    p_reported_units := NULL
+    p_reported_units := NULL,
+    p_supports := NULL,
+    p_particle_fractions := NULL
 ) AS TABLE
 SELECT location_id, x, y, matrix, top_depth, bottom_depth, position, depth,
        fraction, meas_basis, analyte, method_class,
        sample_id, rep_sample_date AS sample_date, rep_sample_datetime AS sample_datetime,
        result, detected, detection_limit, units, std_units, n_units, units_conflict,
        n_unknown_detect, method_code, rerun_selected_by, limit_source, limit_type,
-       nd_policy, nd_rule, unit_source, display_factor, filters_ignored
+       nd_policy, nd_rule, unit_source, display_factor, filters_ignored,
+       support, particle_size_fraction
 FROM aggregate_points(p_analyte, p_event_agg := 'most_recent', p_matrix := p_matrix,
                       p_fraction := p_fraction, p_start_date := p_start_date,
                       p_end_date := p_end_date, p_sample_types := p_sample_types,
@@ -1125,9 +1477,10 @@ FROM aggregate_points(p_analyte, p_event_agg := 'most_recent', p_matrix := p_mat
                       p_locations := p_locations, p_display_factor := p_display_factor,
                       p_reportable_only := p_reportable_only, p_each_sample := TRUE,
                       p_depth_min := p_depth_min, p_depth_max := p_depth_max,
-                      p_depth_units := p_depth_units, p_reported_units := p_reported_units)
-ORDER BY location_id, matrix, top_depth, bottom_depth, position, fraction, meas_basis,
-         method_class, sample_date, sample_datetime, sample_id;
+                      p_depth_units := p_depth_units, p_reported_units := p_reported_units,
+                      p_supports := p_supports, p_particle_fractions := p_particle_fractions)
+ORDER BY location_id, matrix, top_depth, bottom_depth, position, support, particle_size_fraction,
+         fraction, meas_basis, method_class, sample_date, sample_datetime, sample_id;
 
 -- ============================================================================
 -- point_counts - What a points call would map, counted
@@ -1158,7 +1511,9 @@ CREATE OR REPLACE MACRO point_counts(
     p_depth_min := NULL,
     p_depth_max := NULL,
     p_depth_units := NULL,
-    p_reported_units := NULL
+    p_reported_units := NULL,
+    p_supports := NULL,
+    p_particle_fractions := NULL
 ) AS TABLE
 WITH params AS (
     SELECT CASE
@@ -1171,13 +1526,15 @@ WITH params AS (
 pc_rows AS (
     SELECT s.location_id, s.sample_id, s.analyte, s.matrix, s.fraction, s.meas_basis,
            s.method_class, s.units, s.unit_source, params.um,
+           s.support, s.particle_size_fraction, s.sm, s.fm,
            hash(s.location_id, s.matrix, s.top_depth, s.bottom_depth, s.position,
-                s.fraction, s.meas_basis, s.analyte, s.method_class) AS ikey,
+                s.fraction, s.meas_basis, s.analyte, s.method_class,
+                NULL, s.support, s.particle_size_fraction) AS ikey,
            hash(s.matrix, s.fraction, s.meas_basis, s.analyte, s.method_class) AS vkey
     FROM point_scope('point_counts', p_analyte, p_matrix, p_fraction, p_start_date,
                      p_end_date, p_sample_types, p_method_class, p_matrices, p_locations,
                      p_reportable_only, p_depth_min, p_depth_max, p_depth_units,
-                     p_reported_units) s
+                     p_reported_units, p_supports, p_particle_fractions) s
     CROSS JOIN params
 )
 SELECT count(DISTINCT r.location_id) AS n_locations,

@@ -394,7 +394,9 @@ CREATE OR REPLACE MACRO aggregate_results(
     p_units := 'refuse',
     p_method_class := NULL,
     p_matrices := NULL,
-    p_reportable_only := NULL
+    p_reportable_only := NULL,
+    p_supports := NULL,
+    p_particle_fractions := NULL
 ) AS TABLE
 SELECT *, 'call:' || COALESCE(p_dup_agg, 'avg') || '/' || COALESCE(p_nd_method, 'raw') AS nd_policy,
        'dup_agg:' || COALESCE(p_dup_agg, 'avg') || ' > nd_method:' || COALESCE(p_nd_method, 'raw')
@@ -410,5 +412,6 @@ FROM aggregate_points(p_analyte, p_event_agg := p_event_agg, p_matrix := p_matri
                       p_end_date := p_end_date, p_sample_types := p_sample_types,
                       p_nd_policy := p_nd_policy, p_units := p_units,
                       p_method_class := p_method_class, p_matrices := p_matrices,
-                      p_reportable_only := p_reportable_only)
+                      p_reportable_only := p_reportable_only,
+                      p_supports := p_supports, p_particle_fractions := p_particle_fractions)
 WHERE p_dup_agg IS NULL AND p_nd_method IS NULL;

@@ -60,13 +60,28 @@
 --                               that unit (depth_in_scope); no depth is out
 --   p_reported_units VARCHAR[] - the results whose unit as the source
 --                               reported it is listed (units_in_scope)
+--   p_supports      VARCHAR[] - supports to read ('discrete', 'composite',
+--                               'ism'); NULL refuses a variable of more than
+--                               one, as aggregate_points does
+--                               (docs/ism-and-uncertainty-spec.md §6.1)
+--   p_particle_fractions VARCHAR[] - particle-size fractions to read, the
+--                               same way; ignored (filters_ignored) where the
+--                               dataset has no preparation records
+--
+-- Each row carries its sample's support and the result's particle-size
+-- fraction; a COLUMN is also per particle-size fraction. A laboratory
+-- replicate coded on its primary's sample is never read.
 --
 -- A filter on a column the source lacks matches everything; every row's
 -- filters_ignored names it (as aggregate_points).
 
-CREATE OR REPLACE MACRO cell_key(analyte, fraction, meas_basis, method_class) AS (
+-- particle_size_fraction (ISM preparation records): appended only when
+-- known, so every key without one is as before.
+CREATE OR REPLACE MACRO cell_key(analyte, fraction, meas_basis, method_class,
+                                 particle_size_fraction := NULL) AS (
     analyte || '|' || COALESCE(fraction, '') || '|' || COALESCE(meas_basis, '')
         || '|' || COALESCE(method_class, '')
+        || COALESCE('|' || particle_size_fraction, '')
 );
 
 -- ============================================================================
@@ -93,7 +108,9 @@ CREATE OR REPLACE MACRO sample_scope(
     p_depth_max := NULL,
     p_depth_units := NULL,
     p_reported_units := NULL,
-    p_caller := 'sample_results'
+    p_caller := 'sample_results',
+    p_supports := NULL,
+    p_particle_fractions := NULL
 ) AS TABLE
 WITH absent AS (SELECT absent_columns() AS cols),
 params AS (
@@ -115,8 +132,9 @@ params AS (
     list_contains(absent.cols, 'top_depth') AND list_contains(absent.cols, 'bottom_depth')
         AS no_depth,
     list_contains(absent.cols, 'units') AS no_units,
+    has_preparations() AS has_prep,
     list_concat(filters_ignored(p_matrix, p_fraction, p_sample_types, p_method_class,
-                                reportable_scope(p_reportable_only)),
+                                reportable_scope(p_reportable_only), p_particle_fractions),
                 row_scope_ignored(p_depth_units, p_reported_units, absent.cols)) AS ignored
     FROM absent
 ),
@@ -133,12 +151,16 @@ filtered AS (
         v.result, v.detected, v.qualifier, v.detection_limit, v.units, v.result_id,
         v.date_analyzed, v.method_class, v.method_code, v.reportable, v.test_rank,
         v.unit_source, v.reported_units,
+        support_code(v.support) AS support, ra.particle_size_fraction, v.replicate_set,
         nd_policy_choice(p_nd_policy, p_nd_policy_version, pr.nd_policy, pr.nd_policy_version,
                          ds.ds_policy, ds.ds_version) AS pol
     FROM v_results_core v
+    LEFT JOIN result_aliquots ra ON ra.result_id = v.result_id
     LEFT JOIN project pr ON pr.project_name = v.project
     CROSS JOIN v_nd_dataset_policy ds
-    WHERE (analyte_list IS NULL
+    WHERE in_support_scope(v.support, p_supports)
+      AND ra.lab_replicate_on_primary IS NOT TRUE
+      AND (analyte_list IS NULL
            OR v.analyte IN (SELECT unnest(CAST(analyte_list AS VARCHAR[]))))
       AND (p_matrix IS NULL OR v.matrix = p_matrix OR v.matrix IS NULL)
       AND (p_matrices IS NULL OR list_contains(CAST(p_matrices AS VARCHAR[]), v.matrix))
@@ -156,6 +178,7 @@ filtered AS (
 ),
 scoped AS (
     SELECT f.*, params.um, params.dfac_call, params.ignored AS filters_ignored,
+           params.has_prep,
            COALESCE(params.combine_class, f.matrix) AS var_matrix
     FROM filtered f
     CROSS JOIN params
@@ -170,21 +193,49 @@ scoped AS (
       AND params.row_check
       AND (params.no_depth OR depth_in_scope(f.top_depth, f.bottom_depth, f.depth_units,
                                              p_depth_min, p_depth_max, p_depth_units))
-      AND (params.no_units OR units_in_scope(f.reported_units, p_reported_units))
+      AND (params.no_units OR units_in_scope(p_caller, f.reported_units, p_reported_units))
+      AND (NOT params.has_prep OR in_particle_scope(f.particle_size_fraction, p_particle_fractions))
 ),
 -- The units of each variable, grouped and joined back: as count(DISTINCT)
 -- OVER a window it took 0.11 s of a 0.35 s km_quartiles call at the test
 -- facility, a tenth of that grouped. hash() keys NULLs as the window
--- partitioned them.
+-- partitioned them. The same pass refuses a variable of more than one
+-- support, or on more than one known particle-size fraction, when the call
+-- named none (aggregate_points' units_by_variable).
 per_unit AS (
     SELECT hash(var_matrix, fraction, meas_basis, analyte, method_class) AS vkey, units,
-           bool_or(unit_source = 'contradicts_matrix') AS contra
+           bool_or(unit_source = 'contradicts_matrix') AS contra,
+           any_value(analyte || ' in ' || var_matrix || COALESCE(', ' || fraction, '')
+                     || COALESCE(', ' || meas_basis, '')
+                     || COALESCE(', method class ' || method_class, '')) AS label,
+           min(support) AS sup_min, max(support) AS sup_max,
+           count(*) FILTER (WHERE support = 'discrete') AS n_discrete,
+           count(*) FILTER (WHERE support = 'composite') AS n_composite,
+           count(*) FILTER (WHERE support = 'ism') AS n_ism,
+           min(particle_size_fraction) AS psf_min, max(particle_size_fraction) AS psf_max,
+           any_value(has_prep) AS has_prep
     FROM scoped GROUP BY ALL
 ),
 var_units AS (
     SELECT vkey, count(units) > 1 AS units_mixed,
            COALESCE(bool_or(contra), FALSE) AS units_contradict
     FROM per_unit GROUP BY vkey
+    HAVING CASE
+        WHEN p_supports IS NULL AND min(sup_min) <> max(sup_max) THEN CAST(error(
+            p_caller || ': ' || any_value(label) || ' has results of more than one support ('
+            || array_to_string(list_filter([
+                   CASE WHEN sum(n_discrete) > 0 THEN 'discrete: ' || sum(n_discrete) END,
+                   CASE WHEN sum(n_composite) > 0 THEN 'composite: ' || sum(n_composite) END,
+                   CASE WHEN sum(n_ism) > 0 THEN 'ism: ' || sum(n_ism) END], lambda s: s IS NOT NULL), ', ')
+            || '), which one scale would mix. Name the supports to read: p_supports := [''ism''] '
+            || 'for DU and SU means, or several to return each as its own point') AS BOOLEAN)
+        WHEN p_particle_fractions IS NULL AND bool_or(has_prep) AND min(psf_min) <> max(psf_max)
+            THEN CAST(error(
+            p_caller || ': ' || any_value(label) || ' has results on more than one particle-size '
+            || 'fraction (' || min(psf_min) || ', ' || max(psf_max) || '). Name the fractions to '
+            || 'read: p_particle_fractions := [''' || min(psf_min) || '''], or several') AS BOOLEAN)
+        ELSE TRUE
+    END
 )
 SELECT f.*, u.units_mixed, u.units_contradict
 FROM scoped f
@@ -212,7 +263,9 @@ CREATE OR REPLACE MACRO sample_results(
     p_depth_min := NULL,
     p_depth_max := NULL,
     p_depth_units := NULL,
-    p_reported_units := NULL
+    p_reported_units := NULL,
+    p_supports := NULL,
+    p_particle_fractions := NULL
 ) AS TABLE
 WITH ranked AS (
     SELECT
@@ -220,14 +273,15 @@ WITH ranked AS (
         f.units_mixed OR f.units_contradict AS units_conflict,
         p.name || '@' || p.version AS nd_policy,
         row_number() OVER (
-            PARTITION BY f.sample_id, f.analyte, f.fraction, f.meas_basis, f.method_class
+            PARTITION BY f.sample_id, f.analyte, f.fraction, f.meas_basis, f.method_class,
+                         f.particle_size_fraction
             ORDER BY CASE WHEN f.reportable THEN 0 WHEN f.reportable IS NULL THEN 1 ELSE 2 END,
                      COALESCE(f.test_rank, 0),
                      rank_reruns_key(f.detected, f.result, f.detection_limit, f.date_analyzed,
                                      f.result_id, p.reruns_nd_limit)
         ) AS rk,
         count(*) OVER (PARTITION BY f.sample_id, f.analyte, f.fraction, f.meas_basis,
-                                    f.method_class) AS n_results
+                                    f.method_class, f.particle_size_fraction) AS n_results
     FROM sample_scope(analyte_list, p_matrix := p_matrix, p_fraction := p_fraction,
                       p_sample_types := p_sample_types, p_start_date := p_start_date,
                       p_end_date := p_end_date, p_locations := p_locations,
@@ -236,7 +290,8 @@ WITH ranked AS (
                       p_matrices := p_matrices, p_display_factor := p_display_factor,
                       p_reportable_only := p_reportable_only,
                       p_depth_min := p_depth_min, p_depth_max := p_depth_max,
-                      p_depth_units := p_depth_units, p_reported_units := p_reported_units) f
+                      p_depth_units := p_depth_units, p_reported_units := p_reported_units,
+                      p_supports := p_supports, p_particle_fractions := p_particle_fractions) f
     LEFT JOIN v_nd_policies p ON p.name = f.pol.name AND p.version = COALESCE(f.pol.version, p.latest_version)
     WHERE CASE WHEN p.name IS NULL THEN CAST(error('sample_results: no non-detect policy '
                    || f.pol.name || COALESCE(' version ' || f.pol.version, '')
@@ -247,13 +302,14 @@ SELECT
     sample_id, location_id, x, y, matrix, sample_date, sample_datetime,
     top_depth, bottom_depth, position, sample_type,
     analyte, fraction, meas_basis, method_class, method_code,
-    cell_key(analyte, fraction, meas_basis, method_class) AS cell_key,
+    cell_key(analyte, fraction, meas_basis, method_class, particle_size_fraction) AS cell_key,
     CASE WHEN dfac_call IS NOT NULL AND detected = FALSE THEN dfac_call * detection_limit
          ELSE result END AS result,
     detected, qualifier, detection_limit, units,
     n_results, units_conflict, nd_policy,
     CASE WHEN detected = FALSE THEN dfac_call END AS display_factor,
-    filters_ignored
+    filters_ignored,
+    support, particle_size_fraction, replicate_set
 FROM ranked
 WHERE rk = 1 AND (um = 'flag' OR NOT units_conflict);
 
@@ -283,7 +339,9 @@ CREATE OR REPLACE MACRO sample_results_refused(
     p_depth_min := NULL,
     p_depth_max := NULL,
     p_depth_units := NULL,
-    p_reported_units := NULL
+    p_reported_units := NULL,
+    p_supports := NULL,
+    p_particle_fractions := NULL
 ) AS TABLE
 SELECT analyte, var_matrix AS matrix, fraction, meas_basis, method_class,
        CASE WHEN bool_or(contra) THEN 'contradicts matrix' ELSE 'mixed units' END AS reason,
@@ -300,7 +358,8 @@ FROM (
                       p_matrices := p_matrices, p_reportable_only := p_reportable_only,
                       p_depth_min := p_depth_min, p_depth_max := p_depth_max,
                       p_depth_units := p_depth_units, p_reported_units := p_reported_units,
-                      p_caller := 'sample_results_refused')
+                      p_caller := 'sample_results_refused',
+                      p_supports := p_supports, p_particle_fractions := p_particle_fractions)
     WHERE um = 'refuse' AND (units_mixed OR units_contradict)
     GROUP BY ALL
 )
@@ -353,7 +412,9 @@ CREATE OR REPLACE MACRO sample_cell_maps(
     p_depth_min := NULL,
     p_depth_max := NULL,
     p_depth_units := NULL,
-    p_reported_units := NULL
+    p_reported_units := NULL,
+    p_supports := NULL,
+    p_particle_fractions := NULL
 ) AS TABLE
 SELECT
     sample_id,
@@ -371,6 +432,8 @@ SELECT
     count(*)                AS n_cells,
     any_value(nd_policy)    AS nd_policy,
     any_value(filters_ignored) AS filters_ignored,
+    any_value(support)      AS support,
+    any_value(replicate_set) AS replicate_set,
     map_from_entries(list((
         cell_key,
         struct_pack(value := result, detected := detected, qualifier := qualifier,
@@ -395,7 +458,9 @@ FROM sample_results(
     p_depth_min := p_depth_min,
     p_depth_max := p_depth_max,
     p_depth_units := p_depth_units,
-    p_reported_units := p_reported_units)
+    p_reported_units := p_reported_units,
+    p_supports := p_supports,
+    p_particle_fractions := p_particle_fractions)
 GROUP BY sample_id;
 
 -- ============================================================================
@@ -526,11 +591,14 @@ CREATE OR REPLACE MACRO km_quartiles(
     p_depth_min := NULL,
     p_depth_max := NULL,
     p_depth_units := NULL,
-    p_reported_units := NULL
+    p_reported_units := NULL,
+    p_supports := NULL,
+    p_particle_fractions := NULL
 ) AS TABLE
 WITH cells AS (
     SELECT COALESCE(matrix_combine_class('km_quartiles', p_matrix, p_matrices), s.matrix) AS matrix,
            s.fraction, s.meas_basis, s.analyte, s.method_class, s.units,
+           s.support, s.particle_size_fraction,
            CASE p_group
                WHEN 'none' THEN 'All samples'
                WHEN 'location' THEN COALESCE(s.location_id, '(no location)')
@@ -547,16 +615,21 @@ WITH cells AS (
                         p_units := p_units, p_method_class := p_method_class,
                         p_matrices := p_matrices, p_reportable_only := p_reportable_only,
                         p_depth_min := p_depth_min, p_depth_max := p_depth_max,
-                        p_depth_units := p_depth_units, p_reported_units := p_reported_units) s
+                        p_depth_units := p_depth_units, p_reported_units := p_reported_units,
+                        p_supports := p_supports, p_particle_fractions := p_particle_fractions) s
 ),
 km_cells AS (
     -- a name of its own: query_table reads a CTE before a table of that name
-    SELECT hash(matrix, fraction, meas_basis, analyte, method_class, g) AS grp,
+    SELECT hash(matrix, fraction, meas_basis, analyte, method_class, g, support,
+                particle_size_fraction) AS grp,
            v AS value, d AS detected
     FROM cells
 ),
 labels AS (
-    SELECT hash(matrix, fraction, meas_basis, analyte, method_class, g) AS grp,
+    SELECT hash(matrix, fraction, meas_basis, analyte, method_class, g, support,
+                particle_size_fraction) AS grp,
+           any_value(support) AS support,
+           any_value(particle_size_fraction) AS particle_size_fraction,
            any_value(matrix) AS matrix, any_value(fraction) AS fraction,
            any_value(meas_basis) AS meas_basis, any_value(analyte) AS analyte,
            any_value(method_class) AS method_class, any_value(g) AS g,
@@ -566,7 +639,8 @@ labels AS (
 SELECT l.analyte, l.matrix, l.fraction, l.meas_basis, l.method_class, l.g AS grp, l.units,
        k.n, k.detects, k.nondetects, k.min_detect, k.max_detect, k.max_limit,
        k.below_lowest, k.q1, k.q1_below, k.med, k.med_below, k.q3, k.q3_below,
-       k.n_left_out
+       k.n_left_out, l.support, l.particle_size_fraction
 FROM labels l
 JOIN km_quartiles_of('km_cells') k USING (grp)
-ORDER BY l.analyte, l.matrix, l.fraction, l.meas_basis, l.method_class, l.g;
+ORDER BY l.analyte, l.matrix, l.fraction, l.meas_basis, l.method_class, l.g, l.support,
+         l.particle_size_fraction;

@@ -32,6 +32,13 @@ the version is 0.x:
     in load_report
     a mapping's `nd_policy:` names the dataset's; the loader records it
 
+  ISM samples, preparation and uncertainty (docs/ism-and-uncertainty-spec.md)
+    p_supports / p_particle_fractions on the macros above   SQL parameters
+    ism_decisions(analyte, screening_name, ...)   SQL macro: DU decisions, bracketed
+    result_uncertainty(analyte, p_sample_ids=)    SQL macro: combined uncertainty
+    a PROJECT mapping's support_rules:, replicate_rules:, increments:,
+    geometries:, preparation:, prep_supplement:, ... (README, "ISM samples")
+
   SQL_DIR, DEFAULT_MAPPING, __version__
 
 Anything else in chemduck.load_data or chemduck.arii_hybrid is internal.
@@ -41,8 +48,10 @@ Tested DuckDB versions are listed in SUPPORTED_DUCKDB (see tests/run_all.py).
 __version__ = "0.2.0"
 
 # The Python DuckDB versions the test suite has passed on. 1.5.4 is the one
-# inside QGIS 4.2.1's Python.
-SUPPORTED_DUCKDB = ("1.5.4", "1.5.5")
+# inside QGIS 4.2.1's Python, 1.5.5 QGIS 4.2.3's; 2.0.x is what the QGIS
+# plugin's pipeline and its users (integrator, which caps its DuckDB at the
+# newest version listed here) install as "the latest".
+SUPPORTED_DUCKDB = ("1.5.4", "1.5.5", "2.0.0", "2.0.1")
 
 from .arii_hybrid import (  # noqa: E402
     DEFAULT_MAPPING,

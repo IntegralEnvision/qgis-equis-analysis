@@ -15,11 +15,13 @@
 
 # Declared sample rules (README "Measurement points, events and sample
 # rules"): positions and QC that a facility records only in sample codes.
-# Per facility; for example:
+# Per project ONLY: declare them in the project's own copy of this mapping
+# (--mapping), never here. A code suffix means different things at
+# different facilities: at one an '_R2' is a field duplicate, at an ISM
+# facility it is replicate 2 of a decision unit, which a QC retype would
+# drop from scope. For example (position):
 # position_rules:
 #   - {column: SYS_SAMPLE_CODE, pattern: '_(Superficial|P15|P50|Deep)$'}
-# qc_rules:
-#   - {column: SYS_SAMPLE_CODE, pattern: '^(.*)_(?:R[0-9]+|BD)$', sample_type: FR}
 
 # Source format settings
 source:

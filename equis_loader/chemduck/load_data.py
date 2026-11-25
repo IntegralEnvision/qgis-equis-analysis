@@ -38,9 +38,12 @@ STORAGE_CONFIG = {'storage_compatibility_version': 'v1.0.0'}
 # ============================================================================
 
 def load_mapping(mapping_path):
-    """Read YAML mapping config."""
+    """Read YAML mapping config. Files a project mapping names (ISM
+    increments, geometries, supplements) are found relative to it."""
     with open(mapping_path, 'r') as f:
-        return yaml.safe_load(f)
+        mapping = yaml.safe_load(f) or {}
+    mapping['_mapping_dir'] = str(Path(mapping_path).resolve().parent)
+    return mapping
 
 
 # ============================================================================
@@ -2102,6 +2105,10 @@ def _run_load(conn, mapping, auto_classify=True, allow_conflicts=False):
     insert_results(conn, mapping, exprs, staging_cols)
     insert_result_attributes(conn, mapping, exprs, staging_cols)
     insert_river_miles(conn, mapping, exprs, staging_cols)
+    # A project's ISM records (docs/ism-and-uncertainty-spec.md); nothing
+    # without the mapping sections that declare them
+    from .ism_load import load_ism
+    load_ism(conn, mapping, exprs, staging_cols)
 
     # Auto-classify unmapped fields
     if auto_classify:
@@ -2181,7 +2188,11 @@ def load_source(con, source, mapping, schema='chemduck', limit=None,
     load_schema(con, SQL_DIR, schema=schema)
     cur = schema_cursor(con, schema)
     try:
-        held = cur.execute("SELECT count(*) FROM results").fetchone()[0]
+        # fetchall, not fetchone: DuckDB 2.0's Python client holds a result
+        # unfinished until a fetch returns no rows, and then refuses
+        # cur.register() below ("connection has an unfinished result") -
+        # every relation or DataFrame load failed there; 1.5 allowed it.
+        held = cur.execute("SELECT count(*) FROM results").fetchall()[0][0]
         if held:
             raise LoadConflictError(
                 f"Schema {cur.execute('SELECT current_schema()').fetchone()[0]!r} already "
@@ -2247,6 +2258,8 @@ def export_to_parquet(source_path, output_dir, mapping, env=None, limit=None,
     insert_results(conn, mapping, exprs, staging_cols)
     insert_result_attributes(conn, mapping, exprs, staging_cols)
     insert_river_miles(conn, mapping, exprs, staging_cols)
+    from .ism_load import load_ism
+    load_ism(conn, mapping, exprs, staging_cols)
 
     if auto_classify:
         print("\n--- Auto-classifying unmapped fields ---")
