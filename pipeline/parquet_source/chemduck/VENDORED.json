@@ -1,42 +1,46 @@
 {
  "note": "Written by tools/vendor_chemduck.py. Do not edit these files: re-vendor, and tools/test_chemduck_vendor.py checks them.",
  "repository": "https://github.com/IntegralEnvision/chemduck.git",
- "commit": "b81dd01088d60c8d726af782f532d36e347249d7",
- "subject": "Merge pull request #18 from IntegralEnvision/qgis-scope-and-undated",
+ "commit": "b5fdcd97805c68068d540866a827bb4c9e437103",
+ "subject": "Merge pull request #21 from IntegralEnvision/sidecars-deterministic",
  "version": "0.2.0",
- "vendored": "2026-11-24",
+ "vendored": "2026-11-25",
  "files": {
   "__init__.py": {
-   "bytes": 2852,
-   "sha256": "617d3089e07505eda2ad92680de679cec467f4eaeffc77f82669164d22ddb5d3"
+   "bytes": 3513,
+   "sha256": "6de7bca0b5143ee6186db808bf146ace60f0440fa267bc5888c633ba5ff3c2de"
   },
   "arii_hybrid.py": {
-   "bytes": 34957,
-   "sha256": "0c0cb6e193596d43aa6410bb59b97a2f317955b024014dcb18146c5663874b01"
+   "bytes": 36339,
+   "sha256": "a8eb7c979eb934f98827f398d55db9a1d8da019e3fb43b687e5804dbb80c4fb8"
   },
   "eav_helpers.py": {
    "bytes": 3740,
    "sha256": "1ff3e19a654918aaef9625b2b798bb6b2fa158c62e6fab8004998bde989103ea"
   },
   "equis_arii_parquet_mapping.yaml": {
-   "bytes": 7807,
-   "sha256": "166b084dedffab57bbc3d9b4355e5ebbed7a2ceffc078dc5149a19dc15070b64"
+   "bytes": 8013,
+   "sha256": "9b7e0ff0478f933756c1e25d8010afdb6ae3ced145a02959560ce78fe6400733"
+  },
+  "ism_load.py": {
+   "bytes": 61129,
+   "sha256": "fab8494eaeb72939decab3432944c4cf2cf9934a76850045d158c28e9d829b9d"
   },
   "load_data.py": {
-   "bytes": 108653,
-   "sha256": "c3317a562d4b7959a415246b41a5be001dc84e309a124b53f1f5c0636d519fcb"
+   "bytes": 109443,
+   "sha256": "2f6490eac313b75b492aad3cad6affa958aef2fdee7d73809e042b58ac5b2f96"
   },
   "sql/01_tables.sql": {
-   "bytes": 27877,
-   "sha256": "8430c81359c360c5375a9188bf61855fa85366d25a0c699631f6528ba1231bf0"
+   "bytes": 41384,
+   "sha256": "2b3047e5bab05f12219992cff0645d66873c0cb4c9033342d258e51c4921a5b8"
   },
   "sql/02_macros.sql": {
-   "bytes": 40279,
-   "sha256": "4130b7703fbc6b191f384b28a6b04dab48d9a7b3d623236e747e178f79c9353d"
+   "bytes": 41069,
+   "sha256": "c79007fd5196206ed37e5134e8937c9b58969a839ffe0dcf284f97709e42826f"
   },
   "sql/03_views.sql": {
-   "bytes": 29116,
-   "sha256": "d6ef26412ae16abc0c4d934b82bf9f6670ae1a9ef4c2eb913442023b2830ca6a"
+   "bytes": 29384,
+   "sha256": "04712d8cc33abb3ba4ff6a45c6f1ebc1efeed4babeba81e382040cdcfd7dc743"
   },
   "sql/04_extended_tables.sql": {
    "bytes": 5529,
@@ -55,24 +59,28 @@
    "sha256": "1c0f61d5c0f44831bf15ac80aded08866b6adbfd038a866795226e67ca88b23f"
   },
   "sql/08_aggregate_points.sql": {
-   "bytes": 63472,
-   "sha256": "b0d7ea25feddaac0f50f750ce9787d1f0824da074958400a0e6faf3e77c8a769"
+   "bytes": 83608,
+   "sha256": "24ffc70671904953fa287dfcb93dc6ce378507b2316ac7dde06b599a54204f36"
   },
   "sql/08_aggregate_results.sql": {
-   "bytes": 18161,
-   "sha256": "94421c75bd89b72a3de718699c337e3d1d6d75b302c63ce97d08b646f11d5f60"
+   "bytes": 18313,
+   "sha256": "6ca5fe8098c3d548f70030b75282dae1419d34222cbc2c5fb28b8eb5f2712f13"
   },
   "sql/09_desurvey.sql": {
    "bytes": 19610,
    "sha256": "0b265847faf23b494cf3d87e58de545c055ef54f44e580c5833db099bc961327"
   },
   "sql/10_sample_results.sql": {
-   "bytes": 28135,
-   "sha256": "36ee16dafa490b739c5c3a907128bd8b3ca7df79a311aaa64a21ee117a0e667f"
+   "bytes": 32760,
+   "sha256": "4f4ba95339afd52b65dda3b7bb52ac7cd509ebb8e026edc8e57f321d223c1076"
+  },
+  "sql/11_ism.sql": {
+   "bytes": 44456,
+   "sha256": "477a9175b3e29def408b5eb6b9d913c68470a720ff2accad175d33a4996ed8d4"
   },
   "sql/optional/spatial.sql": {
-   "bytes": 881,
-   "sha256": "dbf9c91c2e389b4a606d906272f621fdf7735cd5ccca0ea6938b81fa413051df"
+   "bytes": 2043,
+   "sha256": "009ddcdf3c52876e65f9fa5173da16ad10082d231f435fc10e96c75e5c874641"
   }
  }
 }

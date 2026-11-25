@@ -73,6 +73,7 @@ from .load_data import (
     schema_cursor,  # noqa: F401  (re-exported for hosts)
     unit_lookup_sql,
 )
+from .ism_load import load_ism
 
 DEFAULT_MAPPING = Path(__file__).resolve().parent / "equis_arii_parquet_mapping.yaml"
 
@@ -102,6 +103,12 @@ DEPTH_UNIT_TO_M = {
 
 SIDECAR_FORMAT = "chemduck-arii-sidecars"
 SIDECAR_VERSION = 1
+
+# ISM tables (docs/ism-and-uncertainty-spec.md §4, §7), published when a
+# project's mapping fills them.
+ISM_SIDECARS = ("location_geometries", "field_sample_design", "sample_increments",
+                "sample_preparations", "sample_subsamples", "result_aliquots",
+                "ism_analysis_groups", "uncertainty_components")
 
 
 class SourceRefused(Exception):
@@ -332,7 +339,7 @@ def bootstrap_sql(sql_dir=SQL_DIR):
                 continue
         elif head.startswith("INSERT") and re.search(
                 r"\bINTO\s+(matrix_classes|nd_policies|nd_policy_rules|method_classes"
-                r"|unit_dimensions|matrix_class_dimensions)\b", stmt, re.I):
+                r"|unit_dimensions|matrix_class_dimensions|ism_vocabularies)\b", stmt, re.I):
             pass
         else:
             continue
@@ -361,7 +368,7 @@ def _chemduck_revision():
 
 
 CONSUMER_SQL = ("02_macros.sql", "03_views.sql", "08_aggregate_points.sql", "08_aggregate_results.sql",
-                "10_sample_results.sql")
+                "10_sample_results.sql", "11_ism.sql")
 
 
 def write_consumer_bundle(out_dir, sql_dir=SQL_DIR):
@@ -537,6 +544,11 @@ def publish(manifest_path, out_dir, mapping_path=DEFAULT_MAPPING, x_col=None,
     n_results = _count(con, "SELECT count(*) FROM results")
     log(f"  Results view: {n_results:,} rows ({rows - n_results:,} source rows without "
         f"a sample id or analyte)")
+    # A project's ISM records (docs/ism-and-uncertainty-spec.md §5.7): ARII
+    # carries none, so they come from the files the project mapping names,
+    # loaded as the loader loads them and published as sidecars below.
+    with contextlib.redirect_stdout(io.StringIO()):
+        load_ism(con, mapping, exprs, columns)
 
     def write(table_sql, name):
         dest = out_dir / f"{name}.parquet"
@@ -549,12 +561,18 @@ def publish(manifest_path, out_dir, mapping_path=DEFAULT_MAPPING, x_col=None,
         "locations": write("SELECT * FROM locations ORDER BY location_id", "locations"),
         "samples": write("SELECT * FROM samples ORDER BY location_id, sample_date, sample_id",
                          "samples"),
-        "analyte_summary": write("SELECT * FROM v_analyte_summary ORDER BY analyte, matrix",
+        # The catalogues in a total order (ORDER BY ALL keeps each view's
+        # leading columns first), so one manifest published twice writes the
+        # same bytes (tests/test_arii_hybrid.py, repeatable). By (analyte,
+        # matrix) alone, a row per method class tied, and came out in the
+        # threads' order; the method-class and position summaries had none.
+        "analyte_summary": write("SELECT * FROM v_analyte_summary ORDER BY ALL",
                                  "analyte_summary"),
-        "available_filters": write("SELECT * FROM v_available_filters "
-                                   "ORDER BY filter_type, filter_value", "available_filters"),
-        "method_class_summary": write("SELECT * FROM v_method_classes", "method_class_summary"),
-        "position_summary": write("SELECT * FROM v_positions", "position_summary"),
+        "available_filters": write("SELECT * FROM v_available_filters ORDER BY ALL",
+                                   "available_filters"),
+        "method_class_summary": write("SELECT * FROM v_method_classes ORDER BY ALL",
+                                      "method_class_summary"),
+        "position_summary": write("SELECT * FROM v_positions ORDER BY ALL", "position_summary"),
         # the dataset's settings: its non-detect policy, version resolved now
         "chemduck_settings": write("SELECT * FROM chemduck_settings ORDER BY key",
                                    "chemduck_settings"),
@@ -562,6 +580,11 @@ def publish(manifest_path, out_dir, mapping_path=DEFAULT_MAPPING, x_col=None,
         # classes (D3), limits (D4), units (D5)
         "load_report": write("SELECT * FROM load_report ORDER BY ALL", "load_report"),
     }
+    # ISM records, where the project has any; a consumer's bootstrap makes
+    # the rest empty.
+    for name in ISM_SIDECARS:
+        if _count(con, f"SELECT count(*) FROM {name}"):
+            tables[name] = write(f"SELECT * FROM {name} ORDER BY ALL", name)
     materialized = {}
     for sql_file in materialize or ():
         sql_file = Path(sql_file)

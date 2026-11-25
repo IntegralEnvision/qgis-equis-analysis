@@ -39,6 +39,10 @@ SELECT
     s.event,
     s.sample_datetime,
     s.position,
+    -- ISM (docs/ism-and-uncertainty-spec.md §4.2): NULL support is discrete
+    s.support,
+    s.replicate_set,
+    s.replicate_no,
 
     -- Result fields
     r.result_id,
@@ -638,6 +642,10 @@ SELECT
     s.event,
     s.sample_datetime,
     s.position,
+    -- ISM (docs/ism-and-uncertainty-spec.md §4.2): NULL support is discrete
+    s.support,
+    s.replicate_set,
+    s.replicate_no,
 
     -- Result fields
     r.result_id,

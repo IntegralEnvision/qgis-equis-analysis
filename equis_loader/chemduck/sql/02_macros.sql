@@ -221,10 +221,23 @@ CREATE OR REPLACE MACRO depth_in_scope(top_depth, bottom_depth, depth_units,
 -- result with none; NULL keeps every unit. It applies before the unit check,
 -- so a solid's stray leachate result in mg/L can be dropped rather than have
 -- its variable refused.
-CREATE OR REPLACE MACRO units_in_scope(reported_units, p_reported_units) AS (
+--
+-- An empty list is refused HERE as well as in row_scope_check. DuckDB 2.0.1
+-- folds list_contains([], x) to FALSE, plans the call as an empty result,
+-- and never evaluates row_scope_check's error(): `aggregate_points('Lead',
+-- p_reported_units := [])` answered with no rows instead of refusing (2.0.0
+-- refused). error() is never folded, so the refusal is part of the
+-- predicate the optimizer must keep. An analyte with no rows at all still
+-- answers empty: there is nothing to filter.
+CREATE OR REPLACE MACRO units_in_scope(caller, reported_units, p_reported_units) AS (
     p_reported_units IS NULL
-    OR list_contains(list_transform(CAST(p_reported_units AS VARCHAR[]), lambda u: trim(u)),
-                     trim(COALESCE(reported_units, '')))
+    OR CASE WHEN len(CAST(p_reported_units AS VARCHAR[])) = 0
+            THEN error(caller || ': p_reported_units is empty; name the units to keep, or '
+                       || 'pass NULL for every unit')
+            ELSE list_contains(list_transform(CAST(p_reported_units AS VARCHAR[]),
+                                              lambda u: trim(u)),
+                               trim(COALESCE(reported_units, '')))
+       END
 );
 
 -- The call's own mistakes, refused by name: a bound without its unit would
