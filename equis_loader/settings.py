@@ -361,6 +361,26 @@ def save_read_only(read_only):
     settings.endGroup()
 
 
+CHEMDUCK_SHADOW = "chemduck_shadow"
+
+
+def load_chemduck_shadow():
+    """Whether to run ChemDuck beside the store and log each map's two
+    answers (docs/chemduck-adoption-plan.md, phase 1). Off unless set.
+
+    A debug setting with no widget: nothing a user sees changes, and it
+    costs a background load of every row. Set it from the Python console,
+    `QSettings().setValue("equis_loader/chemduck_shadow", True)`, or in
+    Settings > Options > Advanced; it applies from the next source opened.
+    The log is the "EQuIS ChemDuck" tab.
+    """
+    settings = QSettings()
+    settings.beginGroup(GROUP)
+    value = settings.value(CHEMDUCK_SHADOW, False, type=bool)
+    settings.endGroup()
+    return bool(value)
+
+
 def geopackage_for_project(project_path, facility_name=""):
     """Where a project's EQuIS layers should be written.
 

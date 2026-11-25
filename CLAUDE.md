@@ -24,6 +24,7 @@ python tools/test_censored.py          # box plots' Kaplan-Meier quartiles vs an
 python tools/test_histogram_sql.py     # the histogram's real SQL vs the store: values, aggregation, every filter (node)
 python tools/test_chemduck_parity.py   # the adapter's map vs the store's: every difference listed (fixture)
 python tools/test_chemduck_parity.py --manifest <dir>/manifest.json --pub <dir>   # the same on a real facility
+python tools/test_chem_shadow.py       # the panel's ChemDuck shadow: built from a report, compared, logged
 python tools/analysis_preview.py       # the Analysis tab in a browser, no QGIS (--shots DIR: screenshots)
 python tools/profile_chemduck.py --manifest <facility>/manifest.json --out <dir>   # ChemDuck through a plugin session: the open per statement, every click, DuckDB profiles (--explain); run under plain Python AND QGIS
 
@@ -57,6 +58,8 @@ tools/test_layer_fields.py   (every report column on the layers: names, types, G
                               EQUIS_PARQUET=<facility glob> adds the real facility, timed)
 tools/test_import_smoke.py   (imports, and the export reading the table when there is one)
 tools/test_analysis_task.py   (the Analysis chooser's worker, in the task manager)
+tools/test_chem_shadow_ui.py   (the ChemDuck shadow: off by default; on, each map built
+                                logs ChemDuck beside the store; settings sandboxed)
 tools/try_scatter.py   tools/try_analysis_tab.py   (console probes: US-24, the Analysis tab)
 tools/try_overlay.py   (NOT a console probe: run by `qgis --code` in a throwaway
                         profile; drives the overlay shell end to end, 21 checks, quits)
@@ -73,7 +76,8 @@ shipped unbundled plugin, which does run on 3.34).
 ## The one structural rule
 
 **`equis_api.py`, `report_data.py`, `sparkline.py`, `cache.py`, `store.py`,
-`chem.py`, `parquet_address.py` and the vendored `chemduck/` import no QGIS.** That is why
+`chem.py`, `chem_parity.py`, `parquet_address.py` and the vendored `chemduck/`
+import no QGIS.** That is why
 1,500+ lines of tests run under a plain interpreter, and it is the reason
 most of this codebase can be verified
 without a GUI. Anything needing a path takes it from the caller, as
