@@ -405,6 +405,9 @@ class EquisDialog(QDockWidget):
         self._chem_shadow = None
         self._chem_shadow_task = None
         self._chem_shadow_serial = 0
+        # The ChemBackend over the store and the shadow, in "backend" mode
+        # (_analysis builds and keeps it while both stay the same).
+        self._chem_backend = None
         # The linked-views controller, built only when asked for. QtWebEngine
         # and the built web bundle can both be absent on a perfectly valid
         # install, so nothing outside this feature may assume it exists.
@@ -624,6 +627,36 @@ class EquisDialog(QDockWidget):
         self.connect_btn.clicked.connect(self._on_connect)
         conn_row.addWidget(self.verify_ssl_check)
         conn_row.addWidget(self.read_only_check)
+        # What answers the chemistry (settings.CHEMDUCK_MODES). Visible for
+        # every source: the switch is about the rules, not where rows come
+        # from. EQUIS_CHEMDUCK in QGIS's environment sets it for a session
+        # and disables the box, so a command-line trial can't be undone by
+        # a click it didn't make.
+        self.chemduck_combo = QComboBox()
+        for label, mode in (("Plugin rules", "off"),
+                            ("ChemDuck shadow (log only)", "shadow"),
+                            ("ChemDuck answers (experimental)", "backend")):
+            self.chemduck_combo.addItem(label, mode)
+        self.chemduck_combo.setToolTip(
+            "What answers maps, footer counts, time series and sparklines.\n"
+            "Plugin rules: the plugin's own, as always.\n"
+            "ChemDuck shadow: the same, with ChemDuck loaded beside them and\n"
+            "each map's two answers logged (View > Panels > Log Messages,\n"
+            "'EQuIS ChemDuck').\n"
+            "ChemDuck answers: ChemDuck's rules where it can be asked (QC and\n"
+            "non-reportable results left out, re-runs and same-day samples\n"
+            "ranked); layers say 'ChemDuck' in their names. Experimental.\n"
+            "A parquet source opens ChemDuck through its published sidecars.")
+        chemduck_mode = settings_store.load_chemduck_mode()
+        self.chemduck_combo.setCurrentIndex(max(0, self.chemduck_combo.findData(chemduck_mode)))
+        if settings_store.chemduck_mode_from_env():
+            self.chemduck_combo.setEnabled(False)
+            self.chemduck_combo.setToolTip("Set for this session by %s=%s in QGIS's "
+                                           "environment." % (settings_store.CHEMDUCK_ENV,
+                                                             chemduck_mode))
+        self.chemduck_combo.currentIndexChanged.connect(self._on_chemduck_mode_changed)
+        conn_row.addWidget(QLabel("Chemistry:"))
+        conn_row.addWidget(self.chemduck_combo)
         conn_row.addStretch(1)
         conn_row.addWidget(self.offline_btn)
         conn_row.addWidget(self.connect_btn)
@@ -2714,8 +2747,25 @@ class EquisDialog(QDockWidget):
         still ask the old question are the ones that only make sense for a
         live report anyway - running one, exporting its own columns - and
         they are gated on the source instead.
+
+        THE CHEMISTRY SWITCH IS HERE TOO. In "backend" mode, once ChemDuck
+        has landed beside a store, the answer is a ChemBackend: the store,
+        with maps, footer counts and series answered by ChemDuck
+        (chem_backend.py). Until it lands - or with no store yet on the live
+        path - the store or the table answers, as always.
         """
-        return self._report_store or self._report_table
+        base = self._report_store or self._report_table
+        if (self._report_store is not None
+                and getattr(self, "_chem_shadow", None) is not None
+                and settings_store.load_chemduck_mode() == "backend"):
+            backend = getattr(self, "_chem_backend", None)
+            if (backend is None or backend.store is not self._report_store
+                    or backend.chem is not self._chem_shadow):
+                from .chem_backend import ChemBackend
+                backend = ChemBackend(self._report_store, self._chem_shadow)
+                self._chem_backend = backend
+            return backend
+        return base
 
     @property
     def _layer_source(self):
@@ -2731,6 +2781,10 @@ class EquisDialog(QDockWidget):
         nothing else. The export makes the same choice for the same reason.
         """
         analysis = self._analysis
+        if hasattr(analysis, "take_notes"):
+            # ChemDuck's answer is the layer's, report columns or not; the
+            # table's would be the plugin's rules, not the switch's.
+            return analysis
         if (analysis is not None and not analysis.report_fields()
                 and self._report_table is not None):
             return self._report_table
@@ -2867,6 +2921,30 @@ class EquisDialog(QDockWidget):
         self._log_shadow("loading...")
         QgsApplication.taskManager().addTask(task)
 
+    def _on_chemduck_mode_changed(self, *_args):
+        """The Chemistry box: save the choice, then load or drop ChemDuck
+        for the source in hand and re-count what the panel shows."""
+        mode = self.chemduck_combo.currentData() or "off"
+        if not settings_store.chemduck_mode_from_env():
+            settings_store.save_chemduck_mode(mode)
+        if mode == "off":
+            self._discard_chem_shadow()
+        elif self._chem_shadow is None and self._chem_shadow_task is None:
+            if self._parquet_url and self._report_store is not None:
+                self._start_chem_shadow(self._parquet_url)
+            elif self._report_table is not None:
+                self._start_chem_shadow(self._report_table)
+        self._chem_backend = None
+        if mode == "backend" and self._chem_shadow is None and self._chem_shadow_task:
+            self._set_status("ChemDuck is loading; the plugin's rules answer until it lands.",
+                             Qgis.MessageLevel.Info)
+        elif mode == "backend" and self._chem_shadow is not None:
+            self._set_status("ChemDuck now answers maps, footer counts and time series "
+                             "(experimental). Layers it builds say 'ChemDuck'.",
+                             Qgis.MessageLevel.Info)
+        if self._analysis is not None:
+            self._on_rows_rescoped("The chemistry")
+
     def _on_chem_shadow_ready(self, task):
         if task is not self._chem_shadow_task:
             # Rows replaced while it loaded: the panel has moved on.
@@ -2888,6 +2966,13 @@ class EquisDialog(QDockWidget):
         else:
             self._log_shadow("ready: %s results loaded in %.1f s."
                              % (format(task.rows or 0, ",d"), task.seconds or 0))
+        if settings_store.load_chemduck_mode() == "backend":
+            # From now on _analysis is ChemDuck's: re-count what shows it.
+            self._set_status("ChemDuck has landed and now answers maps, footer counts and "
+                             "time series (experimental). Layers it builds say 'ChemDuck'.",
+                             Qgis.MessageLevel.Info)
+            if self._analysis is not None:
+                self._on_rows_rescoped("The chemistry")
 
     def _on_chem_shadow_failed(self, task, message):
         if task is not self._chem_shadow_task:
@@ -2896,6 +2981,7 @@ class EquisDialog(QDockWidget):
         self._log_shadow("failed to load: %s" % parquet_address.redact(message))
 
     def _discard_chem_shadow(self):
+        self._chem_backend = None
         if self._chem_shadow_task is not None:
             # A load in flight can't be stopped; its result is closed when
             # it lands, since it is no longer the current task.
@@ -2915,9 +3001,13 @@ class EquisDialog(QDockWidget):
             text if text.startswith("ChemDuck shadow") else "ChemDuck shadow: " + text,
             "EQuIS ChemDuck", Qgis.Info)
 
-    def _shadow_map(self, analyte, how, summary, store_seconds):
+    def _shadow_map(self, analyte, how, summary, store_seconds, compare_with_store=False):
         """Log ChemDuck's answer beside the map just built. Never raises:
-        the shadow must not cost the user the map it watches."""
+        the shadow must not cost the user the map it watches.
+
+        compare_with_store: the map was ChemDuck's (the chemistry switch),
+        so the comparison asks the store for its own answer rather than
+        set ChemDuck's beside itself; store_seconds is then ChemDuck's."""
         if not settings_store.load_chemduck_shadow():
             return
         try:
@@ -2938,8 +3028,9 @@ class EquisDialog(QDockWidget):
                 report = chem_parity.shadow_map(
                     self._report_store, self._chem_shadow, analyte["chemical"], how,
                     self._non_detect_mode(), self._matrix_mode(), self._fraction_mode(),
-                    self._method_mode(), plugin=summary)
-            self._log_shadow(chem_parity.describe(report, store_seconds))
+                    self._method_mode(), plugin=None if compare_with_store else summary)
+            self._log_shadow(chem_parity.describe(
+                report, None if compare_with_store else store_seconds))
         except Exception as exc:               # noqa: BLE001 - see docstring
             self._log_shadow("%s failed: %s: %s" % (analyte.get("chemical"),
                                                     type(exc).__name__, exc))
@@ -5289,6 +5380,8 @@ class EquisDialog(QDockWidget):
             for analyte in analytes:
                 summary = {}
                 results = []
+                # "chemduck" or "store" under the chemistry switch, else None.
+                answered_by = None
                 if how == UNAGGREGATED:
                     results, dropped = source.rows_for(
                         analyte["chemical"], analyte["cas_rn"],
@@ -5316,9 +5409,23 @@ class EquisDialog(QDockWidget):
                         method=self._method_mode(),
                         fields=bool(report_fields),
                     )
+                    seconds = time.perf_counter() - began
+                    if hasattr(source, "take_notes"):
+                        # The chemistry switch: who answered this map, and
+                        # why the store did if ChemDuck couldn't be asked.
+                        notes = [n for n in source.take_notes()
+                                 if n[0].startswith("map of")]
+                        if notes:
+                            answered_by = notes[-1][1]
+                            if notes[-1][2]:
+                                warnings.append(
+                                    "%s: answered by the plugin's rules, not ChemDuck - %s"
+                                    % (analyte["chemical"], notes[-1][2]))
+                                self._log_shadow("%s map answered by the store: %s"
+                                                 % (analyte["chemical"], notes[-1][2]))
                     # Only with the debug setting on; a line in the log.
-                    self._shadow_map(analyte, how, summary,
-                                     time.perf_counter() - began)
+                    self._shadow_map(analyte, how, summary, seconds,
+                                     compare_with_store=answered_by == "chemduck")
                 # The symbology is part of the name: two views of one chemical
                 # can now coexist, and two identically named layers in the
                 # panel would be indistinguishable. So is the matrix, for the
@@ -5338,6 +5445,11 @@ class EquisDialog(QDockWidget):
                 # in the panel or, more damagingly, in the GeoPackage.
                 method = self._method_mode()
                 method_suffix = (", %s" % "+".join(method)) if method else ""
+                # Who answered is in the name, as cached data is: a map of
+                # ChemDuck's numbers must not pass for the plugin's. In the
+                # table name too, so the two are two GeoPackage tables.
+                if answered_by == "chemduck":
+                    method_suffix += ", ChemDuck"
                 name = cached_layer_name(
                     "%s - %s (%s%s%s%s%s)" % (
                         facility.get("name", "EQuIS"), analyte["chemical"],

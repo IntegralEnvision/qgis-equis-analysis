@@ -1,0 +1,193 @@
+"""ChemDuck answering the panel's hot path: an experimental backend.
+
+With the switch on (settings.load_chemduck_mode() == "backend": the panel's
+Chemistry box, or EQUIS_CHEMDUCK=backend in QGIS's environment) the panel's
+`_analysis` is a ChemBackend over the store and the ChemDuck shadow
+(chem.Chem). The questions a click asks of the chemistry are ChemDuck's:
+
+    aggregate      a map: aggregate_points, one point per location by the
+                   plugin's own rule across a location's points (below)
+    count_for      the footer: point_counts
+    series         a location's time series: point_series
+    series_many    sparklines and the roll: point_series, one call for all
+
+Everything else is the store's, unchanged: the pickers' lists, locations
+and their geometry, report columns, export, the Analysis tab's pivots
+(`thread_view`), the unit and fraction guards. Those are lists and
+plumbing, or the plan's later phases (4: the Analysis tab), not the
+click-time chemistry rules.
+
+WHERE CHEMDUCK CAN'T BE ASKED, THE STORE ANSWERS, AND SAYS SO. Excluded
+non-detects (the plan's decision 1), an analytic-method filter (ChemDuck has
+none; it keeps method classes apart), detected-only, and anything ChemDuck
+refuses (a variable in two units, a unit contradicting its matrix) go to the
+store, and `notes` records the question and why. The panel reads `notes`
+after each build, so a layer is never ChemDuck's by assumption.
+
+A LOCATION WITH SEVERAL POINTS. ChemDuck answers per measurement point -
+depths, positions and method classes apart (its rules D1, D3) - and how a
+map shows a location with several is the plan's decision 2, not taken.
+Until it is, the backend takes the point the plugin's own rule would:
+the highest with detections first under maximum, the most recent date
+under most recent (chem_parity.best, the rule the parity test reads the
+plugin by). The layer's count is the samples behind every point.
+
+WHAT DIFFERS FROM THE STORE, BY DESIGN: everything tools/test_chemduck_
+parity.py lists as intended - QC samples and non-reportable results left
+out, a sample's re-runs and one day's samples ranked, the limit chain,
+units converted at load. That is the point of the switch: these are
+ChemDuck's answers.
+
+A ChemDuck layer carries no report columns yet: a ChemDuck point is not one
+of the store's rows, so `fields` is empty, and the layer's report columns
+are blank. Phase 2 of the plan.
+
+Imports no QGIS, like store.py and chem.py.
+"""
+from . import report_data as rd
+from .chem_parity import best
+
+CHEMDUCK = "chemduck"
+STORE = "store"
+
+
+def _unsupported(non_detect, method=None, detected_only=False, fraction=None):
+    """Why ChemDuck can't be asked this, or None."""
+    if non_detect not in ("half", "full"):
+        return "excluded non-detects have no ChemDuck form yet (the plan's decision 1)"
+    if method:
+        return ("an analytic-method filter: ChemDuck has none, it keeps method "
+                "classes apart")
+    if detected_only:
+        return "detected-only has no ChemDuck form"
+    if len([f for f in (fraction or ()) if str(f or "").strip()]) > 1:
+        return "several fractions: ChemDuck is asked for one at a time"
+    return None
+
+
+class ChemBackend(object):
+    """The store, with its hot-path chemistry answered by ChemDuck."""
+
+    def __init__(self, store, chem):
+        self.store = store
+        self.chem = chem
+        # (question, who answered, why) for each hot-path call, newest
+        # last; the panel reads and clears it.
+        self.notes = []
+
+    def __getattr__(self, name):
+        # Only for what this class doesn't define: the pickers, locations,
+        # report fields, export, thread_view, set_row_scope, ...
+        return getattr(self.store, name)
+
+    def _note(self, question, who, why=""):
+        # Bounded: the footer asks on every click, and only a build reads.
+        self.notes = self.notes[-49:] + [(question, who, why)]
+
+    def _refused(self, exc):
+        # DuckDB's error() raises an InvalidInputException; a macro's own
+        # refusal says why in its first line.
+        return "ChemDuck refused: %s" % str(exc).splitlines()[0][:200]
+
+    # ---------------------------------------------------------------- map
+
+    def aggregate(self, chemical, cas_rn=None, how=rd.MOST_RECENT, detected_only=False,
+                  non_detect=rd.ND_HALF, matrix=rd.ALL_MATRICES, fraction=rd.ANY_FRACTION,
+                  method=rd.ALL_METHODS, fields=False):
+        question = "map of %s" % chemical
+        why = _unsupported(non_detect, method, detected_only, fraction)
+        if how not in (rd.MOST_RECENT, rd.MAXIMUM):
+            why = why or "not an aggregate"
+        if why:
+            self._note(question, STORE, why)
+            return self.store.aggregate(chemical, cas_rn, how, detected_only, non_detect,
+                                        matrix, fraction, method, fields)
+        try:
+            grouped = self.chem.by_location(chemical, how=how, non_detect=non_detect,
+                                            matrix=matrix, fraction=fraction)
+        except Exception as exc:               # noqa: BLE001 - said, then the store
+            self._note(question, STORE, self._refused(exc))
+            return self.store.aggregate(chemical, cas_rn, how, detected_only, non_detect,
+                                        matrix, fraction, method, fields)
+        summary = {}
+        for location, points in grouped.items():
+            if not location:
+                continue
+            chosen = best(points, how)[0]
+            summary[location] = {
+                "location": location,
+                "value": chosen["value"],
+                "unit": chosen["unit"],
+                "date": chosen["date"],
+                "detect": chosen["detect"],
+                "at_limit": chosen["at_limit"],
+                # The samples behind the location's points, and their
+                # detections: ChemDuck's n_events counts each sample once.
+                "count": sum(int(p.get("n_events") or 0) for p in points),
+                "detect_count": sum(int(p.get("n_detects") or 0) for p in points),
+                # Provenance, for a reader of the summary; the layer builder
+                # reads only the keys above.
+                "sample_id": chosen.get("sample_id"),
+                "method_code": chosen.get("method_code"),
+                "method_class": chosen.get("method_class"),
+                "selected_by": chosen.get("selected_by"),
+                "n_points": len(points),
+            }
+            if fields:
+                summary[location]["fields"] = None
+        self._note(question, CHEMDUCK)
+        return summary
+
+    # ------------------------------------------------------------- footer
+
+    def count_for(self, chemical, cas_rn=None, detected_only=False, non_detect=rd.ND_HALF,
+                  matrix=rd.ALL_MATRICES, fraction=rd.ANY_FRACTION, method=rd.ALL_METHODS):
+        question = "count of %s" % chemical
+        why = _unsupported(non_detect, method, detected_only, fraction)
+        if why:
+            self._note(question, STORE, why)
+            return self.store.count_for(chemical, cas_rn, detected_only, non_detect,
+                                        matrix, fraction, method)
+        try:
+            answer = self.chem.counts(chemical, matrix=matrix, fraction=fraction)
+        except Exception as exc:               # noqa: BLE001 - said, then the store
+            self._note(question, STORE, self._refused(exc))
+            return self.store.count_for(chemical, cas_rn, detected_only, non_detect,
+                                        matrix, fraction, method)
+        self._note(question, CHEMDUCK)
+        return answer
+
+    # -------------------------------------------------------------- series
+
+    def series(self, location, chemical, cas_rn=None, non_detect=rd.ND_HALF,
+               matrix=rd.ALL_MATRICES, fraction=rd.ANY_FRACTION, method=rd.ALL_METHODS):
+        return self.series_many([location], chemical, cas_rn, non_detect, matrix,
+                                fraction, method).get(str(location), [])
+
+    def series_many(self, locations, chemical, cas_rn=None, non_detect=rd.ND_HALF,
+                    matrix=rd.ALL_MATRICES, fraction=rd.ANY_FRACTION, method=rd.ALL_METHODS):
+        question = "series of %s" % chemical
+        why = _unsupported(non_detect, method, fraction=fraction)
+        if why:
+            self._note(question, STORE, why)
+            return self.store.series_many(locations, chemical, cas_rn, non_detect, matrix,
+                                          fraction, method)
+        if locations is not None and not list(locations):
+            return {}
+        try:
+            answer = self.chem.series(None if locations is None else list(locations),
+                                      chemical, non_detect=non_detect, matrix=matrix,
+                                      fraction=fraction)
+        except Exception as exc:               # noqa: BLE001 - said, then the store
+            self._note(question, STORE, self._refused(exc))
+            return self.store.series_many(locations, chemical, cas_rn, non_detect, matrix,
+                                          fraction, method)
+        self._note(question, CHEMDUCK)
+        return answer
+
+    # ---------------------------------------------------------- reporting
+
+    def take_notes(self):
+        """The notes since the last call, and clear them."""
+        notes, self.notes = self.notes, []
+        return notes

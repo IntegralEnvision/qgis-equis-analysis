@@ -362,23 +362,63 @@ def save_read_only(read_only):
 
 
 CHEMDUCK_SHADOW = "chemduck_shadow"
+CHEMDUCK_MODE = "chemduck_mode"
+CHEMDUCK_ENV = "EQUIS_CHEMDUCK"
+# What answers the panel's chemistry (docs/chemduck-adoption-plan.md):
+#   off      the plugin's own rules (ReportStore), as always
+#   shadow   the same, with ChemDuck loaded beside it and each map's two
+#            answers logged to the "EQuIS ChemDuck" tab (phase 1)
+#   backend  ChemDuck answers the hot path - maps, footer counts, time
+#            series, sparklines - where it can be asked (chem_backend.py)
+CHEMDUCK_MODES = ("off", "shadow", "backend")
+
+
+def chemduck_mode_from_env():
+    """The mode EQUIS_CHEMDUCK names, or None when unset or unknown.
+
+    The command-line switch: `set EQUIS_CHEMDUCK=backend` before starting
+    QGIS (or `EQUIS_CHEMDUCK=backend qgis`). It wins over the saved choice
+    for that session and is not saved, so a trial leaves the profile as it
+    was; the panel's Chemistry box shows it and is disabled meanwhile.
+    "1" and "on" mean backend.
+    """
+    value = (os.environ.get(CHEMDUCK_ENV) or "").strip().lower()
+    if value in ("1", "on", "true", "yes"):
+        return "backend"
+    return value if value in CHEMDUCK_MODES else None
+
+
+def load_chemduck_mode():
+    """The chemistry mode: the environment's, else the saved one, else
+    "shadow" where the older debug switch (chemduck_shadow) is set, else
+    "off"."""
+    from_env = chemduck_mode_from_env()
+    if from_env:
+        return from_env
+    settings = QSettings()
+    settings.beginGroup(GROUP)
+    saved = str(settings.value(CHEMDUCK_MODE, "", type=str) or "").strip().lower()
+    legacy = settings.value(CHEMDUCK_SHADOW, False, type=bool)
+    settings.endGroup()
+    if saved in CHEMDUCK_MODES:
+        return saved
+    return "shadow" if legacy else "off"
+
+
+def save_chemduck_mode(mode):
+    if mode not in CHEMDUCK_MODES:
+        raise ValueError("chemistry mode %r is not one of %s" % (mode, CHEMDUCK_MODES))
+    settings = QSettings()
+    settings.beginGroup(GROUP)
+    settings.setValue(CHEMDUCK_MODE, mode)
+    settings.endGroup()
 
 
 def load_chemduck_shadow():
-    """Whether to run ChemDuck beside the store and log each map's two
-    answers (docs/chemduck-adoption-plan.md, phase 1). Off unless set.
-
-    A debug setting with no widget: nothing a user sees changes, and it
-    costs a background load of every row. Set it from the Python console,
-    `QSettings().setValue("equis_loader/chemduck_shadow", True)`, or in
-    Settings > Options > Advanced; it applies from the next source opened.
-    The log is the "EQuIS ChemDuck" tab.
-    """
-    settings = QSettings()
-    settings.beginGroup(GROUP)
-    value = settings.value(CHEMDUCK_SHADOW, False, type=bool)
-    settings.endGroup()
-    return bool(value)
+    """Whether ChemDuck is loaded beside the store: in "shadow" mode, to log
+    each map's two answers, and in "backend", to answer. Off unless chosen
+    (load_chemduck_mode). The log is the "EQuIS ChemDuck" tab."""
+    return load_chemduck_mode() != "off"
 
 
 def geopackage_for_project(project_path, facility_name=""):
