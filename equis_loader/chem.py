@@ -28,6 +28,38 @@ from . import report_data as rd
 SCHEMA = "chemduck"
 # DuckDB threads for the shadow's own database (Chem.shadow).
 SHADOW_THREADS = 4
+# Where a publish puts ChemDuck's sidecars, beside manifest.json: the
+# pipeline's chemduck_sidecars.FOLDER, and integrator's.
+SIDECARS = "chemduck"
+
+
+class SidecarsStale(Exception):
+    """A source's sidecars describe another manifest than the one it has."""
+
+
+class _Absent(Exception):
+    """A file the source does not have (no sidecars published there)."""
+
+
+def _read_bytes(url, timeout=60):
+    """A source file's bytes: a local path, or an http URL. Raises _Absent
+    for one that isn't there, and anything else as it comes (a refused
+    token, a network down) - those are errors, not 'no sidecars'."""
+    if "://" not in url:
+        try:
+            with open(url, "rb") as handle:
+                return handle.read()
+        except FileNotFoundError:
+            raise _Absent(url)
+    import urllib.error
+    import urllib.request
+    try:
+        with urllib.request.urlopen(url, timeout=timeout) as response:
+            return response.read()
+    except urllib.error.HTTPError as exc:
+        if exc.code == 404:
+            raise _Absent(url)
+        raise
 
 # The plugin codes fractions as EQuIS does; ChemDuck's ARII mapping names
 # them ('T' -> 'Total', 'D' -> 'Dissolved') and passes other codes through,
@@ -141,6 +173,107 @@ class Chem(object):
         return chem
 
     @classmethod
+    def shadow_published(cls, source, manifest, path, folder, threads=SHADOW_THREADS,
+                         timeout=60):
+        """ChemDuck over a published parquet source through its sidecars, or
+        None when the source has none. The pipeline's `chemduck_sidecars`
+        step and integrator's `release --arii` publish them in `chemduck/`
+        beside manifest.json (the plan's phase 6).
+
+        source: the address the store opened (a local folder, or an http URL
+        whose query is the SAS token); manifest: the manifest the store
+        parsed. The sidecars - a few tables derived from the partitions, and
+        the SQL that made them - are copied into `folder`; the results stay
+        where they are, read from the partitions by `results` as a view. On
+        the first facility that is about a second against minutes for
+        load_source's copy of every row (adoption plan, open item 2).
+
+        Raises SidecarsStale, opening nothing, when the sidecars were built
+        from another manifest than this one: sidecars.json records its
+        SHA-256, and a new publish of the data with the sidecar step failed
+        leaves the old ones in place (pipeline/README.md). Over the old
+        sidecars the new partitions' results would join samples that are
+        not there, and answer with no error.
+
+        The partition URLs, token and all, become part of the `results`
+        view in the shadow's database file: a local file, removed on close,
+        holding the token this person's settings already hold.
+        """
+        import hashlib
+        import json
+        import shutil
+        from .store import ReportStore, duckdb_module
+        duckdb = duckdb_module()
+        base = ReportStore._local_path(source) or source
+
+        def where(relative):
+            return ReportStore._join(base, relative)
+
+        try:
+            sidecars = json.loads(_read_bytes(where(SIDECARS + "/sidecars.json"), timeout))
+        except _Absent:
+            return None
+        raw = _read_bytes(where(ReportStore.MANIFEST_NAME), timeout)
+        if json.loads(raw) != manifest:
+            raise SidecarsStale("the manifest changed since the source opened; reopen it")
+        recorded = (sidecars.get("source_manifest") or {}).get("sha256")
+        if recorded != "sha256:" + hashlib.sha256(raw).hexdigest():
+            raise SidecarsStale(
+                "the sidecars were built from another manifest (%s), not the one this "
+                "source publishes now: its sidecar step failed or has not run since"
+                % ("release %s" % sidecars["release"] if sidecars.get("release")
+                   else "published %s" % (sidecars.get("generated") or "at an unknown time")))
+
+        if os.path.isdir(folder):
+            shutil.rmtree(folder)
+        os.makedirs(os.path.join(folder, "sql"))
+        try:
+            source_sql = json.loads(_read_bytes(where(SIDECARS + "/sql/SOURCE.json"), timeout))
+            wanted = ([info["file"] for info in sidecars["tables"].values()]
+                      + ["aggregation_rules.parquet", sidecars["results_view"]["file"],
+                         "sql/SOURCE.json"]
+                      + ["sql/" + name for name in source_sql["files"]])
+            for relative in wanted:
+                data = _read_bytes(where(SIDECARS + "/" + relative), timeout)
+                with open(os.path.join(folder, *relative.split("/")), "wb") as handle:
+                    handle.write(data)
+            with open(os.path.join(folder, "sidecars.json"), "w", encoding="utf-8") as handle:
+                json.dump(sidecars, handle)
+            # In the order the results view was generated for, which is the
+            # manifest's; the sidecars name it, so take it from them.
+            partitions = [where(part["path"])
+                          for part in sidecars["source_manifest"]["partitions"]]
+            if os.path.exists(path):
+                os.unlink(path)
+            con = duckdb.connect(path)
+        except BaseException:
+            shutil.rmtree(folder, ignore_errors=True)
+            raise
+        try:
+            if threads:
+                con.execute("SET threads = %d" % int(threads))
+            if "://" in base:
+                # Every call reads the partitions' footers over http; with
+                # the HEAD answers cached a warm call sends no request
+                # (ReportStore.from_manifest). Safe for the same reason it is
+                # there: a new publish replaces the shadow (dialog's reopen).
+                con.execute("SET enable_http_metadata_cache = true")
+            chem = cls.open_published(con, folder, partitions)
+        except BaseException:
+            con.close()
+            for name in (path, path + ".wal"):
+                try:
+                    os.unlink(name)
+                except OSError:
+                    pass
+            shutil.rmtree(folder, ignore_errors=True)
+            raise
+        chem.path = path
+        chem.folder = folder
+        chem.sidecars = sidecars
+        return chem
+
+    @classmethod
     def _load_table(cls, con, table):
         # Through a CSV and not a relation: a relation is read through its
         # Arrow stream, which needs pyarrow, and the plugin's own DuckDB
@@ -174,6 +307,10 @@ class Chem(object):
                     os.unlink(name)
                 except OSError:
                     pass
+        folder = getattr(self, "folder", None)
+        if folder:
+            import shutil
+            shutil.rmtree(folder, ignore_errors=True)
 
     def set_row_scope(self, start=None, end=None, sample_types=None,
                       depth=None, units=None):

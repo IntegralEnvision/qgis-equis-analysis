@@ -2829,24 +2829,25 @@ class EquisDialog(QDockWidget):
     def _start_chem_shadow(self, source):
         """Load ChemDuck beside the store, if the debug setting asks.
 
-        `source` is the report's ReportTable, or a parquet source's URL, of
-        which only a local one is read: ChemDuck loads a manifest from a
-        path, and an http source waits on phase 6, when the pipeline
-        publishes ChemDuck's sidecars beside the manifest. Said in the log,
-        so an empty log is never mistaken for agreement.
+        `source` is the report's ReportTable, or a parquet source's URL.
+        A parquet source opens through the sidecars published beside its
+        manifest, when it has current ones (phase 6: the pipeline's
+        chemduck_sidecars step, integrator's release --arii); without them a
+        local source is loaded row by row and an http one is not opened
+        (ChemShadowTask). Which happened is said in the log, so an empty log
+        is never mistaken for agreement.
         """
         if not settings_store.load_chemduck_shadow():
             return
         if isinstance(source, str):
-            folder = ReportStore._local_path(source) or (
-                source if "://" not in source else None)
-            if folder is None:
-                self._log_shadow("not opened: %s is not local. ChemDuck reads a local "
-                                 "manifest; an http source waits on the pipeline "
-                                 "publishing its sidecars (the plan's phase 6)."
-                                 % parquet_address.split(source)[0])
+            store = self._report_store
+            manifest = getattr(store, "manifest", None) if store is not None else None
+            if not manifest:
+                self._log_shadow("not opened: the source's manifest is not in hand")
                 return
-            source = os.path.join(folder, ReportStore.MANIFEST_NAME)
+            # The manifest the store parsed: the sidecars must describe it,
+            # not whatever is published by the time the task reads them.
+            source = (source, manifest)
         # A file per load: a load superseded while it runs still holds its
         # file (Windows won't delete an open one), and closes it - removing
         # it - when it lands. One shared name would refuse the new load, or
@@ -2875,8 +2876,18 @@ class EquisDialog(QDockWidget):
         self._chem_shadow_task = None
         self._chem_shadow = task.chem
         self._apply_row_scope()
-        self._log_shadow("ready: %s results loaded in %.1f s."
-                         % (format(task.rows or 0, ",d"), task.seconds or 0))
+        sidecars = getattr(task.chem, "sidecars", None)
+        if task.how == "sidecars" and sidecars:
+            self._log_shadow(
+                "ready from the published sidecars (ChemDuck %s, %s): %s results read from "
+                "the partitions where they are, opened in %.1f s."
+                % ((sidecars.get("chemduck") or {}).get("version", "?"),
+                   "release %s" % sidecars["release"] if sidecars.get("release")
+                   else "published %s" % (sidecars.get("generated") or "?"),
+                   format(task.rows or 0, ",d"), task.seconds or 0))
+        else:
+            self._log_shadow("ready: %s results loaded in %.1f s."
+                             % (format(task.rows or 0, ",d"), task.seconds or 0))
 
     def _on_chem_shadow_failed(self, task, message):
         if task is not self._chem_shadow_task:
@@ -2897,6 +2908,9 @@ class EquisDialog(QDockWidget):
             self._chem_shadow = None
 
     def _log_shadow(self, text):
+        # Redacted, every line: the shadow now reads a signed source itself,
+        # and DuckDB's or urllib's errors name the URL they failed on.
+        text = parquet_address.redact(text)
         QgsMessageLog.logMessage(
             text if text.startswith("ChemDuck shadow") else "ChemDuck shadow: " + text,
             "EQuIS ChemDuck", Qgis.Info)

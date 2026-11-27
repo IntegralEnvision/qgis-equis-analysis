@@ -25,6 +25,7 @@ python tools/test_histogram_sql.py     # the histogram's real SQL vs the store: 
 python tools/test_chemduck_parity.py   # the adapter's map vs the store's: every difference listed (fixture)
 python tools/test_chemduck_parity.py --manifest <dir>/manifest.json --pub <dir>   # the same on a real facility
 python tools/test_chem_shadow.py       # the panel's ChemDuck shadow: built from a report, compared, logged
+python tools/test_chem_sidecars.py     # the shadow through published sidecars, over http and local; stale ones refused
 python tools/analysis_preview.py       # the Analysis tab in a browser, no QGIS (--shots DIR: screenshots)
 python tools/profile_chemduck.py --manifest <facility>/manifest.json --out <dir>   # ChemDuck through a plugin session: the open per statement, every click, DuckDB profiles (--explain); run under plain Python AND QGIS
 
