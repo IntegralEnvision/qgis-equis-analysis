@@ -345,7 +345,9 @@ CREATE OR REPLACE MACRO display_factor_check(caller, p_display_factor) AS (
 -- (see aggregate_points for each filter), matrix being the class's under
 -- p_matrices; caller prefixes its refusals. units_by_variable: per variable
 -- (vkey) of the rows p_rows names (query_table: the caller's CTE, with
--- vkey, units, unit_source, um and the variable's columns), its number of
+-- vkey, units, unit_source, um, w_rows and the variable's columns; w_rows
+-- is how many results a row stands for - 1 for a result, a group's count
+-- in point_catalog), its number of
 -- units and whether they conflict - refused, naming the variable, its
 -- units and their counts, unless um is 'flag'.
 
@@ -356,11 +358,16 @@ CREATE OR REPLACE MACRO display_factor_check(caller, p_display_factor) AS (
 -- its replicate set, and the variable's refusal for mixed supports or
 -- fractions is units_by_variable's (sm, fm). A laboratory replicate coded
 -- on its primary's sample is an aliquot, not a field result: never read.
-CREATE OR REPLACE MACRO point_scope(p_caller, p_analyte, p_matrix, p_fraction, p_start_date,
-                                    p_end_date, p_sample_types, p_method_class, p_matrices,
-                                    p_locations, p_reportable_only, p_depth_min, p_depth_max,
-                                    p_depth_units, p_reported_units, p_supports,
-                                    p_particle_fractions) AS TABLE
+--
+-- point_scope_rows is point_scope for every analyte at once, with each
+-- row's sample type: point_catalog_rows counts it once for all of them.
+-- point_scope is it narrowed to one analyte, so the two cannot disagree on
+-- any other filter.
+CREATE OR REPLACE MACRO point_scope_rows(p_caller, p_matrix, p_fraction, p_start_date,
+                                         p_end_date, p_sample_types, p_method_class, p_matrices,
+                                         p_locations, p_reportable_only, p_depth_min, p_depth_max,
+                                         p_depth_units, p_reported_units, p_supports,
+                                         p_particle_fractions) AS TABLE
 WITH absent AS (SELECT absent_columns() AS cols, has_preparations() AS has_prep),
 scope AS (
     SELECT
@@ -398,6 +405,7 @@ SELECT
     support_code(v.support) AS support,
     ra.particle_size_fraction,
     v.replicate_set,
+    v.sample_type,
     -- the variable's refusals of mixed supports and fractions apply when
     -- the call names none (units_by_variable)
     p_supports IS NULL AS sm,
@@ -405,8 +413,7 @@ SELECT
 FROM v_results_core v
 LEFT JOIN result_aliquots ra ON ra.result_id = v.result_id
 CROSS JOIN scope
-WHERE v.analyte = p_analyte
-  AND in_support_scope(v.support, p_supports)
+WHERE in_support_scope(v.support, p_supports)
   AND (NOT scope.has_prep OR in_particle_scope(ra.particle_size_fraction, p_particle_fractions))
   AND ra.lab_replicate_on_primary IS NOT TRUE
   AND (p_matrix IS NULL OR v.matrix = p_matrix OR v.matrix IS NULL)
@@ -443,6 +450,18 @@ WHERE v.analyte = p_analyte
                                         p_depth_min, p_depth_max, p_depth_units))
   AND (scope.no_units OR units_in_scope(p_caller, v.reported_units, p_reported_units));
 
+CREATE OR REPLACE MACRO point_scope(p_caller, p_analyte, p_matrix, p_fraction, p_start_date,
+                                    p_end_date, p_sample_types, p_method_class, p_matrices,
+                                    p_locations, p_reportable_only, p_depth_min, p_depth_max,
+                                    p_depth_units, p_reported_units, p_supports,
+                                    p_particle_fractions) AS TABLE
+SELECT * EXCLUDE (sample_type)
+FROM point_scope_rows(p_caller, p_matrix, p_fraction, p_start_date, p_end_date, p_sample_types,
+                      p_method_class, p_matrices, p_locations, p_reportable_only, p_depth_min,
+                      p_depth_max, p_depth_units, p_reported_units, p_supports,
+                      p_particle_fractions)
+WHERE analyte = p_analyte;
+
 -- The same pass refuses a variable whose rows are of more than one support
 -- when the call named none (sm), or on more than one known particle-size
 -- fraction when it named none (fm): a map or a box plot would put a DU mean
@@ -452,7 +471,7 @@ WHERE v.analyte = p_analyte
 -- min/max, and the message names the three it knows.
 CREATE OR REPLACE MACRO units_by_variable(p_rows, p_caller) AS TABLE
 WITH unit_counts AS (
-    SELECT vkey, units, count(*) AS n,
+    SELECT vkey, units, sum(w_rows) AS n,
            bool_or(unit_source = 'contradicts_matrix') AS contra,
            any_value(analyte || ' in ' || matrix || COALESCE(', ' || fraction, '')
                      || COALESCE(', ' || meas_basis, '')
@@ -460,9 +479,9 @@ WITH unit_counts AS (
            any_value(um) AS um,
            bool_or(sm) AS sm, bool_or(fm) AS fm,
            min(support) AS sup_min, max(support) AS sup_max,
-           count(*) FILTER (WHERE support = 'discrete') AS n_discrete,
-           count(*) FILTER (WHERE support = 'composite') AS n_composite,
-           count(*) FILTER (WHERE support = 'ism') AS n_ism,
+           COALESCE(sum(w_rows) FILTER (WHERE support = 'discrete'), 0) AS n_discrete,
+           COALESCE(sum(w_rows) FILTER (WHERE support = 'composite'), 0) AS n_composite,
+           COALESCE(sum(w_rows) FILTER (WHERE support = 'ism'), 0) AS n_ism,
            min(particle_size_fraction) AS psf_min, max(particle_size_fraction) AS psf_max
     FROM query_table(p_rows) GROUP BY vkey, units
 )
@@ -660,6 +679,7 @@ filtered AS (
 withpol AS (
     SELECT
         f.*,
+        1 AS w_rows,
         hash(f.location_id, f.matrix, f.top_depth, f.bottom_depth, f.position,
              f.fraction, f.meas_basis, f.analyte, f.method_class,
              CASE WHEN p_each_sample THEN f.sample_id END,
@@ -1526,7 +1546,7 @@ WITH params AS (
 pc_rows AS (
     SELECT s.location_id, s.sample_id, s.analyte, s.matrix, s.fraction, s.meas_basis,
            s.method_class, s.units, s.unit_source, params.um,
-           s.support, s.particle_size_fraction, s.sm, s.fm,
+           s.support, s.particle_size_fraction, s.sm, s.fm, 1 AS w_rows,
            hash(s.location_id, s.matrix, s.top_depth, s.bottom_depth, s.position,
                 s.fraction, s.meas_basis, s.analyte, s.method_class,
                 NULL, s.support, s.particle_size_fraction) AS ikey,
@@ -1543,3 +1563,134 @@ SELECT count(DISTINCT r.location_id) AS n_locations,
        count(*) AS n_results
 FROM pc_rows r
 JOIN units_by_variable('pc_rows', 'point_counts') u USING (vkey);
+
+-- ============================================================================
+-- point_catalog - point_counts' rows, counted once for every analyte
+-- ============================================================================
+-- A panel asks "how many locations and results would map" on every click,
+-- and fills its pickers from the same rows. point_counts answers it by
+-- reading the analyte's results each time: 0.2-0.3 s at Facility A, of
+-- which reading the results is 0.024 s and the rest the call's own plan and
+-- joins (2026-11-27). The answer is a count, and counts at a fine enough
+-- grain add up, so they can be read off a table written once.
+--
+-- point_catalog_rows(): point_scope_rows under the widest scope - every
+-- sample type, every reportable flag, no dates, depth, units or locations -
+-- grouped by what point_counts reads to count and to refuse:
+--   analyte, cas_number, matrix, fraction, meas_basis, method_class
+--                                 the variable (vkey), and the CAS a host
+--                                 keys its analytes by
+--   units, unit_source           units_by_variable's refusal (D5)
+--   support, particle_size_fraction   its ISM refusals (sm, fm)
+--   sample_type, reportable      the two scopes a reader may still narrow
+--   location_id                  so n_locations is a count of rows, exact
+--   n_results                    results in the group
+-- The location makes a distinct count exact: counting locations across
+-- groups is a distinct count of rows, never a sum. Grouped by sample date,
+-- the table would be nearly every result (4.36M groups of 6.04M rows at
+-- Facility A), so dates, depths, units, locations and method classes are
+-- not in it: a call with any of those reads the results (point_counts).
+--
+-- publish writes it as the point_catalog sidecar. A database converted by
+-- the loader makes it with
+--   CREATE OR REPLACE TABLE point_catalog AS FROM point_catalog_rows();
+-- and must make it again after every load: it is a snapshot, never a view
+-- (a view would read every result on each call, which is what it saves).
+-- No bootstrap creates it empty: an empty catalog would count zero. The
+-- readers name it by p_catalog (query_table), not in their FROM, because
+-- DuckDB binds a macro's tables when it is created: a folder published
+-- without one still installs, and a reader called there is a catalog error
+-- ("Table with name point_catalog does not exist"), never a count of zero.
+-- A host that keeps the table under another name passes p_catalog.
+CREATE OR REPLACE MACRO point_catalog_rows() AS TABLE
+SELECT analyte, cas_number, matrix, fraction, meas_basis, method_class,
+       units, unit_source, support, particle_size_fraction, sample_type, reportable,
+       location_id, count(*) AS n_results
+FROM point_scope_rows('point_catalog', NULL, NULL, NULL, NULL, CAST([] AS VARCHAR[]),
+                      NULL, NULL, NULL, FALSE, NULL, NULL, NULL, NULL, NULL, NULL)
+GROUP BY ALL;
+
+-- point_catalog_counts - point_counts' n_locations and n_results, read off
+-- point_catalog. The same answer as point_counts for the parameters it
+-- takes, and only those: a call naming any other (dates, depths, units,
+-- several matrices, locations, a method class) is a binder error, never a
+-- filter quietly dropped. Its row filters are point_scope's lines for these
+-- parameters, restated over the catalog's columns; tests/test_domain_rules
+-- (point_catalog) holds the two to the same counts under every scope, so a
+-- change to one that the other misses fails there. The unit refusal is
+-- units_by_variable's own, each group weighing its n_results, so a refusal
+-- names the same units and counts as point_counts'.
+--   n_locations  locations with a point
+--   n_results    the results those are drawn from
+-- (point_counts' n_points and n_samples need depths and samples, which the
+-- catalog does not keep.)
+CREATE OR REPLACE MACRO point_catalog_counts(
+    p_analyte,
+    p_matrix := NULL,
+    p_fraction := NULL,
+    p_sample_types := NULL,
+    p_reportable_only := NULL,
+    p_units := 'refuse',
+    p_catalog := 'point_catalog'
+) AS TABLE
+WITH params AS (
+    SELECT CASE
+        WHEN p_units IN ('refuse', 'flag') THEN p_units
+        ELSE error('point_counts: p_units must be refuse or flag, not '
+                   || COALESCE(CAST(p_units AS VARCHAR), 'NULL')
+                   || ' (units are converted at load, never here)')
+    END AS um,
+    reportable_scope(p_reportable_only) AS rep_only,
+    list_contains(absent_columns(), 'fraction') AS no_fraction,
+    list_contains(absent_columns(), 'sample_type') AS no_sample_type,
+    list_contains(absent_columns(), 'matrix') AS no_matrix,
+    has_preparations() AS has_prep
+),
+pcc_rows AS (
+    SELECT c.location_id, c.analyte, c.matrix, c.fraction, c.meas_basis, c.method_class,
+           c.units, c.unit_source, params.um, c.support, c.particle_size_fraction,
+           c.n_results AS w_rows,
+           -- point_scope's sm and fm with no p_supports or
+           -- p_particle_fractions: the catalog takes neither
+           TRUE AS sm, params.has_prep AS fm,
+           hash(c.matrix, c.fraction, c.meas_basis, c.analyte, c.method_class) AS vkey
+    FROM query_table(p_catalog) c
+    CROSS JOIN params
+    WHERE c.analyte = p_analyte
+      AND (p_matrix IS NULL OR c.matrix = p_matrix OR c.matrix IS NULL)
+      AND (p_matrix IS NULL OR c.matrix IS NOT NULL OR params.no_matrix)
+      AND (p_fraction IS NULL OR c.fraction = p_fraction OR c.fraction IS NULL)
+      AND (p_fraction IS NULL OR c.fraction IS NOT NULL OR params.no_fraction)
+      AND (params.no_sample_type
+           OR CASE WHEN p_sample_types IS NULL THEN in_normal_scope(c.sample_type)
+                   ELSE in_sample_scope(c.sample_type, p_sample_types) END)
+      AND (c.reportable IS DISTINCT FROM FALSE OR NOT params.rep_only)
+)
+SELECT count(DISTINCT r.location_id) AS n_locations,
+       COALESCE(sum(r.w_rows), 0) AS n_results
+FROM pcc_rows r
+JOIN units_by_variable('pcc_rows', 'point_counts') u USING (vkey);
+
+-- point_catalog_summary - The catalog per (analyte, CAS, matrix, fraction)
+-- under the two scopes it keeps: what a host's pickers offer, and how many
+-- results and locations each choice holds. A list, not a count of what one
+-- call would map: no unit refusal, and a NULL matrix or fraction is its own
+-- row (point_catalog_counts says how such rows join a call).
+CREATE OR REPLACE MACRO point_catalog_summary(
+    p_sample_types := NULL,
+    p_reportable_only := NULL,
+    p_catalog := 'point_catalog'
+) AS TABLE
+WITH params AS (
+    SELECT reportable_scope(p_reportable_only) AS rep_only,
+           list_contains(absent_columns(), 'sample_type') AS no_sample_type
+)
+SELECT c.analyte, c.cas_number, c.matrix, c.fraction,
+       sum(c.n_results) AS n_results, count(DISTINCT c.location_id) AS n_locations
+FROM query_table(p_catalog) c
+CROSS JOIN params
+WHERE (params.no_sample_type
+       OR CASE WHEN p_sample_types IS NULL THEN in_normal_scope(c.sample_type)
+               ELSE in_sample_scope(c.sample_type, p_sample_types) END)
+  AND (c.reportable IS DISTINCT FROM FALSE OR NOT params.rep_only)
+GROUP BY ALL;

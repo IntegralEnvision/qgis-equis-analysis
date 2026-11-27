@@ -2966,10 +2966,22 @@ class EquisDialog(QDockWidget):
         else:
             self._log_shadow("ready: %s results loaded in %.1f s."
                              % (format(task.rows or 0, ",d"), task.seconds or 0))
+        # Whether the footer and the pickers can read the published counts
+        # (point_catalog) or must ask every result live: the difference
+        # between 0.04 s and 0.4 s a click at Facility A, so it is said.
+        catalog = bool(getattr(task.chem, "catalog", False))
+        self._log_shadow("counts table (point_catalog): %s"
+                         % ("yes - the footer and the pickers read them where the scope "
+                            "allows" if catalog else
+                            "none - this publish predates them, so every count is live"))
         if settings_store.load_chemduck_mode() == "backend":
             # From now on _analysis is ChemDuck's: re-count what shows it.
             self._set_status("ChemDuck has landed and now answers maps, footer counts and "
-                             "time series (experimental). Layers it builds say 'ChemDuck'.",
+                             "time series (experimental). Layers it builds say 'ChemDuck'. %s"
+                             % ("Counts and lists are read from its counts table."
+                                if catalog else
+                                "This publish has no counts table, so each count reads "
+                                "every result (slower)."),
                              Qgis.MessageLevel.Info)
             if self._analysis is not None:
                 self._on_rows_rescoped("The chemistry")

@@ -620,6 +620,46 @@ raised with ChemDuck.
 >
 > Tests: `tools/test_chem_backend.py` (18 checks) and
 > `tools/test_chem_backend_ui.py` (QGIS, 16 checks, through the panel).
+>
+> *The published counts, 2026-11-27.* Under the switch the footer cost
+> 0.2-0.3 s a click over Azure. Reading the analyte's results was 0.024 s
+> of that; the rest was `point_counts`' own plan and joins. ChemDuck
+> `2b4fbfd` adds `point_catalog`, a sidecar `publish` writes. It holds
+> `point_counts`' rows counted once for every analyte, by variable, unit,
+> support, sample type, reportable flag and location. Location is in the
+> grain so that a location count is a distinct count of rows, never a sum.
+> - **Readers:** `point_catalog_counts` (the footer) and
+>   `point_catalog_summary` (the pickers). ChemDuck's
+>   `test_point_catalog` holds the count equal to `point_counts` in 192
+>   calls, refusals included.
+> - **In the backend:** the footer and the analyte, matrix and fraction
+>   lists read it whenever the row scope is one it keeps: sample types
+>   and none of dates, depth, units or several matrices
+>   (`Chem.catalog_reason`). Otherwise the count is live and the lists
+>   are the store's. The method list stays the store's, since ChemDuck
+>   keeps method classes, not methods.
+> - **Without the table:** a publish older than the catalog has none, and
+>   the log and status line say every count is live. A load builds the
+>   table itself (`Chem.build_catalog`).
+>
+> On Facility A, measured on the integrator release's partitions from
+> local disk with sidecars published by `2b4fbfd`, through
+> `Chem.shadow_published` and `ChemBackend` in QGIS 4.2.3:
+>
+> | Question | Live ChemDuck | Counts table | Store |
+> | --- | --- | --- | --- |
+> | Footer, Iron MWS D | 0.32-0.34 s | 0.013-0.015 s | 0.03 s |
+>
+> - **Counts:** all three gave 138 locations and 56,489 results.
+> - **Lists:** about 1 ms after the first read (0.075 s), the same 150
+>   analytes in MWS as the store, and the same fractions for Iron.
+> - **The table:** 505,946 rows in 763 KB. The publish took 77.8 s
+>   against 79.6 s before the change.
+>
+> `tools/test_chem_backend.py` now has 34 checks: the published count
+> equals the live one in 108 calls, and each scope a count can't be read
+> for is counted live. `tools/test_chem_backend_ui.py` has 17. Integrator's
+> published release has no table until it republishes with this ChemDuck.
 
 - `aggregate` → `aggregate_points`, then `rollup_points` where a location has
   several points. **The panel asks how to roll up** when it must (decision 2);
