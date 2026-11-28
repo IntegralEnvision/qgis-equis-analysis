@@ -624,7 +624,8 @@ raised with ChemDuck.
 > *The published counts, 2026-11-27.* Under the switch the footer cost
 > 0.2-0.3 s a click over Azure. Reading the analyte's results was 0.024 s
 > of that; the rest was `point_counts`' own plan and joins. ChemDuck
-> `2b4fbfd` adds `point_catalog`, a sidecar `publish` writes. It holds
+> #22 (`2b4fbfd`, merged as `964ad32`, vendored here) adds
+> `point_catalog`, a sidecar `publish` writes. It holds
 > `point_counts`' rows counted once for every analyte, by variable, unit,
 > support, sample type, reportable flag and location. Location is in the
 > grain so that a location count is a distinct count of rows, never a sum.

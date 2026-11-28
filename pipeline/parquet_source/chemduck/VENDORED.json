@@ -1,8 +1,8 @@
 {
  "note": "Written by tools/vendor_chemduck.py. Do not edit these files: re-vendor, and tools/test_chemduck_vendor.py checks them.",
  "repository": "https://github.com/IntegralEnvision/chemduck.git",
- "commit": "2b4fbfdc76ff8bcb7769bf0d5e4213df36b7b74c",
- "subject": "point_catalog: point_counts' rows counted once, for a click's count",
+ "commit": "964ad32381d8bd11f3366ea8ab0f3edf001059ac",
+ "subject": "Merge pull request #22 from IntegralEnvision/point-catalog",
  "version": "0.2.0",
  "vendored": "2026-11-27",
  "files": {
