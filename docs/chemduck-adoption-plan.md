@@ -747,6 +747,41 @@ and `test_run_nightly.py` checks the step and its failure stops.
 > ChemDuck now supports 1.5.4, 1.5.5, 2.0.0 and 2.0.1. The sidecar step
 > refuses any other, so integrator caps its DuckDB at the newest of them,
 > and moving the plugin's pin raises integrator's cap.
+>
+> *The plugin's side, for the shadow, 2026-11-27.* With the shadow on, a
+> parquet source opens ChemDuck through the sidecars published beside it
+> (`Chem.shadow_published`). The process:
+> - It copies `sidecars.json`, the sidecar tables, `aggregation_rules`,
+>   the results view and the SQL bundle its `sql/SOURCE.json` lists into
+>   the cache.
+> - `open_consumer` then reads the partitions where they are, over http
+>   with the token, or locally.
+>
+> Two refusals open nothing: sidecars whose recorded SHA-256 isn't the
+> manifest's raw bytes, and a manifest that changed since the store opened.
+> Without sidecars, a local source is loaded row by row as before; an http
+> one is not opened, and the log says so. Every shadow log line is
+> redacted.
+>
+> On integrator's release `draft-2026-11-25` of Facility A (28 partitions,
+> 6,036,457 results, over Azure), in QGIS 4.2.3's Python (DuckDB 1.5.5),
+> 2026-11-27:
+> - **Opening:** the store opened in 1.9 s and ChemDuck through the
+>   sidecars in 16.1 s, including copying the sidecars.
+> - **First count of every result:** 11.3 s, which reads every partition's
+>   footer.
+> - **Iron, dissolved, MWS, most recent:** 138 locations. 70 agree; the
+>   rest differ by listed causes only: method classes 34, same date 34,
+>   points 21. ChemDuck's call took 2.1 s.
+> - **pH, MWS:** refused on both sides (420 results in "NONE" beside 2,839
+>   in SU).
+>
+> `tools/test_chem_sidecars.py` (11 checks: http and local, the same answers
+> as a row-by-row load, the comparison, stale and absent sidecars, a refused
+> fetch, cleanup; the hash check mutation-tested) and
+> `tools/test_chem_shadow_ui.py` (22, through the panel over a local
+> server). Still to do for phase 2: the same open in the store's own
+> session, so ChemDuck can answer for the map rather than shadow it.
 
 ## Decisions to take before phase 2
 

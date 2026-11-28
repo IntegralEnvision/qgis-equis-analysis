@@ -8,7 +8,9 @@ the parts to the fixture under plain Python; this holds the panel's wiring:
   map built through the panel's own button logs a line with the store's
   answer beside ChemDuck's, with every difference a listed one;
 - the row scope set in the panel reaches the shadow;
-- an http source is not opened, says so, and the log carries no token;
+- an http source with published sidecars opens through them, and a map
+  is compared; without sidecars it is not opened, and says so; no log line
+  carries the source's token;
 - a load superseded while it ran is closed, and closing the source
   removes the shadow's file.
 
@@ -196,15 +198,54 @@ try:
     check("closing the source closes the shadow and removes its file",
           panel._chem_shadow is None and not shadow_files(), shadow_files())
 
-    # --- an http source is not opened, and the log holds no token -----------
-    del LOG[:]
+    # --- an http source with published sidecars ---------------------------
+    # The fixture published as the pipeline or integrator publishes it, with
+    # chemduck/ beside the manifest, served with ranges as Azure serves it.
+    import functools
+    import http.server
+    import threading
+    from test_chem_sidecars import Ranged
+    from equis_loader import chem as ch
+    from equis_loader import chemduck as cd
+    served = os.path.join(folder, "served")
+    served_manifest = fx.write(served)
+    ch._quiet(cd.publish, served_manifest, os.path.join(served, ch.SIDECARS),
+              x_col="LONGITUDE", y_col="LATITUDE", quiet=True)
+    server = http.server.ThreadingHTTPServer(
+        ("127.0.0.1", 0), functools.partial(Ranged, directory=served))
+    threading.Thread(target=server.serve_forever, daemon=True).start()
     secret = "sig=NOT-A-REAL-TOKEN"
-    panel._start_chem_shadow("https://example.invalid/container/facility?sp=r&" + secret)
-    said = " ".join(settle())
-    check("an http source is not opened, and the log says why",
-          panel._chem_shadow_task is None and "not opened" in said
-          and "phase 6" in said, said)
-    check("... without the token", secret not in said and "sig=" not in said, said)
+    url = "http://127.0.0.1:%d?sv=1&sp=r&%s" % (server.server_address[1], secret)
+    try:
+        del LOG[:]
+        open_parquet(panel, url)
+        landed = wait_for(lambda: panel._chem_shadow is not None
+                          or panel._chem_shadow_task is None)
+        said = " ".join(settle())
+        check("an http source with sidecars: the shadow opens through them",
+              landed and panel._chem_shadow is not None
+              and "ready from the published sidecars" in said, said[-300:])
+        lines = build(panel, "Arsenic")
+        line = lines[0] if lines else ""
+        check("... and a map built through the panel is compared, every difference listed",
+              " location" in line and "UNEXPLAINED" not in line and "points" in line, line)
+        panel._discard_store()
+        check("closing it removes the copied sidecars and the file",
+              not shadow_files() and not [n for n in os.listdir(CACHE) if "sidecars" in n],
+              os.listdir(CACHE))
+
+        # Without sidecars an http source is not loaded row by row.
+        shutil.rmtree(os.path.join(served, ch.SIDECARS))
+        del LOG[:]
+        open_parquet(panel, url)
+        wait_for(lambda: panel._chem_shadow_task is None)
+        said = " ".join(settle())
+        check("an http source without sidecars is not opened, and the log says why",
+              panel._chem_shadow is None and "no published sidecars" in said, said[-300:])
+        check("... and no line holds the token", secret not in said and "NOT-A-REAL" not in said,
+              said[-200:])
+    finally:
+        server.shutdown()
 finally:
     try:
         panel._discard_store()

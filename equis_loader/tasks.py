@@ -816,9 +816,17 @@ class ChemShadowTask(_BaseTask):
 
     Phase 1 of docs/chemduck-adoption-plan.md, on only with the debug
     setting (settings.load_chemduck_shadow). `source` is the ReportTable of
-    a report or a local manifest.json (chem.Chem.shadow). A load is tens of
-    seconds on a real report (89 s for 557,691 rows, 2026-10-29), which is
-    why it is here.
+    a report (chem.Chem.shadow), or a parquet source: (address, manifest),
+    the address the store opened and the manifest it parsed.
+
+    A parquet source is opened through its published sidecars when it has
+    current ones (Chem.shadow_published): about a second, the results read
+    from the partitions where they are. Without sidecars a local source is
+    loaded row by row instead, and an http one is not opened: loading every
+    row of a remote facility for a debug comparison is a download of the
+    whole of it. `how` says which ran ("sidecars", "load"). A load is tens
+    of seconds on a real report (89 s for 557,691 rows, 2026-10-29), which
+    is why this is a task.
 
     Its connection is created here and used on the main thread afterwards,
     crossing threads once, as FetchManifestTask's does. It is a database of
@@ -833,14 +841,36 @@ class ChemShadowTask(_BaseTask):
         self.chem = None
         self.seconds = None
         self.rows = None
+        self.how = None
 
     def run(self):
+        import os
         import time
         began = time.perf_counter()
         try:
             from .chem import Chem
-            chem = Chem.shadow(self.rows_from, self.path)
-            self.rows = chem.cur.execute("SELECT count(*) FROM results").fetchone()[0]
+            if isinstance(self.rows_from, tuple):
+                address, manifest = self.rows_from
+                folder = os.path.splitext(self.path)[0] + "_sidecars"
+                chem = Chem.shadow_published(address, manifest, self.path, folder)
+                if chem is not None:
+                    self.how = "sidecars"
+                else:
+                    from .store import ReportStore
+                    local = ReportStore._local_path(address) or (
+                        address if "://" not in address else None)
+                    if local is None:
+                        return self._fail(
+                            "this http source has no published sidecars (chemduck/ beside "
+                            "manifest.json); loading every row of a remote facility for "
+                            "the shadow is not attempted")
+                    chem = Chem.shadow(os.path.join(local, ReportStore.MANIFEST_NAME),
+                                       self.path)
+                    self.how = "load"
+            else:
+                chem = Chem.shadow(self.rows_from, self.path)
+                self.how = "load"
+            self.rows = chem.cur.execute("SELECT count(*) FROM results").fetchall()[0][0]
         except Exception as exc:               # noqa: BLE001 - logged, never shown
             return self._fail("%s: %s" % (type(exc).__name__, str(exc).splitlines()[0]
                                           if str(exc) else ""))
