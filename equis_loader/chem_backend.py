@@ -7,15 +7,26 @@ Chemistry box, or EQUIS_CHEMDUCK=backend in QGIS's environment) the panel's
 
     aggregate      a map: aggregate_points, one point per location by the
                    plugin's own rule across a location's points (below)
-    count_for      the footer: point_counts
+    count_for      the footer: the published point_catalog, else point_counts
     series         a location's time series: point_series
     series_many    sparklines and the roll: point_series, one call for all
+    analytes, matrices, fractions_for
+                   the pickers: the published point_catalog, else the store
 
-Everything else is the store's, unchanged: the pickers' lists, locations
-and their geometry, report columns, export, the Analysis tab's pivots
-(`thread_view`), the unit and fraction guards. Those are lists and
-plumbing, or the plan's later phases (4: the Analysis tab), not the
-click-time chemistry rules.
+Everything else is the store's, unchanged: the analytic-method list
+(ChemDuck keeps method classes, not methods), locations and their geometry,
+report columns, export, the Analysis tab's pivots (`thread_view`), the unit
+and fraction guards. Those are lists and plumbing, or the plan's later
+phases (4: the Analysis tab), not the click-time chemistry rules.
+
+THE PUBLISHED COUNTS. A source published with ChemDuck's point_catalog
+sidecar (point_counts' rows, counted once by location for every analyte)
+answers the footer and the pickers from that table: 0.04 s a count against
+0.4-0.5 s live at Facility A (2026-11-27), and the same numbers, which
+ChemDuck's test_point_catalog holds. It keeps sample types and the
+reportable flag; a date range, a depth or unit filter, or several matrices
+need every result, and those counts are live (Chem.catalog_reason). A
+publish older than the catalog has none, and everything is live as before.
 
 WHERE CHEMDUCK CAN'T BE ASKED, THE STORE ANSWERS, AND SAYS SO. Excluded
 non-detects (the plan's decision 1), an analytic-method filter (ChemDuck has
@@ -45,10 +56,15 @@ are blank. Phase 2 of the plan.
 Imports no QGIS, like store.py and chem.py.
 """
 from . import report_data as rd
+from .chem import FRACTION_NAME
 from .chem_parity import best
 
 CHEMDUCK = "chemduck"
 STORE = "store"
+# A note's why when ChemDuck answered from the published point_catalog.
+PUBLISHED = "from the published counts (point_catalog)"
+# The panel's fraction code for ChemDuck's name of it ('Dissolved' -> 'D').
+FRACTION_CODE = {name: code for code, name in FRACTION_NAME.items()}
 
 
 def _unsupported(non_detect, method=None, detected_only=False, fraction=None):
@@ -148,6 +164,17 @@ class ChemBackend(object):
             self._note(question, STORE, why)
             return self.store.count_for(chemical, cas_rn, detected_only, non_detect,
                                         matrix, fraction, method)
+        if self.chem.catalog_reason(matrix) is None:
+            try:
+                answer = self.chem.catalog_counts(chemical, matrix=matrix, fraction=fraction)
+            except Exception:                  # noqa: BLE001 - asked live below
+                # A refusal (point_counts' own, in the same words) or a
+                # catalog that won't read: the live call says which, and
+                # its refusal sends the count to the store as before.
+                pass
+            else:
+                self._note(question, CHEMDUCK, PUBLISHED)
+                return answer
         try:
             answer = self.chem.counts(chemical, matrix=matrix, fraction=fraction)
         except Exception as exc:               # noqa: BLE001 - said, then the store
@@ -156,6 +183,78 @@ class ChemBackend(object):
                                         matrix, fraction, method)
         self._note(question, CHEMDUCK)
         return answer
+
+    # ------------------------------------------------------------ pickers
+
+    def _summary(self):
+        """The published summary under the scope set now, or None when the
+        catalog can't answer it (and the store's lists stand)."""
+        if self.chem.catalog_reason() is not None:
+            return None
+        try:
+            return self.chem.catalog_summary()
+        except Exception:                      # noqa: BLE001 - the store's lists
+            return None
+
+    @staticmethod
+    def _codes(wanted):
+        """A matrix choice as the store compares it: upper-cased codes, or
+        None for no filter (None, or an empty collection)."""
+        codes = [str(c or "").strip().upper() for c in (wanted or ())]
+        return set(codes) if codes else None
+
+    def analytes(self, matrix=rd.ALL_MATRICES):
+        """The analyte offer, in the store's shape ({chemical, cas_rn,
+        count}, case-insensitively by name): ChemDuck's results per analyte
+        and CAS under the scope set now."""
+        summary = self._summary()
+        if summary is None:
+            return self.store.analytes(matrix)
+        codes = self._codes(matrix)
+        counts = {}
+        for row in summary:
+            if codes is not None and str(row["matrix"] or "").upper() not in codes:
+                continue
+            key = (row["analyte"] or "", row["cas_number"] or "")
+            if key[0]:
+                counts[key] = counts.get(key, 0) + int(row["n_results"] or 0)
+        ordered = sorted(counts.items(), key=lambda kv: (kv[0][0].lower(), kv[0]))
+        return [{"chemical": name, "cas_rn": cas, "count": n} for (name, cas), n in ordered]
+
+    def matrices(self):
+        """The matrix offer, in the store's shape ({matrix, count}, most
+        results first): ChemDuck's results per matrix."""
+        summary = self._summary()
+        if summary is None:
+            return self.store.matrices()
+        counts = {}
+        for row in summary:
+            code = str(row["matrix"] or "").upper()
+            counts[code] = counts.get(code, 0) + int(row["n_results"] or 0)
+        ordered = sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))
+        return [{"matrix": code, "count": n} for code, n in ordered]
+
+    def fractions_for(self, chemical, cas_rn=None, matrix=rd.ALL_MATRICES):
+        """The fraction codes an analyte has in the matrices chosen, as the
+        store gives them (the panel's codes: ChemDuck's 'Dissolved' is
+        'D'), matched by CAS when one is given, as the store matches."""
+        summary = self._summary()
+        if summary is None:
+            return self.store.fractions_for(chemical, cas_rn, matrix)
+        codes = self._codes(matrix)
+        found = set()
+        for row in summary:
+            if cas_rn:
+                if (row["cas_number"] or "") != cas_rn:
+                    continue
+            elif (row["analyte"] or "") != (chemical or ""):
+                continue
+            if codes is not None and str(row["matrix"] or "").upper() not in codes:
+                continue
+            name = str(row["fraction"] or "").strip()
+            if name:
+                found.add(FRACTION_CODE.get(name, name).upper())
+        return sorted(found)
 
     # -------------------------------------------------------------- series
 

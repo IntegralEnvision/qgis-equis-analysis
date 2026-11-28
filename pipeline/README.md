@@ -302,7 +302,9 @@ stay valid.
 
 `chemduck_sidecars.py --root data/<name>` writes `data/<name>/chemduck/`:
 the small tables ChemDuck derives from the partitions (locations, samples,
-catalogues, its settings and load report), its SQL, and
+catalogues, `point_catalog` - every analyte's counts by location, which
+the plugin's footer and pickers read instead of every result - its
+settings and load report), its SQL, and
 `sql/results_view.sql`, which makes `results` a view over the partitions
 themselves. With them a reader opens the facility as ChemDuck in about a
 second and reads results straight from the partitions; without them it

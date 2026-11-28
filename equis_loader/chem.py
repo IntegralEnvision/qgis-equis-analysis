@@ -31,6 +31,11 @@ SHADOW_THREADS = 4
 # Where a publish puts ChemDuck's sidecars, beside manifest.json: the
 # pipeline's chemduck_sidecars.FOLDER, and integrator's.
 SIDECARS = "chemduck"
+# The sidecar holding point_counts' rows counted once for every analyte
+# (ChemDuck's point_catalog_rows): what the footer and the pickers read when
+# the panel's scope is one it keeps. A publish older than it has none, and
+# every count is then the live point_counts, as before.
+CATALOG = "point_catalog"
 
 
 class SidecarsStale(Exception):
@@ -106,6 +111,12 @@ class Chem(object):
         self.schema = schema
         self.cur = chemduck.schema_cursor(con, schema)
         self._scope = rd.row_scope(None, None, None)
+        # Whether point_catalog is here to read (a publish that wrote it, or
+        # a load that built it), and its per-variable summary by sample-type
+        # scope: the catalog never changes under an open Chem, so neither
+        # does a summary of it.
+        self.catalog = False
+        self._summaries = {}
 
     @classmethod
     def load(cls, con, source, mapping=None, schema=SCHEMA):
@@ -115,14 +126,34 @@ class Chem(object):
         plugin's own DuckDB bundle does not)."""
         _quiet(chemduck.load_source, con, source,
                chemduck.load_mapping(mapping or chemduck.DEFAULT_MAPPING), schema=schema)
-        return cls(con, schema)
+        chem = cls(con, schema)
+        chem.build_catalog()
+        return chem
 
     @classmethod
     def open_published(cls, con, folder, partition_files, schema=SCHEMA):
         """ChemDuck over a parquet facility through the sidecars its
         publish wrote, the way Chemrooms opens it in the browser."""
-        _quiet(chemduck.open_consumer, con, folder, partition_files, schema=schema)
-        return cls(con, schema)
+        sidecars = _quiet(chemduck.open_consumer, con, folder, partition_files, schema=schema)
+        chem = cls(con, schema)
+        chem.catalog = CATALOG in ((sidecars or {}).get("tables") or {})
+        return chem
+
+    def build_catalog(self):
+        """Make point_catalog from the rows loaded, as a publish writes it:
+        one pass over every result, so the counts after it read a table.
+
+        For a load (Chem.load), which has no sidecars to bring one. A
+        ChemDuck without point_catalog_rows (older than the catalog) leaves
+        `catalog` False and every count live."""
+        try:
+            self.cur.execute("CREATE OR REPLACE TABLE %s AS FROM point_catalog_rows()" % CATALOG)
+        except Exception:                      # noqa: BLE001 - no catalog: counts stay live
+            self.catalog = False
+            return False
+        self.catalog = True
+        self._summaries = {}
+        return True
 
     @classmethod
     def shadow(cls, source, path, threads=SHADOW_THREADS):
@@ -425,6 +456,65 @@ class Chem(object):
         rows = self._call("point_counts", chemical, self._params(matrix, fraction))
         row = rows[0] if rows else {}
         return int(row.get("n_locations") or 0), int(row.get("n_results") or 0)
+
+    # ------------------------------------------------- the published counts
+
+    def catalog_reason(self, matrix=rd.ALL_MATRICES):
+        """Why point_catalog can't answer under the row scope set now (and
+        this matrix choice), or None when it can.
+
+        The catalog keeps sample types and the reportable flag, and counts
+        by location; it keeps no dates, depths or units, and combining
+        matrices is ChemDuck's matrix-class rule, which only a live call
+        applies. Any of those is a live call."""
+        if not self.catalog:
+            return "no published counts (point_catalog) for this source"
+        start, end, _codes, depth, units = self._scope
+        if start is not None or end is not None:
+            return "a date range"
+        if depth is not None:
+            return "a depth filter"
+        if units:
+            return "a unit filter"
+        if len([m for m in (matrix or ()) if str(m or "").strip()]) > 1:
+            return "several matrices"
+        return None
+
+    def _catalog_params(self, matrix=rd.ALL_MATRICES, fraction=rd.ANY_FRACTION):
+        """_params, kept to what the catalog's readers take. A parameter left
+        over is a filter they cannot apply: refused here, never dropped
+        (ChemDuck would refuse it too, as an unknown parameter)."""
+        params = self._params(matrix, fraction)
+        kept = {k: params.get(k) for k in ("p_matrix", "p_fraction", "p_sample_types")}
+        left = sorted(k for k, v in params.items() if v is not None and k not in kept)
+        if left:
+            raise ValueError("the published counts cannot apply %s" % ", ".join(left))
+        return kept
+
+    def catalog_counts(self, chemical, matrix=rd.ALL_MATRICES, fraction=rd.ANY_FRACTION):
+        """counts(), read off point_catalog: the same (locations, results)
+        for the scopes it keeps (ChemDuck's test_point_catalog holds the two
+        equal), refusing what point_counts refuses. Ask catalog_reason
+        first."""
+        rows = self._call("point_catalog_counts", chemical,
+                          self._catalog_params(matrix, fraction))
+        row = rows[0] if rows else {}
+        return int(row.get("n_locations") or 0), int(row.get("n_results") or 0)
+
+    def catalog_summary(self):
+        """point_catalog_summary under the sample types set now: a row per
+        (analyte, CAS, matrix, fraction) with its results and locations,
+        for the pickers. Cached by scope, since the catalog never changes
+        under an open Chem."""
+        params = {k: v for k, v in self._catalog_params().items()
+                  if k == "p_sample_types" and v is not None}
+        key = tuple(params.get("p_sample_types") or ()) if params else None
+        if key not in self._summaries:
+            sql = "FROM point_catalog_summary(%s)" % ", ".join("%s := ?" % k for k in params)
+            cursor = self.cur.execute(sql, list(params.values()))
+            names = [d[0] for d in cursor.description]
+            self._summaries[key] = [dict(zip(names, row)) for row in cursor.fetchall()]
+        return self._summaries[key]
 
     def series(self, locations, chemical, non_detect=rd.ND_HALF, matrix=rd.ALL_MATRICES,
                fraction=rd.ANY_FRACTION):

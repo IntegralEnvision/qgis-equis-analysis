@@ -15,6 +15,10 @@ A consumer (chemrooms, in DuckDB-WASM) reads:
               position_summary (v_method_classes, v_positions), materialized here so a
               browser never scans every result to fill a dropdown, plus the
               aggregation_rules catalog from sql/07_catalogs.sql.
+  point_catalog  point_counts' rows counted by location for every analyte
+              (point_catalog_rows), so a click's count and a picker's offer
+              are read off a table (point_catalog_counts,
+              point_catalog_summary) rather than every result.
 
 and runs the ChemDuck views and macros unchanged on top. That is the point:
 the domain rules live in ChemDuck's SQL once, whichever way the data arrives.
@@ -573,6 +577,12 @@ def publish(manifest_path, out_dir, mapping_path=DEFAULT_MAPPING, x_col=None,
         "method_class_summary": write("SELECT * FROM v_method_classes ORDER BY ALL",
                                       "method_class_summary"),
         "position_summary": write("SELECT * FROM v_positions ORDER BY ALL", "position_summary"),
+        # point_counts' rows counted once for every analyte, by location
+        # (08_aggregate_points.sql): a host's footer and pickers read it with
+        # point_catalog_counts and point_catalog_summary instead of reading
+        # every result of an analyte per click.
+        "point_catalog": write("SELECT * FROM point_catalog_rows() ORDER BY ALL",
+                               "point_catalog"),
         # the dataset's settings: its non-detect policy, version resolved now
         "chemduck_settings": write("SELECT * FROM chemduck_settings ORDER BY key",
                                    "chemduck_settings"),

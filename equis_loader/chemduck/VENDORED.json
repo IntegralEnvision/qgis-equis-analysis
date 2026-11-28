@@ -1,18 +1,18 @@
 {
  "note": "Written by tools/vendor_chemduck.py. Do not edit these files: re-vendor, and tools/test_chemduck_vendor.py checks them.",
  "repository": "https://github.com/IntegralEnvision/chemduck.git",
- "commit": "b5fdcd97805c68068d540866a827bb4c9e437103",
- "subject": "Merge pull request #21 from IntegralEnvision/sidecars-deterministic",
+ "commit": "964ad32381d8bd11f3366ea8ab0f3edf001059ac",
+ "subject": "Merge pull request #22 from IntegralEnvision/point-catalog",
  "version": "0.2.0",
- "vendored": "2026-11-25",
+ "vendored": "2026-11-27",
  "files": {
   "__init__.py": {
    "bytes": 3513,
    "sha256": "6de7bca0b5143ee6186db808bf146ace60f0440fa267bc5888c633ba5ff3c2de"
   },
   "arii_hybrid.py": {
-   "bytes": 36339,
-   "sha256": "a8eb7c979eb934f98827f398d55db9a1d8da019e3fb43b687e5804dbb80c4fb8"
+   "bytes": 37016,
+   "sha256": "5622519d5adffc6988d2ca6cef9efc5d8c43578a5a2ab8c1576ba82f0db7b1fb"
   },
   "eav_helpers.py": {
    "bytes": 3740,
@@ -59,8 +59,8 @@
    "sha256": "1c0f61d5c0f44831bf15ac80aded08866b6adbfd038a866795226e67ca88b23f"
   },
   "sql/08_aggregate_points.sql": {
-   "bytes": 83608,
-   "sha256": "24ffc70671904953fa287dfcb93dc6ce378507b2316ac7dde06b599a54204f36"
+   "bytes": 92026,
+   "sha256": "cb20467dce49d6f285f0192052c300575d733b46eb41c8ebf349d9b977d82f7b"
   },
   "sql/08_aggregate_results.sql": {
    "bytes": 18313,

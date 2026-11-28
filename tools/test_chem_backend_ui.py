@@ -7,8 +7,9 @@ Python; this holds the panel's switch:
 - set to "ChemDuck answers", a parquet source loads ChemDuck, and once it
   lands `_analysis` is ChemDuck's: a map built through the panel's button
   is named for ChemDuck and draws ChemDuck's values (a field duplicate left
-  out where the store counts it), the footer counts and a location's series
-  are ChemDuck's;
+  out where the store counts it), the footer counts (read off the published
+  point_catalog) and the analyte offer are ChemDuck's, and so is a
+  location's series;
 - a question ChemDuck can't be asked (a method filter) draws the store's
   map, not named for ChemDuck, and the panel says why;
 - set back to "Plugin rules", the store answers and ChemDuck is dropped;
@@ -65,6 +66,7 @@ os.environ.pop("EQUIS_CHEMDUCK", None)
 import chem_fixture as fx                      # noqa: E402
 from test_offline import FakeIface             # noqa: E402
 from equis_loader import chem as ch            # noqa: E402
+from equis_loader.chem_backend import PUBLISHED  # noqa: E402
 from equis_loader import chemduck as cd        # noqa: E402
 from equis_loader import settings as settings_store  # noqa: E402
 from equis_loader.dialog import EquisDialog    # noqa: E402
@@ -184,11 +186,20 @@ try:
           "a non-reportable result",
           differs and all(chem_drawn.get(loc) != store_drawn.get(loc) for loc in differs),
           {loc: (chem_drawn.get(loc), store_drawn.get(loc)) for loc in differs})
+    analysis.take_notes()
     count = analysis.count_for("Arsenic", matrix=("WG",), fraction=("T",))
-    check("the footer count is ChemDuck's (point_counts)",
-          count == panel._chem_shadow.counts("Arsenic", matrix=("WG",), fraction=("T",))
+    note = analysis.take_notes()[-1]
+    check("the footer count is ChemDuck's, read off the published counts (point_catalog), "
+          "equal to the live point_counts",
+          panel._chem_shadow.catalog and note[2] == PUBLISHED
+          and count == panel._chem_shadow.counts("Arsenic", matrix=("WG",), fraction=("T",))
           and count != panel._report_store.count_for("Arsenic", matrix=("WG",),
-                                                     fraction=("T",)), count)
+                                                     fraction=("T",)), (count, note))
+    offer = {r["chemical"]: r["count"] for r in analysis.analytes(("WG",))}
+    store_offer = {r["chemical"]: r["count"] for r in panel._report_store.analytes(("WG",))}
+    check("the analyte offer's counts are the published counts' (ChemDuck's, fewer than "
+          "the store's for Arsenic)", offer.get("Arsenic", 0) < store_offer.get("Arsenic", 0)
+          and set(offer) <= set(store_offer), (offer.get("Arsenic"), store_offer.get("Arsenic")))
     series = analysis.series("AGREE", "Arsenic", matrix=("WG",), fraction=("T",))
     check("a location's time series is ChemDuck's (point_series)",
           series and all("sample_id" in r for r in series), len(series))
