@@ -567,6 +567,60 @@ raised with ChemDuck.
 
 ### Phase 2 — maps
 
+> *An experimental switch, 2026-11-27, ahead of the decisions.* A
+> **Chemistry** box in the panel's connection row offers three modes,
+> saved per profile: Plugin rules, ChemDuck shadow (log only), and
+> ChemDuck answers. `EQUIS_CHEMDUCK=backend` (or `shadow`, `off`) in QGIS's
+> environment sets the mode for a session, is not saved, and disables the
+> box.
+>
+> In "ChemDuck answers", once ChemDuck has landed beside the store,
+> `_analysis` is a `ChemBackend` (`equis_loader/chem_backend.py`). These
+> are ChemDuck's:
+> - **maps:** `aggregate_points`;
+> - **the footer count:** `point_counts`;
+> - **one location's time series, sparklines and the roll:**
+>   `point_series`.
+>
+> These stay the store's: pickers, locations, report columns, export, the
+> unit and fraction guards, unaggregated maps, and the Analysis tab
+> (phase 4).
+>
+> Where ChemDuck can't be asked, the store answers, and the status line
+> and the log say why: excluded non-detects (decision 1), a method filter,
+> detected-only, and ChemDuck's own refusals (mixed units, a unit
+> contradicting its matrix). A map ChemDuck answered has "ChemDuck" in its
+> layer and table names. Choices taken provisionally, pending decisions 1
+> and 2:
+> - **Several points at one location:** the point the plugin's own rule
+>   would pick (`chem_parity.best`), not `rollup_points`.
+> - **Report columns:** none on a ChemDuck layer yet, because a ChemDuck
+>   point is not one of the store's rows.
+>
+> On integrator's Facility A release over Azure, in QGIS 4.2.3's Python
+> (Iron, MWS, dissolved; three warm runs, 2026-11-27):
+>
+> | Call | Store | ChemDuck |
+> | --- | --- | --- |
+> | Map, most recent | 0.04 s* | 0.52 s |
+> | Map, maximum | 0.03–0.04 s | 0.53–0.54 s |
+> | Footer count | 0.01 s | 0.19–0.20 s |
+> | Sparklines, 138 locations | 0.10–0.63 s | 1.01–1.18 s |
+> | One location's series | 0.01 s | 0.33–0.36 s |
+>
+> \*Warm; its first call took 3.79 s. The footer counts were identical,
+> 138 locations and 56,489 results.
+>
+> Found by its test, and not the switch's: two location codes that differ
+> only in case (the fixture's `Case-Code` and `CASE-CODE`) share one value
+> in any layer, the store's too. The layer builder joins summaries to
+> features case-insensitively, the later entry wins, and the store's order
+> varies between builds, so the shared value changes from one build to the
+> next.
+>
+> Tests: `tools/test_chem_backend.py` (18 checks) and
+> `tools/test_chem_backend_ui.py` (QGIS, 16 checks, through the panel).
+
 - `aggregate` → `aggregate_points`, then `rollup_points` where a location has
   several points. **The panel asks how to roll up** when it must (decision 2);
   a location with one point is unaffected.

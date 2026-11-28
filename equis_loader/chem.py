@@ -352,13 +352,41 @@ class Chem(object):
         ReportStore.aggregate returns (value, detect, date, unit,
         at_limit), so a caller can set the two side by side.
         """
+        params = self._params(matrix, fraction, method_class, locations, reportable_only,
+                              sample_types)
+        params.update(p_event_agg=EVENT_AGG[how],
+                      p_display_factor=self._factor(non_detect))
+        given = {k: v for k, v in params.items() if v is not None}
+        # The whole point key, so the order is the data's and not the
+        # threads': two points at one depth (a field and a lab method class)
+        # otherwise came back in either order from one run to the next.
+        sql = ("FROM aggregate_points(?%s) ORDER BY location_id, matrix, top_depth, "
+               "bottom_depth, position, fraction, meas_basis, method_class"
+               % "".join(", %s := ?" % k for k in given))
+        cursor = self.cur.execute(sql, [chemical] + list(given.values()))
+        names = [d[0] for d in cursor.description]
+        out = []
+        for row in cursor.fetchall():
+            point = dict(zip(names, row))
+            point.update(_plugin_keys(point))
+            out.append(point)
+        return out
+
+    @staticmethod
+    def _factor(non_detect):
         if non_detect not in DISPLAY_FACTOR:
             raise ValueError("non-detect choice %r has no ChemDuck display factor "
                              "(docs/chemduck-adoption-plan.md, decision 1)" % (non_detect,))
+        return DISPLAY_FACTOR[non_detect]
+
+    def _params(self, matrix=rd.ALL_MATRICES, fraction=rd.ANY_FRACTION, method_class=None,
+                locations=None, reportable_only=None, sample_types=None):
+        """The macro parameters every engine call shares: the row scope, and
+        the panel's matrix, fraction and location choices in ChemDuck's
+        terms. One place, so a map, its footer count and its series are
+        asked the same question."""
         start, end, codes, depth, units = self._scope
-        params = {"p_event_agg": EVENT_AGG[how],
-                  "p_display_factor": DISPLAY_FACTOR[non_detect],
-                  "p_start_date": start, "p_end_date": end,
+        params = {"p_start_date": start, "p_end_date": end,
                   "p_method_class": method_class,
                   "p_locations": list(locations) if locations is not None else None,
                   "p_reportable_only": reportable_only}
@@ -382,20 +410,57 @@ class Chem(object):
             sorted(codes) if codes else None)
         if types is not None:
             params["p_sample_types"] = list(types)
+        return params
+
+    def _call(self, macro, chemical, params, order=""):
         given = {k: v for k, v in params.items() if v is not None}
-        # The whole point key, so the order is the data's and not the
-        # threads': two points at one depth (a field and a lab method class)
-        # otherwise came back in either order from one run to the next.
-        sql = ("FROM aggregate_points(?%s) ORDER BY location_id, matrix, top_depth, "
-               "bottom_depth, position, fraction, meas_basis, method_class"
-               % "".join(", %s := ?" % k for k in given))
+        sql = "FROM %s(?%s)%s" % (macro, "".join(", %s := ?" % k for k in given), order)
         cursor = self.cur.execute(sql, [chemical] + list(given.values()))
         names = [d[0] for d in cursor.description]
-        out = []
-        for row in cursor.fetchall():
-            point = dict(zip(names, row))
-            point.update(_plugin_keys(point))
-            out.append(point)
+        return [dict(zip(names, row)) for row in cursor.fetchall()]
+
+    def counts(self, chemical, matrix=rd.ALL_MATRICES, fraction=rd.ANY_FRACTION):
+        """point_counts: (locations, results) for the panel's footer, by the
+        same scope a map would select from (the store's count_for)."""
+        rows = self._call("point_counts", chemical, self._params(matrix, fraction))
+        row = rows[0] if rows else {}
+        return int(row.get("n_locations") or 0), int(row.get("n_results") or 0)
+
+    def series(self, locations, chemical, non_detect=rd.ND_HALF, matrix=rd.ALL_MATRICES,
+               fraction=rd.ANY_FRACTION):
+        """point_series for many locations at once: {location: [rows]},
+        each row the store's series keys (date, value, unit, detect,
+        at_limit) plus ChemDuck's own, oldest first; an undated sample is
+        left out, as the store leaves it out (it can't be plotted).
+
+        A location sampled at several points (depths, method classes) has
+        each point's samples, merged by date: the store's series mixes them
+        the same way, and plotting them apart is the plan's phase 3.
+        point_series takes one matrix, so several are asked one at a time.
+        """
+        matrices = [str(m) for m in (matrix or ()) if str(m or "").strip()] or [None]
+        out = {}
+        for one in matrices:
+            params = self._params((one,) if one else None, fraction, locations=locations)
+            params["p_display_factor"] = self._factor(non_detect)
+            for row in self._call("point_series", chemical, params):
+                if row.get("sample_date") is None or row.get("result") is None:
+                    continue
+                detected = row.get("detected")
+                row.update({
+                    "date": row.get("sample_datetime") or row.get("sample_date"),
+                    "value": row.get("result"),
+                    "unit": row.get("units") or "",
+                    "detect": "" if detected is None else ("Y" if detected else "N"),
+                    "at_limit": detected is False,
+                })
+                out.setdefault(row["location_id"], []).append(row)
+        for rows in out.values():
+            rows.sort(key=lambda r: (str(r["sample_date"]), str(r.get("top_depth")),
+                                     str(r.get("method_class"))))
+        if locations is not None:
+            for code in locations:
+                out.setdefault(str(code), [])
         return out
 
     def by_location(self, *args, **kwargs):

@@ -26,6 +26,7 @@ python tools/test_chemduck_parity.py   # the adapter's map vs the store's: every
 python tools/test_chemduck_parity.py --manifest <dir>/manifest.json --pub <dir>   # the same on a real facility
 python tools/test_chem_shadow.py       # the panel's ChemDuck shadow: built from a report, compared, logged
 python tools/test_chem_sidecars.py     # the shadow through published sidecars, over http and local; stale ones refused
+python tools/test_chem_backend.py      # the Chemistry switch's backend: maps, counts, series from ChemDuck; fallbacks said
 python tools/analysis_preview.py       # the Analysis tab in a browser, no QGIS (--shots DIR: screenshots)
 python tools/profile_chemduck.py --manifest <facility>/manifest.json --out <dir>   # ChemDuck through a plugin session: the open per statement, every click, DuckDB profiles (--explain); run under plain Python AND QGIS
 
@@ -63,6 +64,8 @@ tools/test_import_smoke.py   (imports, and the export reading the table when the
 tools/test_analysis_task.py   (the Analysis chooser's worker, in the task manager)
 tools/test_chem_shadow_ui.py   (the ChemDuck shadow: off by default; on, each map built
                                 logs ChemDuck beside the store; settings sandboxed)
+tools/test_chem_backend_ui.py   (the Chemistry box: ChemDuck answering the hot path through
+                                 the panel, fallbacks said, EQUIS_CHEMDUCK; sandboxed)
 tools/try_scatter.py   tools/try_analysis_tab.py   (console probes: US-24, the Analysis tab)
 tools/try_overlay.py   (NOT a console probe: run by `qgis --code` in a throwaway
                         profile; drives the overlay shell end to end, 21 checks, quits)
@@ -79,8 +82,8 @@ shipped unbundled plugin, which does run on 3.34).
 ## The one structural rule
 
 **`equis_api.py`, `report_data.py`, `sparkline.py`, `cache.py`, `store.py`,
-`chem.py`, `chem_parity.py`, `parquet_address.py` and the vendored `chemduck/`
-import no QGIS.** That is why
+`chem.py`, `chem_parity.py`, `chem_backend.py`, `parquet_address.py` and the
+vendored `chemduck/` import no QGIS.** That is why
 1,500+ lines of tests run under a plain interpreter, and it is the reason
 most of this codebase can be verified
 without a GUI. Anything needing a path takes it from the caller, as
